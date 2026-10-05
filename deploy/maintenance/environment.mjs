@@ -71,3 +71,13 @@ export function describeError(error) {
   }
   return out
 }
+
+/**
+ * 残留门决策：血统残留只对**非 noop 的 install** 构成障碍（会与新一轮施缝冲突）。
+ * uninstall / noop-install 下这些备份是**当前安装的自管产物**（卸载由"确切备份归档"
+ * 收口移入证据目录），拦截它们会把同代卸载/幂等重装误杀——2026-10-05 188 实测踩过。
+ */
+export function leftoverDecision({ action, noop, prepareEnv, found }) {
+  if (!found || action !== 'install' || noop) return 'allow'
+  return prepareEnv ? 'quarantine' : 'refuse'
+}

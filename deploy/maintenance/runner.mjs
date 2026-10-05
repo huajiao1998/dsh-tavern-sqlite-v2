@@ -9,7 +9,7 @@ import { maintenanceBudget } from './budget.mjs'
 import { options, runtimeFor, assertTargetAllowed, packagePolicyArgs } from './target.mjs'
 import { createDriver } from './driver.mjs'
 import { sourceAccess, assertPackageSource, assertSourceUninstalled, rehearseSource, finishSourceUninstall, STANDARD_RECORD } from './source.mjs'
-import { findLegacyLeftovers, quarantineLeftovers, describeError } from './environment.mjs'
+import { findLegacyLeftovers, quarantineLeftovers, leftoverDecision, describeError } from './environment.mjs'
 export { options, packagePolicyArgs }
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 export function packageFiles(root) {
@@ -49,10 +49,12 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
     if (prepareEnv) await step('环境预修：systemd单元VM旗标（显式--prepare-env，备份可回滚）', () => driver.prepareEnvironment(action))
     state = await step('预检目标/本地运行时/装配（不复制依赖或存档、不认证）', () => driver.preflight(action))
     assertPackageSource(source, adapter)
-    // 旧代维护残留备份：写前显式处置——无授权即拒（列清单），有授权隔离到证据目录（只移不删）。
+    // 旧代维护残留备份：仅对非noop的install构成障碍（uninstall/noop时它们是当前安装的自管产物，
+    // 卸载由"确切备份归档"收口）——无授权即拒（列清单），有授权隔离到证据目录（只移不删）。
     const leftovers = findLegacyLeftovers(source.root)
-    if (leftovers.length) {
-      if (!prepareEnv) throw Error('目标树存在旧代维护备份（' + leftovers.length + ' 个，如 ' + leftovers[0] + '）：拒绝猜测覆盖；加 --prepare-env 可自动隔离到维护证据目录（只移动不删除）')
+    const decision = leftoverDecision({ action, noop: state.noop, prepareEnv, found: leftovers.length })
+    if (decision === 'refuse') throw Error('目标树存在旧代维护备份（' + leftovers.length + ' 个，如 ' + leftovers[0] + '）：拒绝猜测覆盖；加 --prepare-env 可自动隔离到维护证据目录（只移动不删除）')
+    if (decision === 'quarantine') {
       const moved = quarantineLeftovers(source.root, path.join(evidenceDir, 'leftovers'))
       progress('环境预修：已隔离旧代备份 ' + moved.length + ' 个 → ' + path.join(evidenceDir, 'leftovers'))
       if (findLegacyLeftovers(source.root).length) throw Error('隔离后仍检出血统残留，拒绝继续')

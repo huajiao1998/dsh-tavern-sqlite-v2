@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { rewriteExecStartVmFlag, findLegacyLeftovers, quarantineLeftovers, describeError } from '../deploy/maintenance/environment.mjs'
+import { rewriteExecStartVmFlag, findLegacyLeftovers, quarantineLeftovers, describeError, leftoverDecision } from '../deploy/maintenance/environment.mjs'
 import { options } from '../deploy/maintenance/target.mjs'
 import { createDriver } from '../deploy/maintenance/driver.mjs'
 
@@ -51,6 +51,14 @@ test('findLegacyLeftovers/quarantine：只认三类血统残留；隔离只移�
 test('options：--prepare-env 仅 install 可用（互斥在解析期拦截，先于目录解析）', () => {
   // 若 --prepare-env 未被接受为布尔开关，这里会抛「未知参数」而非互斥错误——两种失败可区分。
   assert.throws(() => options(['uninstall', '--home', '/tmp/definitely-not-a-home', '--prepare-env']), /仅用于 install/)
+})
+
+test('leftoverDecision：仅非noop的install拦截血统残留；uninstall/noop放行（自管产物由归档收口）', () => {
+  assert.equal(leftoverDecision({ action: 'install', noop: false, prepareEnv: false, found: 7 }), 'refuse')
+  assert.equal(leftoverDecision({ action: 'install', noop: false, prepareEnv: true, found: 7 }), 'quarantine')
+  assert.equal(leftoverDecision({ action: 'uninstall', noop: false, prepareEnv: false, found: 7 }), 'allow', '当前安装自管备份不得阻断卸载（188实测回归）')
+  assert.equal(leftoverDecision({ action: 'install', noop: true, prepareEnv: false, found: 7 }), 'allow', '幂等重装不拦自管备份')
+  assert.equal(leftoverDecision({ action: 'install', noop: false, prepareEnv: false, found: 0 }), 'allow')
 })
 
 test('describeError：cause 链并入一条消息（去重、限深）', () => {
