@@ -6,6 +6,7 @@ import { gunzipSync } from 'node:zlib'
 import path from 'node:path'
 import { createVariableArchive } from './lib/variable-archive.js'
 import { createChatProjectionReads, readProjectionHeader, readSqlSnapshot } from './lib/chat-projection-reads.js'
+import { revisions as componentRevisions } from './lib/component-revisions.js'
 import { createRollbackWorldbookHistory } from './lib/rollback-worldbook-history.js'
 
 // 本模块**不再直接 import 作者的三个模块**（copy-json-tree / chat-session-state / json-mutation）：
@@ -289,6 +290,24 @@ export function createChatSqliteStore(options = {}) {
       db.prepare(`INSERT INTO archive_head (id, revision, updated_at) VALUES (1, ?, ?)
         ON CONFLICT(id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at`).run(revision, at)
       if (useTransaction) db.exec('COMMIT')
+      // ---- D-3（2026-10-05）：K-1 轮边界检查点扩展到 archive.db ----
+      // 写入含新楼（追加轮次）的批次之后，把 WAL 帧并入主库 → 主库最多落后一轮，
+      // 拷 .db 只丢一轮（与 sessions 线 K-1 同式；有读者占用退 PASSIVE，异常不上抛）。
+      if (touchedIndices.length > 0 && !truncated) {
+        try {
+          const result = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get()
+          if (Number(result?.busy ?? 0) !== 0) {
+            db.prepare('PRAGMA wal_checkpoint(PASSIVE)').get()
+          }
+        } catch { /* 检查点失败不挡写入 */ }
+      }
+      // ---- 修A：按实际改动范围 bump 部件版本（投影缓存据此做选择性失效）----
+      // header 变了 = changed 集合非空（头字段有增删改）；messages 变了 = 有楼被写/截断/全量重写。
+      const compRev = componentRevisions(db)
+      const headerChanged = changed.size > 0
+      const messagesChanged = rewriteAll || touchedIndices.length > 0 || truncated
+      if (headerChanged) compRev.header++
+      if (messagesChanged) compRev.messages++
       const beforeMessages = readCache.get(chatId)?.state.chat.messages
       // 只在首读/失去证据时核全量；已知dense的不可变旧数组只校验本次写楼。
       density.set(storedMessages, !rewriteAll && density.get(beforeMessages) === true
