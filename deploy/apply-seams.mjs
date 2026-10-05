@@ -300,6 +300,21 @@ export function uninstallAllSeams({ appDir }) {
     if (syntax !== '') fail('卸载后 index.js 语法检查失败：' + syntax + '（请人工用备份还原）')
     rmSync(MANIFEST, { force: true })
   }
+  // 2026-10-06 修复：清扫孤儿 .pre-seams-*.bak（manifest 未引用的残留）——
+  // 卸载后残留的备份会在下次装回时被 ensureBackup 复用（哪怕内容已污染），
+  // 形成"卸载恢复出脏前像 → 锚点找不到"死循环（188 实测）。
+  // 只删孤儿：manifest 引用的备份由 finishSourceUninstall 归档，不在此处动。
+  const referencedBackups = new Set(entries.filter(e => e.backup).map(e => path.posix.normalize(e.backup)))
+  for (const dirRel of ['tavern-plugin/lib', 'tavern-plugin/lib/domain']) {
+    const dir = path.join(APP, dirRel)
+    if (!existsSync(dir)) continue
+    for (const name of readdirSafe(dir)) {
+      if (!/\.pre-seams-[\w.-]+\.bak$/.test(name)) continue
+      const rel = path.posix.join(dirRel, name)
+      if (referencedBackups.has(rel)) continue
+      try { unlinkSync(path.join(dir, name)) } catch { /* 清不了不挡卸载 */ }
+    }
+  }
   return { restored, mainRestored, hadMainManifest }
 }
 
@@ -314,7 +329,19 @@ function applyHostWrites({ indexText, nextIndex, changes, shimNeedsWrite, previo
     const dir = path.dirname(target)
     const prefix = path.basename(rel) + '.pre-seams-'
     const existing = readdirSafe(dir).filter(n => n.startsWith(prefix) && n.endsWith('.bak')).sort()[0]
-    if (existing) return path.posix.join(path.dirname(rel), existing)
+    if (existing) {
+      // 2026-10-06 修复：已有备份可能被污染（内容为缝合后版本，188 实测）。
+      // 校验备份不含本包接缝标记——含则删除重建，防卸载恢复出脏前像。
+      const existingPath = path.join(dir, existing)
+      try {
+        const backupText = readFileSync(existingPath, 'utf8')
+        if (/dsh-tavern-(?:storage-)?sqlite(?:-v[12])?|\[dsh-tavern-/.test(backupText)) {
+          unlinkSync(existingPath)
+        } else {
+          return path.posix.join(path.dirname(rel), existing)
+        }
+      } catch { /* 读不了就重建 */ }
+    }
     const backupRel = path.posix.join(path.dirname(rel), `${path.basename(rel)}.pre-seams-${ts}.bak`)
     copyFileSync(target, assertInside(APP, path.join(APP, backupRel)))
     backups.push(backupRel)

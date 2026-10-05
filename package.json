@@ -1,6 +1,6 @@
 {
   "name": "dsh-tavern-sqlite-v2",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "private": true,
   "type": "module",
   "description": "V2 完整功能版本线：SQLite权威存储与干净回退，保留当前服务端MVU、卡脚本执行和分类能力；原档只读、用户手动新ID分叉",
