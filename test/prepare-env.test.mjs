@@ -81,6 +81,32 @@ test('引导源头bootstrap.mjs：--prepare-env透传；install.sh/template无�
   assert.equal(template.includes('bootstrapOptions'), false, '模板不得内嵌第二份参数解析实现')
 })
 
+test('selectLocal 网络优先：本地候选须与发行版本一致才采用（2026-10-05 用户定）', async () => {
+  const mod = await import(new URL('../deploy/bootstrap.mjs', import.meta.url).href)
+  const base = mkdtempSync(path.join(os.tmpdir(), 'prep-env-select-'))
+  try {
+    const staleDir = path.join(base, 'stale'); mkdirSync(staleDir)
+    writeFileSync(path.join(staleDir, 'package.json'), JSON.stringify({ name: 'dsh-tavern-sqlite-v2', version: '0.1.2' }), 'utf8')
+    const sameDir = path.join(base, 'same'); mkdirSync(sameDir)
+    writeFileSync(path.join(sameDir, 'package.json'), JSON.stringify({ name: 'dsh-tavern-sqlite-v2', version: '0.1.8' }), 'utf8')
+    const cacheDir = path.join(base, 'cache'); mkdirSync(cacheDir)
+    writeFileSync(path.join(cacheDir, 'dsh-tavern-sqlite-v2-0.1.8.tgz'), 'x', 'utf8')
+    const empty = path.join(base, 'empty'); mkdirSync(empty)
+    // 旧代已装目录/工作区副本 + 新发行版本 → 不采用（null ⇒ 引导层下载网络包）
+    assert.equal(mod.selectLocal({ action: 'uninstall', installed: staleDir, cwd: empty, cache: empty, version: '0.1.8' }), null)
+    assert.equal(mod.selectLocal({ action: 'install', installed: staleDir, cwd: empty, cache: empty, version: '0.1.8' }), null)
+    assert.equal(mod.selectLocal({ action: 'install', cwd: staleDir, cache: empty, version: '0.1.8' }), null)
+    // 同版本：已装目录/工作区副本/缓存 tgz 均可采用
+    assert.deepEqual(mod.selectLocal({ action: 'uninstall', installed: sameDir, cwd: empty, cache: empty, version: '0.1.8' }), { kind: 'directory', file: sameDir })
+    assert.deepEqual(mod.selectLocal({ action: 'install', cwd: sameDir, cache: empty, version: '0.1.8' }), { kind: 'directory', file: sameDir })
+    assert.deepEqual(mod.selectLocal({ action: 'install', cwd: empty, cache: cacheDir, version: '0.1.8' }), { kind: 'archive', file: path.join(cacheDir, 'dsh-tavern-sqlite-v2-0.1.8.tgz') })
+    // --package 显式人工指定不受版本一致性约束
+    assert.deepEqual(mod.selectLocal({ action: 'install', local: staleDir, installed: staleDir, cwd: base, cache: empty, version: '0.1.8' }), { kind: 'directory', file: staleDir })
+    // 未安装时卸载 → absent 不下载
+    assert.deepEqual(mod.selectLocal({ action: 'uninstall', cwd: empty, cache: empty, version: '0.1.8' }), { kind: 'absent' })
+  } finally { rmSync(base, { recursive: true, force: true }) }
+})
+
 test('describeError：cause 链并入一条消息（去重、限深）', () => {
   const inner = new Error('内层锚点漂移')
   const mid = new Error('标准接入失败，已恢复本次源码前像', { cause: inner })

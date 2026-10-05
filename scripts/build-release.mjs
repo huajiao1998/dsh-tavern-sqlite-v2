@@ -25,7 +25,9 @@ fs.writeFileSync(path.join(packRoot, 'package.json'), JSON.stringify({ ...pkg, f
 fs.writeFileSync(path.join(packRoot, 'README.md'), fs.readFileSync(path.join(root, 'deploy', 'INSTALL.md'), 'utf8'), 'utf8')
 const source = fs.readFileSync(path.join(root, 'deploy', 'bootstrap.mjs'), 'utf8')
 const template = fs.readFileSync(path.join(root, 'deploy', 'install.template.sh'), 'utf8')
-const embedded = template.replace('__DSH_RELEASE_VERSION__', pkg.version).replace('__DSH_BOOTSTRAP_SOURCE__', source)
+// 替换一律用函数形式：replacement 字符串里的 $&/$` 等会被当替换模式展开
+// （实测源码含正则转义 '$&' 时生成物被写坏）；函数形式杜绝一切 $ 序列解释。
+const embedded = template.replace('__DSH_RELEASE_VERSION__', () => pkg.version).replace('__DSH_BOOTSTRAP_SOURCE__', () => source)
 // 包内入口本地即用；联网地址由发行副本填入，避免tgz摘要自引用。
 fs.writeFileSync(path.join(packRoot, 'deploy', 'install.sh'), embedded, 'utf8')
 const tarball = pkg.name + '-' + pkg.version + '.tgz', result = spawnSync('tar', ['-czf', path.join(out, tarball), '-C', out, 'package'], { stdio: 'inherit', timeout: 10000 })
@@ -33,7 +35,7 @@ if (result.error) throw result.error
 if (result.status !== 0) throw Error('打包失败')
 const digest = createHash('sha256').update(fs.readFileSync(path.join(out, tarball))).digest('hex')
 const url = values.repository ? `https://github.com/${values.repository}/releases/download/${tag}/${tarball}` : '__DSH_RELEASE_URL__'
-fs.writeFileSync(path.join(out, 'install.sh'), embedded.replace('__DSH_RELEASE_URL__', url).replace('__DSH_RELEASE_SHA256__', digest), 'utf8')
+fs.writeFileSync(path.join(out, 'install.sh'), embedded.replace('__DSH_RELEASE_URL__', () => url).replace('__DSH_RELEASE_SHA256__', () => digest), 'utf8')
 fs.writeFileSync(path.join(out, 'SHA256SUMS'), digest + '  ' + tarball + '\n', 'utf8')
 fs.writeFileSync(path.join(out, 'release.json'), JSON.stringify({ package: pkg.name, version: pkg.version, repository: values.repository || null, tag, asset: tarball, sha256: digest, published: false, command: values.repository ? `curl -fsSL https://raw.githubusercontent.com/${values.repository}/main/install.sh | sh` : null }, null, 2) + '\n', 'utf8')
 console.log(JSON.stringify({ out, asset: tarball, sha256: digest, repositoryConfigured: !!values.repository, uploaded: false }))

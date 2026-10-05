@@ -43,25 +43,46 @@ export function validatePackage(root) {
   }
   return manifest
 }
+// 本地候选的版本识别：目录读 package.json（须本包名），tgz 从文件名取版本。
+function directoryVersion(dir) {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'))
+    return manifest && manifest.name === NAME && typeof manifest.version === 'string' ? manifest.version : null
+  } catch { return null }
+}
+export function archiveVersion(file) {
+  const match = new RegExp('^' + NAME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-(\\d[^/]*)\\.tgz$').exec(path.basename(file))
+  return match ? match[1] : null
+}
 export function selectLocal({ action, local, installed, scriptDir = '', cwd = process.cwd(), cache, version }) {
   if (action === 'uninstall' && !installed) return { kind: 'absent' }
-  if (action === 'uninstall' && !local) return { kind: 'directory', file: installed }
+  // 网络优先（2026-10-05 用户定）：本地候选（已装目录/相邻包/缓存tgz）只有与本次发行版本
+  // 完全一致才采用；版本不符一律回落下载网络发行包，不用旧代本地件当执行器。
+  // --package 是显式人工指定，不受版本一致性约束。
+  const sameVersion = candidate => {
+    if (!version) return false
+    return candidate.kind === 'archive' ? archiveVersion(candidate.file) === version : directoryVersion(candidate.file) === version
+  }
   if (local) {
     const file = path.resolve(cwd, local)
     if (!fs.existsSync(file)) throw Error('指定本地包不存在：' + file)
     return { kind: fs.statSync(file).isDirectory() ? 'directory' : 'archive', file }
   }
+  if (installed) {
+    const candidate = { kind: 'directory', file: installed }
+    if (sameVersion(candidate)) return candidate
+  }
   const adjacent = scriptDir ? path.resolve(scriptDir, '..') : ''
-  for (const candidate of [adjacent, path.join(cwd, NAME), path.join(cwd, 'package'), cwd].filter(Boolean)) {
-    const manifest = path.join(candidate, 'package.json')
-    if (fs.existsSync(manifest) && JSON.parse(fs.readFileSync(manifest, 'utf8')).name === NAME) return { kind: 'directory', file: candidate }
+  for (const file of [adjacent, path.join(cwd, NAME), path.join(cwd, 'package'), cwd].filter(Boolean)) {
+    const candidate = { kind: 'directory', file }
+    if (directoryVersion(file) && sameVersion(candidate)) return candidate
   }
   for (const dir of [...new Set([scriptDir, cwd, cache].filter(Boolean))]) {
     const file = path.join(dir, NAME + '-' + version + '.tgz')
     if (fs.existsSync(file)) return { kind: 'archive', file }
   }
-  // 已装包再装/卸载为本地路径，不为这个动作拉最新包。
-  return installed ? { kind: 'directory', file: installed } : null
+  // 无同版本本地件：回落 null ⇒ 引导层下载网络发行包执行。
+  return null
 }
 export async function downloadArchive(url, expected, file, { request = fetch } = {}) {
   if (!/^https:\/\//.test(url || '') || !/^[0-9a-f]{64}$/.test(expected || '')) throw Error('尚未生成固定GitHub发行地址/摘要；请用--package本地包。不会请求latest/main或猜仓库')
