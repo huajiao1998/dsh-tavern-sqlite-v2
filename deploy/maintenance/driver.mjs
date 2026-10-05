@@ -1,5 +1,5 @@
 // 目标profile原地离线装卸；保留原运行状态，无认证、无依赖树副本。
-import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, realpathSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -8,6 +8,7 @@ import { command, findProcess, readProcess, sameProcess, stripSecrets, waitExit,
 import { pause, maintenanceBudget } from './budget.mjs'
 import { runtimeFor, packagePolicyArgs, assertTargetAllowed } from './target.mjs'
 import { parseSystemdProperties, systemdOwner, assertSystemdTarget, assertSystemdUnchanged } from './systemd.mjs'
+import { rewriteExecStartVmFlag } from './environment.mjs'
 import { waitSystemdExecIdentity } from './start-identity.mjs'
 import { STANDARD_RECORD } from './source.mjs'
 import { AUTHOR_VERSION } from '../../lib/standard-host.js'
@@ -41,11 +42,11 @@ function properties(unit, timeout, runCommand = command) { return parseSystemdPr
 export function basicHttpStatus(response) {
   return [200, 302, 303, 401, 403].includes(response.status)
 }
-// 启动方式判据：不改unit、不改NODE_OPTIONS；安装需要既有--experimental-vm-modules，其余动作不要求旗标。
+// 启动方式判据：默认不改unit、不改NODE_OPTIONS；安装需要既有--experimental-vm-modules，其余动作不要求旗标。
 export function assertLaunchMode(action, adapter, argv) {
   if (action !== 'install' || !adapter.requiresVmModules) return { required: false }
   if (!argv) throw Error('既有启动命令不可确证，拒绝在猜测旗标下安装')
-  if (!argv.includes('--experimental-vm-modules')) throw Error('V2需要既有Node --experimental-vm-modules；不静默改启动命令')
+  if (!argv.includes('--experimental-vm-modules')) throw Error('V2需要既有Node --experimental-vm-modules；默认不静默改启动命令（显式加 --prepare-env 可授权自动补旗标并留备份）')
   return { required: true }
 }
 export function createDriver(op, adapter, packageRoot, evidence, budget, { processFinder = findProcess, processReader = readProcess, runPackage = packageCommand, request = fetch, runtimeResolver = runtimeFor, runCommand = command, portOpen = tcpOpen, alive = processAlive } = {}) {
@@ -74,6 +75,81 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { proce
   }
   const driver = {
     runtime,
+    /**
+     * 显式环境预修（--prepare-env，仅 install）：把缺失的 --experimental-vm-modules 补进
+     * systemd 单元 ExecStart（备份原unit→改写→daemon-reload→按原方式重启→复验argv）。
+     * 非systemd管理或改写失败可回滚时，一律拒绝并保持原状；不带该开关时本方法不做事。
+     */
+    async prepareEnvironment(action) {
+      if (action !== 'install' || !adapter.requiresVmModules || !op['prepare-env']) return { changed: false }
+      const current = processFinder(context)
+      const editUnit = async unitName => {
+        const state = parseSystemdProperties(runCommand('systemctl', ['show', unitName, ...['MainPID', 'ActiveState', 'ExecStart', 'FragmentPath'].flatMap(key => ['-p', key])], { timeout: activeBudget.remaining(2000) }))
+        const argv = /argv\[\]=([^;]+) ;/.exec(state.ExecStart || '')?.[1]?.trim()
+        if (!argv || !state.FragmentPath || !existsSync(state.FragmentPath)) throw Error('--prepare-env：单元ExecStart/FragmentPath不可确证，拒绝改写')
+        if (argv.split(/\s+/).includes('--experimental-vm-modules')) return { changed: false, unit: unitName }
+        return { changed: true, unit: unitName, fragment: state.FragmentPath, before: readFileSync(state.FragmentPath, 'utf8') }
+      }
+      if (current) {
+        if (current.argv.includes('--experimental-vm-modules')) return { changed: false, vmFlag: 'already-present' }
+        const owner = systemdOwner(current.cgroup || '')
+        const unitName = op['systemd-unit'] || owner
+        if (!unitName) throw Error('--prepare-env：目标非systemd管理，无法自动补旗标；请手工在启动命令加 --experimental-vm-modules 后重试')
+        if (op['systemd-unit'] && owner && op['systemd-unit'] !== owner) throw Error('--prepare-env：指定systemd单元不拥有目标进程')
+        const plan = await editUnit(unitName)
+        if (!plan.changed) throw Error('--prepare-env：单元已带旗标但运行进程没有，形态不一致，拒绝继续')
+        if (Number(parseSystemdProperties(runCommand('systemctl', ['show', unitName, '-p', 'MainPID'], { timeout: activeBudget.remaining(2000) })).MainPID) !== current.pid) throw Error('--prepare-env：单元MainPID与目标进程不一致')
+        const rollback = async () => {
+          try {
+            writeFileSync(plan.fragment, plan.before)
+            runCommand('systemctl', ['daemon-reload'], { timeout: activeBudget.remaining(3000) })
+            runCommand('systemctl', ['start', unitName], { timeout: activeBudget.remaining(7000) })
+          } catch (error) { throw Error('--prepare-env回滚未完成（unit=' + unitName + '）：' + error.message + '；请人工核单元文件 ' + plan.fragment) }
+        }
+        runCommand('systemctl', ['stop', unitName], { timeout: activeBudget.remaining(7000) })
+        if (processFinder(context) || await portOpen(current.port, ['::', '::1'].includes(current.host) ? '::1' : '127.0.0.1', activeBudget.remaining(250))) { await rollback(); throw Error('--prepare-env：停止后目标仍占端口/存活，已回滚') }
+        const backup = path.join(evidence, 'unit-' + path.basename(plan.fragment) + '.backup')
+        writeFileSync(backup, plan.before)
+        try {
+          writeFileSync(plan.fragment, rewriteExecStartVmFlag(plan.before))
+          runCommand('systemctl', ['daemon-reload'], { timeout: activeBudget.remaining(3000) })
+          runCommand('systemctl', ['start', unitName], { timeout: activeBudget.remaining(7000) })
+        } catch (error) { await rollback(); throw Error('--prepare-env：补旗标失败已回滚；' + error.message) }
+        const expected = [current.argv[0], '--experimental-vm-modules', ...current.argv.slice(1)]
+        const until = Date.now() + activeBudget.remaining(8000)
+        while (Date.now() < until) {
+          const pid = Number(parseSystemdProperties(runCommand('systemctl', ['show', unitName, '-p', 'MainPID'], { timeout: activeBudget.remaining(2000) })).MainPID)
+          const item = pid ? processReader(pid, context) : null
+          if (item) {
+            if (JSON.stringify(item.argv) !== JSON.stringify(expected) || item.cwd !== current.cwd) { await rollback(); throw Error('--prepare-env：重启后argv/身份与预期不符，已回滚') }
+            return { changed: true, vmFlag: 'unit-updated', unit: unitName, backup }
+          }
+          await pause(50)
+        }
+        await rollback()
+        throw Error('--prepare-env：补旗标重启后未取得可确证进程，已回滚')
+      }
+      // 纯停止态 + 显式单元：改unit但不拉起（保持停止，与既有停止态规则一致）。
+      if (op['systemd-unit']) {
+        const state = parseSystemdProperties(runCommand('systemctl', ['show', op['systemd-unit'], ...['MainPID', 'ActiveState', 'ExecStart', 'FragmentPath'].flatMap(key => ['-p', key])], { timeout: activeBudget.remaining(2000) }))
+        if (Number(state.MainPID) === 0 && state.ActiveState === 'inactive') {
+          const plan = await editUnit(op['systemd-unit'])
+          if (!plan.changed) return { changed: false, vmFlag: 'already-present' }
+          const backup = path.join(evidence, 'unit-' + path.basename(plan.fragment) + '.backup')
+          writeFileSync(backup, plan.before)
+          try {
+            writeFileSync(plan.fragment, rewriteExecStartVmFlag(plan.before))
+            runCommand('systemctl', ['daemon-reload'], { timeout: activeBudget.remaining(3000) })
+          } catch (error) {
+            writeFileSync(plan.fragment, plan.before)
+            runCommand('systemctl', ['daemon-reload'], { timeout: activeBudget.remaining(3000) })
+            throw Error('--prepare-env：停止态补旗标失败已回滚；' + error.message)
+          }
+          return { changed: true, vmFlag: 'unit-updated-stopped', unit: op['systemd-unit'], backup }
+        }
+      }
+      return { changed: false, vmFlag: 'stopped-without-managed-unit' }
+    },
     async preflight(action) {
       assertTargetAllowed(op)
       const pkg = json(path.join(packageRoot, 'package.json'))

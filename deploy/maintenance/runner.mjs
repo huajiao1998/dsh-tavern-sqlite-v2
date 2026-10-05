@@ -9,6 +9,7 @@ import { maintenanceBudget } from './budget.mjs'
 import { options, runtimeFor, assertTargetAllowed, packagePolicyArgs } from './target.mjs'
 import { createDriver } from './driver.mjs'
 import { sourceAccess, assertPackageSource, assertSourceUninstalled, rehearseSource, finishSourceUninstall, STANDARD_RECORD } from './source.mjs'
+import { findLegacyLeftovers, quarantineLeftovers, describeError } from './environment.mjs'
 export { options, packagePolicyArgs }
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 export function packageFiles(root) {
@@ -40,12 +41,22 @@ export function copyPackage(from, to) {
   }
   return JSON.parse(readFileSync(path.join(from, 'package.json'), 'utf8'))
 }
-export async function executeMaintenance({ action, adapter, driver, source, evidenceDir, progress = () => {}, budget = maintenanceBudget() }) {
+export async function executeMaintenance({ action, adapter, driver, source, evidenceDir, progress = () => {}, budget = maintenanceBudget(), prepareEnv = false }) {
   const step = async (name, fn) => { budget.remaining(); progress(name); const value = await fn(); budget.remaining(); return value }
   let safeToRestore = false, baseline, rehearsal, newProcess, result, state, validation
   try {
+    // 显式--prepare-env：预检前补环境（systemd单元VM旗标），失败自动回滚并中止。
+    if (prepareEnv) await step('环境预修：systemd单元VM旗标（显式--prepare-env，备份可回滚）', () => driver.prepareEnvironment(action))
     state = await step('预检目标/本地运行时/装配（不复制依赖或存档、不认证）', () => driver.preflight(action))
     assertPackageSource(source, adapter)
+    // 旧代维护残留备份：写前显式处置——无授权即拒（列清单），有授权隔离到证据目录（只移不删）。
+    const leftovers = findLegacyLeftovers(source.root)
+    if (leftovers.length) {
+      if (!prepareEnv) throw Error('目标树存在旧代维护备份（' + leftovers.length + ' 个，如 ' + leftovers[0] + '）：拒绝猜测覆盖；加 --prepare-env 可自动隔离到维护证据目录（只移动不删除）')
+      const moved = quarantineLeftovers(source.root, path.join(evidenceDir, 'leftovers'))
+      progress('环境预修：已隔离旧代备份 ' + moved.length + ' 个 → ' + path.join(evidenceDir, 'leftovers'))
+      if (findLegacyLeftovers(source.root).length) throw Error('隔离后仍检出血统残留，拒绝继续')
+    }
     const wasRunning = state.wasRunning !== false
     if (state.noop) {
       if (action === 'install' && !adapter.checkStandardSeams({ appDir: source.root }).ready) throw Error('现装接缝未ready')
@@ -95,7 +106,7 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
       } catch (recovery) {
         throw new AggregateError([error, recovery], '维护失败且恢复未完成；初因：' + error.message + '；恢复原因：' + redactStartupLine(recovery.message) + '；不盲目重试')
       }
-      throw new Error('维护失败，已恢复原装配及原运行状态：' + error.message, { cause: error })
+      throw new Error('维护失败，已恢复原装配及原运行状态：' + describeError(error), { cause: error })
     }
     throw error
   }
@@ -104,7 +115,7 @@ export function runCli(url, adapter) {
   if (!process.argv[1] || path.resolve(process.argv[1]) !== fileURLToPath(url)) return
   const main = async () => {
     if (process.argv.includes('--help')) {
-      console.log(`${adapter.packageName} 离线装卸（macOS/Linux/WSL2 CLI；作者2.5.0/DSH rc.2）\nnode deploy/maintenance.mjs install|uninstall [--home <已有安装目录>] [--port <核对端口>] [--systemd-unit <既有单元>] [--check] [--background]\n默认apply；本地完整包不联网、不索取网页凭证、不复制依赖/存档。运行中停止后按原方式恢复；原本停止则保持停止。包就绪后60秒成功预算；异常恢复独立处理。网页/真实玩法由用户确认。\nV2运行中目标须已带--experimental-vm-modules；不改启动配置，纯停止态安装后仍停止、未来启动须自行带旗标。四个解析依赖须离线可用，不补装宿主peer、不联网补依赖。`)
+      console.log(`${adapter.packageName} 离线装卸（macOS/Linux/WSL2 CLI；作者2.5.0/DSH rc.2）\nnode deploy/maintenance.mjs install|uninstall [--home <已有安装目录>] [--port <核对端口>] [--systemd-unit <既有单元>] [--prepare-env] [--check] [--background]\n默认apply；本地完整包不联网、不索取网页凭证、不复制依赖/存档。运行中停止后按原方式恢复；原本停止则保持停止。包就绪后60秒成功预算；异常恢复独立处理。网页/真实玩法由用户确认。\nV2运行中目标须已带--experimental-vm-modules；默认不改启动配置。--prepare-env（仅install）显式授权两件环境预修：①systemd单元ExecStart补VM旗标（备份原unit、失败自动回滚）；②旧代维护残留备份隔离到证据目录（只移动不删除）。四个解析依赖须离线可用，不补装宿主peer、不联网补依赖。`)
       return
     }
     if (!['linux', 'darwin'].includes(process.platform)) throw Error('SH入口支持macOS/Linux/WSL2，不在原生Windows启动服务')
@@ -121,7 +132,7 @@ export function runCli(url, adapter) {
     if (!op.internal) {
       const staged = path.join(evidence, 'executor-package'); copyPackage(root, staged)
       budget.remaining()
-      const args = [path.join(staged, 'deploy', 'maintenance.mjs'), op.action, '--home', op.home, '--app', op.app, '--profile', op.profile, op.check ? '--check' : '--apply', '--internal', '--evidence', evidence, '--elapsed', String(budget.elapsed()), ...(op.port ? ['--port', op.port] : []), ...(op['systemd-unit'] ? ['--systemd-unit', op['systemd-unit']] : [])]
+      const args = [path.join(staged, 'deploy', 'maintenance.mjs'), op.action, '--home', op.home, '--app', op.app, '--profile', op.profile, op.check ? '--check' : '--apply', '--internal', '--evidence', evidence, '--elapsed', String(budget.elapsed()), ...(op.port ? ['--port', op.port] : []), ...(op['systemd-unit'] ? ['--systemd-unit', op['systemd-unit']] : []), ...(op['prepare-env'] ? ['--prepare-env'] : [])]
       if (op.background) {
         const fd = openSync(path.join(evidence, 'job.log'), 'wx', 0o600), child = spawn(process.execPath, args, { cwd: op.app, detached: true, stdio: ['ignore', fd, fd] }); closeSync(fd)
         await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject) }); child.unref()
@@ -143,14 +154,14 @@ export function runCli(url, adapter) {
         if (op.check) {
           const state = await driver.preflight(op.action); assertPackageSource(source, adapter)
           if (state.noop && op.action === 'uninstall') assertSourceUninstalled(source)
-          result = { check: true, initialState: state.wasRunning ? 'running' : 'stopped', ...(state.noop ? { changed: false } : rehearseSource(op.action, source, adapter, evidence).result), elapsedMs: Math.round(budget.elapsed()) }
+          result = { check: true, initialState: state.wasRunning ? 'running' : 'stopped', ...(state.noop ? { changed: false } : rehearseSource(op.action, source, adapter, evidence).result), leftovers: findLegacyLeftovers(source.root), elapsedMs: Math.round(budget.elapsed()) }
           budget.remaining()
-        } else result = await executeMaintenance({ action: op.action, adapter, driver, source, evidenceDir: evidence, progress, budget })
+        } else result = await executeMaintenance({ action: op.action, adapter, driver, source, evidenceDir: evidence, progress, budget, prepareEnv: !!op['prepare-env'] })
         writeFileSync(path.join(evidence, 'result.json'), JSON.stringify({ ok: true, network: 'offline', ...result }, null, 2) + '\n', 'utf8')
         console.log(JSON.stringify({ ok: true, network: 'offline', ...result }))
         console.log('结果：' + path.join(evidence, 'result.json'))
       } catch (error) {
-        writeFileSync(path.join(evidence, 'result.json'), JSON.stringify({ ok: false, elapsedMs: Math.round(budget.elapsed()), message: redactStartupLine(error.message) }, null, 2) + '\n', 'utf8')
+        writeFileSync(path.join(evidence, 'result.json'), JSON.stringify({ ok: false, elapsedMs: Math.round(budget.elapsed()), message: redactStartupLine(describeError(error)) }, null, 2) + '\n', 'utf8')
         throw error
       }
     }, { waitMs: 0 })

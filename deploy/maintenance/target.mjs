@@ -9,13 +9,14 @@ export function options(argv, { cwd = process.cwd(), env = process.env, userHome
   const out = { action: argv[0] || 'install', profile: 'tavern' }
   for (let i = 1; i < argv.length; i++) {
     const key = argv[i]
-    if (['--check', '--apply', '--internal', '--background'].includes(key)) out[key.slice(2)] = true
+    if (['--check', '--apply', '--internal', '--background', '--prepare-env'].includes(key)) out[key.slice(2)] = true
     else if (['--home', '--app', '--profile', '--port', '--evidence', '--systemd-unit', '--elapsed'].includes(key)) {
       if (!argv[i + 1] || argv[i + 1].startsWith('--')) throw Error('参数缺值：' + key)
       out[key.slice(2)] = argv[++i]
     } else throw Error('未知参数：' + key)
   }
   if (!['install', 'uninstall'].includes(out.action)) throw Error('动作须为install或uninstall')
+  if (out['prepare-env'] && out.action !== 'install') throw Error('--prepare-env 仅用于 install（卸载不修环境）')
   if (out.apply && out.check) throw Error('--apply与--check互斥')
   if (!out.check) out.apply = true
   if (out.profile !== 'tavern') throw Error('当前插件接缝仅适配tavern profile；不冒称其它profile支持')
