@@ -6,7 +6,6 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
 import { rewriteExecStartVmFlag, findLegacyLeftovers, quarantineLeftovers, describeError, leftoverDecision } from '../deploy/maintenance/environment.mjs'
 import { options } from '../deploy/maintenance/target.mjs'
 import { createDriver } from '../deploy/maintenance/driver.mjs'
@@ -62,26 +61,24 @@ test('leftoverDecision：仅非noop的install拦截血统残留；uninstall/noop
   assert.equal(leftoverDecision({ action: 'install', noop: false, prepareEnv: false, found: 0 }), 'allow')
 })
 
-test('引导层install.sh：--prepare-env透传到维护入口（2026-10-05一键路径实测回归）', async () => {
+test('引导源头bootstrap.mjs：--prepare-env透传；install.sh/template无漂移（一键路径实测回归）', async () => {
+  // 真源头是 deploy/bootstrap.mjs（build-release 读它填模板生成发行 install.sh；
+  // 0.1.5 曾误改生成物 install.sh 而源头未动，一键路径继续拦截——本用例锁源头+双漂移闸）。
+  const mod = await import(new URL('../deploy/bootstrap.mjs', import.meta.url).href)
+  const parsed = mod.bootstrapOptions(['install', '--home', '/opt/home', '--systemd-unit', 'dsh-tavern.service', '--prepare-env'])
+  assert.deepEqual(parsed.pass, ['--home', '/opt/home', '--systemd-unit', 'dsh-tavern.service', '--prepare-env'], '--prepare-env 必须透传')
+  assert.equal(parsed.action, 'install')
+  assert.throws(() => mod.bootstrapOptions(['install', '--nonsense']), /未知参数/, '白名单语义保留')
+  // 漂移闸①：工作区 deploy/install.sh 内嵌体必须与 bootstrap.mjs 逐字节一致（构建会用源头覆盖包内副本）。
+  const source = readFileSync(new URL('../deploy/bootstrap.mjs', import.meta.url), 'utf8')
   const sh = readFileSync(new URL('../deploy/install.sh', import.meta.url), 'utf8')
-  const begin = sh.indexOf("<<'DSH_STORAGE_BOOTSTRAP'")
-  const end = sh.indexOf('\nDSH_STORAGE_BOOTSTRAP', begin)
-  assert.ok(begin > 0 && end > begin, 'SH内嵌引导块边界未定位')
-  const body = sh.slice(sh.indexOf('\n', begin) + 1, end)
-  // 内嵌模块顶层守卫用 fileURLToPath(import.meta.url)，data: URL 会先抛"scheme must be file"；
-  // 落成临时真文件导入：守卫比较为假 ⇒ bootstrap 不执行，仅拿导出做参数解析断言。
-  const dir = mkdtempSync(path.join(os.tmpdir(), 'prep-env-bootstrap-'))
-  try {
-    const file = path.join(dir, 'bootstrap.mjs')
-    writeFileSync(file, body, 'utf8')
-    const mod = await import(pathToFileURL(file).href)
-    const parsed = mod.bootstrapOptions(['install', '--home', '/opt/home', '--systemd-unit', 'dsh-tavern.service', '--prepare-env'])
-    assert.deepEqual(parsed.pass, ['--home', '/opt/home', '--systemd-unit', 'dsh-tavern.service', '--prepare-env'], '--prepare-env 必须透传（0.1.3曾在此被白名单拦截）')
-    assert.equal(parsed.action, 'install')
-    assert.throws(() => mod.bootstrapOptions(['install', '--nonsense']), /未知参数/, '白名单语义保留')
-    const uninstallSide = mod.bootstrapOptions(['uninstall', '--home', '/opt/home'])
-    assert.equal(uninstallSide.pass.includes('--prepare-env'), false)
-  } finally { rmSync(dir, { recursive: true, force: true }) }
+  const begin = sh.indexOf("<<'DSH_STORAGE_BOOTSTRAP'"), end = sh.indexOf('\nDSH_STORAGE_BOOTSTRAP', begin)
+  assert.ok(begin > 0 && end > begin, 'install.sh 内嵌块边界未定位')
+  assert.equal(sh.slice(sh.indexOf('\n', begin) + 1, end), source, 'install.sh 内嵌体与 bootstrap.mjs 漂移')
+  // 漂移闸②：模板只允许占位符引用源头，不得自带另一份实现。
+  const template = readFileSync(new URL('../deploy/install.template.sh', import.meta.url), 'utf8')
+  assert.ok(template.includes('__DSH_BOOTSTRAP_SOURCE__'), '模板必须引用 bootstrap.mjs 占位符')
+  assert.equal(template.includes('bootstrapOptions'), false, '模板不得内嵌第二份参数解析实现')
 })
 
 test('describeError：cause 链并入一条消息（去重、限深）', () => {

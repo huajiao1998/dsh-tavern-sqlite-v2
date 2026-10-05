@@ -1,5 +1,9 @@
 # 更新日志
 
+## 0.1.6（2026-10-05 修真源头＋漂移闸）
+
+- **修复：0.1.5 修错了文件**。发行 `install.sh` 的内嵌引导体由 `deploy/bootstrap.mjs` 经模板生成（build-release 读源头）；0.1.5 误改生成物 `deploy/install.sh`，一键路径仍拦截 `--prepare-env`。本版修 `bootstrap.mjs` 源头，并新增**双漂移闸**测试：工作区 `install.sh` 内嵌体必须与 `bootstrap.mjs` 逐字节一致；模板只允许占位符引用源头、不得内嵌第二份实现。
+
 ## 0.1.5（2026-10-05 一键路径透传修复）
 
 - **修复：`--prepare-env` 被 SH 引导层白名单拦截**。0.1.3/0.1.4 的引导 `install.sh` 不认识该参数（`未知参数：--prepare-env`），一键路径根本到不了维护入口——功能只在直接 `node deploy/maintenance.mjs` 时可用。现已透传；新增引导层参数解析回归测试（含白名单语义保留）。
