@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { rewriteExecStartVmFlag, findLegacyLeftovers, quarantineLeftovers, describeError, leftoverDecision } from '../deploy/maintenance/environment.mjs'
 import { options } from '../deploy/maintenance/target.mjs'
 import { createDriver } from '../deploy/maintenance/driver.mjs'
@@ -59,6 +60,28 @@ test('leftoverDecision：仅非noop的install拦截血统残留；uninstall/noop
   assert.equal(leftoverDecision({ action: 'uninstall', noop: false, prepareEnv: false, found: 7 }), 'allow', '当前安装自管备份不得阻断卸载（188实测回归）')
   assert.equal(leftoverDecision({ action: 'install', noop: true, prepareEnv: false, found: 7 }), 'allow', '幂等重装不拦自管备份')
   assert.equal(leftoverDecision({ action: 'install', noop: false, prepareEnv: false, found: 0 }), 'allow')
+})
+
+test('引导层install.sh：--prepare-env透传到维护入口（2026-10-05一键路径实测回归）', async () => {
+  const sh = readFileSync(new URL('../deploy/install.sh', import.meta.url), 'utf8')
+  const begin = sh.indexOf("<<'DSH_STORAGE_BOOTSTRAP'")
+  const end = sh.indexOf('\nDSH_STORAGE_BOOTSTRAP', begin)
+  assert.ok(begin > 0 && end > begin, 'SH内嵌引导块边界未定位')
+  const body = sh.slice(sh.indexOf('\n', begin) + 1, end)
+  // 内嵌模块顶层守卫用 fileURLToPath(import.meta.url)，data: URL 会先抛"scheme must be file"；
+  // 落成临时真文件导入：守卫比较为假 ⇒ bootstrap 不执行，仅拿导出做参数解析断言。
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'prep-env-bootstrap-'))
+  try {
+    const file = path.join(dir, 'bootstrap.mjs')
+    writeFileSync(file, body, 'utf8')
+    const mod = await import(pathToFileURL(file).href)
+    const parsed = mod.bootstrapOptions(['install', '--home', '/opt/home', '--systemd-unit', 'dsh-tavern.service', '--prepare-env'])
+    assert.deepEqual(parsed.pass, ['--home', '/opt/home', '--systemd-unit', 'dsh-tavern.service', '--prepare-env'], '--prepare-env 必须透传（0.1.3曾在此被白名单拦截）')
+    assert.equal(parsed.action, 'install')
+    assert.throws(() => mod.bootstrapOptions(['install', '--nonsense']), /未知参数/, '白名单语义保留')
+    const uninstallSide = mod.bootstrapOptions(['uninstall', '--home', '/opt/home'])
+    assert.equal(uninstallSide.pass.includes('--prepare-env'), false)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
 test('describeError：cause 链并入一条消息（去重、限深）', () => {
