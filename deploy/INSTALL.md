@@ -7,7 +7,7 @@ V2 的包名和独立仓库名均为 `dsh-tavern-sqlite-v2`。V2 保留服务端
 ## 支持范围与前提
 
 - 复用 V1 的 macOS、Linux、WSL2 CLI 维护流程；已有作者 2.5.0（5d2ffacf已验；d5b2e6c4的[源码接缝/完整恢复副本](<../../../docs/workstreams/plugin/UPSTREAM-RETIRED-MVU-V2-FIX-2026-10-05.md>)已通过，实际CLI/页面未验）、DSH / boot 0.1.5-rc.2、Node.js 22.19+ 及 pnpm。不另装酒馆、Node、Python或宿主 peer。Desktop、未知源码布局或管理器不冒称支持。
-- V2 运行中的目标 Node **必须已带 `--experimental-vm-modules`**，没有则停服前拒绝；停止态指定 systemd 单元时也核原 ExecStart。脚本默认不改 unit、启动命令或 NODE_OPTIONS；**显式 `--prepare-env`（仅 install）**授权两件环境预修：①systemd 单元 ExecStart 自动补该旗标（备份原 unit 到维护证据目录、daemon-reload、按原方式重启并复验 argv，失败自动回滚）；②旧代（V1 线）维护残留备份自动隔离到维护证据目录（只移动不删除；无授权时列清单明确拒绝）。没有启动命令的纯停止态可离线安装但仍保持停止，用户之后启动须带该旗标。
+- **无需手工预配 `--experimental-vm-modules`**：安装命令加 `--prepare-env`（仅 install），安装器自动把它补进 systemd 单元——备份原 unit 到维护证据目录、daemon-reload、按原方式重启复验、失败自动回滚，**安装完成后服务启动自带该参数**。同一开关还自动隔离旧代（V1 线）维护残留备份到维护证据目录（只移动不删除；无授权时列清单明确拒绝）。不加该开关维持默认：要求该参数已存在于启动命令，否则停服前明确拒绝（安装器默认不改动你的启动配置）；停止态指定 systemd 单元时也核原 ExecStart，纯停止态可离线安装但仍保持停止、未来启动须带该旗标。
 - 装卸调用官方包管理，固定 `--offline --ignore-scripts --config.auto-install-peers=false`。V2 声明的 json5、jsonrepair、lodash、yaml 必须在既有离线依赖材料中可用；缺依赖明确失败并恢复，不偷偷联网、不另建依赖树镜像。下载本插件 tgz 与安装第三方依赖是两件事。
 - 新包名不自动认领旧包或记录。已经安装旧名称或 V1 时，先用**其所属旧代安装器完整卸载**，保留旧包与恢复材料，再装 V2；新安装器写前拒绝共装或覆盖。
 

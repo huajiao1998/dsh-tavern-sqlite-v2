@@ -34,6 +34,12 @@
 curl -fsSL https://raw.githubusercontent.com/huajiao1998/dsh-tavern-sqlite-v2/main/install.sh | sh
 ```
 
+systemd 实例首次安装（安装器自动补启动参数、自动清理旧代残留，装完即用）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/huajiao1998/dsh-tavern-sqlite-v2/main/install.sh | sh -s -- install --home /酒馆目录 --systemd-unit 酒馆服务.service --prepare-env
+```
+
 根目录[install.sh](<install.sh>)自动获取最新正式发行安装器。它会从`DSH_TAVERN_CLI_HOME`、`DSH_HOME`、当前目录和`~/.dsh-tavern`识别酒馆；找不到或有多个时才需要`--home`明确选择。安装前请备份并停止页面交互。
 
 详细参数、本地离线安装、预检与失败恢复见[安装说明](<deploy/INSTALL.md>)。
@@ -59,7 +65,7 @@ curl -fsSL https://raw.githubusercontent.com/huajiao1998/dsh-tavern-sqlite-v2/ma
 ## 兼容与使用须知
 
 - 当前适配**作者DSH Tavern 2.5.0（适配源码基准d5b2e6c4）、DSH／boot 0.1.5-rc.2**，需要既有Node22.19+、pnpm与CLI tavern profile；安装器面向Linux、macOS、WSL2的受支持布局，**暂不支持Desktop**。
-- 运行中的目标Node**必须已带`--experimental-vm-modules`**启动，没有则安装器在停服前拒绝。**systemd实例可加`--prepare-env`**：安装器会备份原unit、自动补该旗标并按原方式重启复验（失败自动回滚）。
+- **无需手工预配`--experimental-vm-modules`**：安装命令加`--prepare-env`，安装器自动把它补进systemd单元（备份原配置、按原方式重启复验、失败自动回滚），**安装完成后服务启动自带该参数**。不加该开关则要求该参数已存在（默认不改动你的启动配置，缺失时停服前明确拒绝）。
 - **与V1互斥**：同一实例不能同时安装V1与V2；已装V1时先用V1安装器完整卸载，再安装V2。V1卸载可能留下旧维护备份文件——安装时同样加`--prepare-env`即可自动隔离（只移动到维护证据目录，不删除；不带该开关则列清单明确拒绝）。
 - 装卸走目标profile的官方离线包管理入口，不执行生命周期脚本、不联网补依赖；json5、jsonrepair、lodash、yaml须在既有离线依赖材料中可用。
 - V2的MVU／卡脚本在服务端执行；这是V1（浏览器执行版）的服务端版本线，两者按需选用。
