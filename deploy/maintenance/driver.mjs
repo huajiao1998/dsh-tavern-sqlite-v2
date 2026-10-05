@@ -106,7 +106,7 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { proce
             runCommand('systemctl', ['start', unitName], { timeout: activeBudget.remaining(7000) })
           } catch (error) { throw Error('--prepare-env回滚未完成（unit=' + unitName + '）：' + error.message + '；请人工核单元文件 ' + plan.fragment) }
         }
-        runCommand('systemctl', ['stop', unitName], { timeout: activeBudget.remaining(7000) })
+        runCommand('systemctl', ['stop', unitName], { timeout: activeBudget.remaining(30000) })
         if (processFinder(context) || await portOpen(current.port, ['::', '::1'].includes(current.host) ? '::1' : '127.0.0.1', activeBudget.remaining(250))) { await rollback(); throw Error('--prepare-env：停止后目标仍占端口/存活，已回滚') }
         const backup = path.join(evidence, 'unit-' + path.basename(plan.fragment) + '.backup')
         writeFileSync(backup, plan.before)
@@ -230,7 +230,9 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { proce
         const state = inspectUnit(); assertSystemdUnchanged(unit, state)
         if (Number(state.MainPID) !== target.pid) throw Error('systemd主PID已变化')
         stopSignalled = true
-        runCommand('systemctl', ['stop', unit.unit], { timeout: activeBudget.remaining(7000) })
+        // 停止给足优雅退出窗口：应用刚启动即被停（--prepare-env 重启后紧接安装）实测要 ~12s；
+        // 7s 会把"还在退出中"误判为失败。上限仍受共享预算约束。
+        runCommand('systemctl', ['stop', unit.unit], { timeout: activeBudget.remaining(30000) })
         await driver.assertStopped()
       } else {
         process.kill(target.pid, 'SIGTERM'); stopSignalled = true
@@ -239,13 +241,18 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { proce
     },
     async stoppedAfterError() {
       if (!stopSignalled) return false
-      const until=Date.now()+activeBudget.remaining(7000)
-      while(Date.now()<until){
-        const item=processReader(original.pid,context)
-        if(!item){if(alive(original.pid))throw Error('原PID仍活着但身份不符，不能冒认为停止');await driver.assertStopped();return true}
-        sameProcess(original,item);await pause(50)
+      const until = Date.now() + activeBudget.remaining(30000)
+      while (Date.now() < until) {
+        const item = processReader(original.pid, context)
+        if (!item) {
+          if (alive(original.pid)) { await pause(100); continue }
+          // PID 存活但身份不可读＝大概率仍在退出（实测 SIGTERM 后 /proc 身份字段先失稳）：
+          // 继续等到窗口末，不秒抛"身份不符"顶掉真正的初因。
+          await driver.assertStopped(); return true
+        }
+        sameProcess(original, item); await pause(50)
       }
-      throw Error('原代停止未完成，未写装配/源码，不并起第二进程')
+      throw Error('原代停止未完成（PID 仍在退出或身份已变），未写装配/源码，不并起第二进程')
     },
     async stopIfAlive(target) {
       if (!latest && !target) return
@@ -258,7 +265,7 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { proce
           if(latest?.start)sameProcess(latest,item)
           if(JSON.stringify(item.argv)!==JSON.stringify(original.argv))throw Error('systemd恢复进程argv漂移')
           await driver.stop(item)
-        } else runCommand('systemctl', ['stop', unit.unit], { timeout: activeBudget.remaining(7000) })
+        } else runCommand('systemctl', ['stop', unit.unit], { timeout: activeBudget.remaining(30000) })
       } else if(target){
         const item=processReader(target.pid,context)
         if(!item){if(alive(target.pid))throw Error('本次新PID仍活着但身份不符，不改它正在使用的源码');return}

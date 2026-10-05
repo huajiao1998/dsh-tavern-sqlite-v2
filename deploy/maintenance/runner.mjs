@@ -93,7 +93,11 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
     error.message = redactStartupLine(error.message)
     // 预算超时不放弃恢复；恢复不计入成功时间，也不作为成功返回。
     driver.beginRecovery?.()
-    if (!safeToRestore && await driver.stoppedAfterError?.()) safeToRestore = true
+    if (!safeToRestore) {
+      // 停止核验自身的失败不得顶掉初因（188实测：恢复路径秒抛把真正的stop超时完全藏掉）。
+      try { if (await driver.stoppedAfterError?.()) safeToRestore = true }
+      catch (verify) { throw new AggregateError([error, verify], '维护失败且停止核验未完成；初因：' + describeError(error) + '；核验原因：' + redactStartupLine(verify.message) + '；不盲目重试') }
+    }
     if (safeToRestore) {
       try {
         progress('失败恢复：原装配/源码及原运行状态；不盲目重试')
