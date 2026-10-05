@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Tavern SQLite V2（完整功能）",
+    "description": "保留SQLite与干净回退，以及当前服务端MVU、卡脚本执行和渲染/计算分类能力。"
+  }
+}
