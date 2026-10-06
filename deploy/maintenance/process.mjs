@@ -108,6 +108,38 @@ export function findProcess(target, platform = process.platform) {
 export function processAlive(pid) {
   try { process.kill(pid,0);return true } catch(error) { if(error.code==='ESRCH')return false;if(error.code==='EPERM')return true;throw error }
 }
+
+/**
+ * Windows 进程清单（只读）：`/proc` 与 `ps` 在 Windows 都不可用，改用 CIM 读
+ * pid/可执行路径/命令行。**只用于"目标酒馆是否在跑"的存在性判定**——Windows 拿不到
+ * 目标进程的 cwd 与环境，因此这里不参与身份认领（认领仍只在 POSIX 路径做）。
+ *
+ * 编码护栏：Windows PowerShell 5.1 重定向输出默认走控制台代码页（中文系统＝GBK），
+ * 路径含非 ASCII 字符时会乱码 ⇒ 按路径匹配会**假阴性**（把运行中的酒馆判成停止），
+ * 这正是存在性判定要防的事故。因此在命令内先把输出钉死为 UTF-8。
+ */
+export function windowsProcessList() {
+  const script = '[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); Get-CimInstance Win32_Process | Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress'
+  const text = command('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 15000 })
+  const raw = JSON.parse(text.trim() || '[]')
+  return (Array.isArray(raw) ? raw : [raw]).map(item => ({
+    pid: Number(item.ProcessId),
+    exe: String(item.ExecutablePath || ''),
+    argv: String(item.CommandLine || ''),
+  })).filter(item => Number.isInteger(item.pid) && item.pid > 0)
+}
+
+/**
+ * 桌面版酒馆是否在运行：匹配**启动器**与**该运行时目录下的可执行文件**。
+ * 必须按完整路径比较——用户机器上可能同时装着独立版 `DSH Desktop`（同名进程）。
+ */
+export function desktopTavernProcesses({ root, runtimeDir }, { list = windowsProcessList } = {}) {
+  const dirs = [root, runtimeDir].filter(Boolean).map(value => String(value).replace(/[\\/]+$/, '').toLowerCase())
+  return list().filter(item => {
+    const exe = item.exe.toLowerCase()
+    return exe && dirs.some(dir => exe.startsWith(dir + '\\'))
+  })
+}
 export async function waitExit(target, context, timeout = 7000) {
   const until = Date.now() + timeout
   while (Date.now() < until) {

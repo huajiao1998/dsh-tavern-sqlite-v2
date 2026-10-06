@@ -1098,5 +1098,135 @@ await test('同 operation 令牌：本模块签发才认（伪造/外部参数�
   assert.strictEqual(execution.isSessionBusy('s1'), false, '操作结束后不再忙')
 })
 
+// 拆除守卫（方案 B，2026-10-06 真机踩坑后补）：软拆除（窗口释放/取消/迟到写）时抛出的错误必须
+// 带 `mvuReceipt={status:'interrupted'}`——作者失败出口认这个字段（作者 `lib/index.js:2805`
+// `receipt: err?.mvuReceipt ? … : {status:'error'}`），从而把 `pending:false + status='interrupted'`
+// 落回目标消息，不再出现“永久变量结算中”。真实业务失败不得挂 interrupted（那些走作者 error 出口）。
+await test('拆除守卫：软拆除抛错带 interrupted receipt；真实业务失败不挂', async () => {
+  const baseDeps = executeCommand => ({
+    host: {
+      updateVariables: async () => ({ updated: true }), updateMessages: async () => ({ updated: true }),
+      createMessages: async () => ({ updated: true })
+    },
+    hookLoadBudgetMs: 0,
+    project: scripts => ({ scripts: Array.isArray(scripts) ? scripts : [] }),
+    readCardExtensions: async () => ({ helperScripts: [] }),
+    executeCommand
+  })
+  const torn = fixtureChat()
+  await rejects(
+    executeServerSettlement({
+      ...baseDeps(async () => {
+        const error = new Error('结算窗口已释放，本轮结算中断')
+        error.code = SERVER_EXECUTION_ERRORS.disposed
+        throw error
+      }),
+      ...callInput(torn), diagnosticId: 'diag-interrupted'
+    }),
+    error => error.mvuReceipt?.status === 'interrupted'
+      && error.mvuReceipt.summary === '变量结算已中断'
+      && error.mvuReceipt.diagnosticId === 'diag-interrupted'
+      && Array.isArray(error.mvuReceipt.changes) && error.mvuReceipt.changes.length === 0,
+    '软拆除 ⇒ interrupted receipt'
+  )
+  const genuine = fixtureChat()
+  await rejects(
+    executeServerSettlement({
+      ...baseDeps(async () => {
+        const error = new Error('卡脚本核心执行失败')
+        error.code = SERVER_EXECUTION_ERRORS.coreFailed
+        throw error
+      }),
+      ...callInput(genuine)
+    }),
+    error => error.mvuReceipt === undefined && codeOf(error) === SERVER_EXECUTION_ERRORS.coreFailed,
+    '真实业务失败不挂 interrupted'
+  )
+})
+
+// 撤回误判根因添加的等待闸，保留真正的并发契约：同key/lifecycle快速busy拒绝、
+// 不同会话独立、不同eventId的直接嵌套计算不自等。计算日志不用于证明外层提交成功。
+await test('并发护栏：结算链路内重入 lifecycle 被拒（排队重试语义，不自等死锁）', async () => {
+  const order = []
+  const host = {
+    updateVariables: async () => ({ updated: true }), updateMessages: async () => ({ updated: true }),
+    createMessages: async () => ({ updated: true })
+  }
+  const deps = {
+    host, createRuntime: fakeRuntimeFactory(), hookLoadBudgetMs: 0,
+    project: scripts => ({ scripts: Array.isArray(scripts) ? scripts : [] }),
+    readCardExtensions: async () => ({ helperScripts: [] }),
+    executeCommand: async (text, variables) => {
+      try {
+        await executeServerLifecycle({ ...deps, sessionId: 's1', chat: fixtureChat(), event: 'MESSAGE_SENT' })
+        order.push('unexpected-pass')
+      } catch (error) {
+        order.push('refused:' + String(error && error.message).slice(0, 24))
+      }
+      variables.stat_data = { ok: 1 }
+    }
+  }
+  const result = await executeServerSettlement({ ...deps, ...callInput(fixtureChat()) })
+  assert.strictEqual(result.handled, true)
+  assert(order.some(entry => String(entry).startsWith('refused:该会话的 MVU 结算正在进行')), '结算在飞时 lifecycle 应被拒（请排队后重试）')
+  assert(!order.includes('unexpected-pass'), '不得放行并发 lifecycle')
+})
+
+await test('并发护栏：他会话 lifecycle 不受结算影响', async () => {
+  let releaseSettle = () => {}
+  const gate = new Promise(resolve => { releaseSettle = resolve })
+  const host = {
+    updateVariables: async () => ({ updated: true }), updateMessages: async () => ({ updated: true }),
+    createMessages: async () => ({ updated: true })
+  }
+  const deps = {
+    host, createRuntime: fakeRuntimeFactory(), hookLoadBudgetMs: 0,
+    project: scripts => ({ scripts: Array.isArray(scripts) ? scripts : [] }),
+    readCardExtensions: async () => ({ helperScripts: [] }),
+    executeCommand: async (text, variables) => { await gate; variables.stat_data = { ok: 1 } }
+  }
+  const settle = executeServerSettlement({ ...deps, ...callInput(fixtureChat()) })
+  await new Promise(resolve => setTimeout(resolve, 30))
+  const fast = await Promise.race([
+    executeServerLifecycle({ ...deps, sessionId: 's2', chat: fixtureChat(), event: 'MESSAGE_SENT' }).then(() => 'done'),
+    new Promise(resolve => setTimeout(() => resolve('timeout'), 2000))
+  ])
+  assert.strictEqual(fast, 'done', 's2 的 lifecycle 不应被 s1 的结算阻塞')
+  releaseSettle()
+  await settle
+})
+
+await test('并发护栏：不同 eventId 的直接嵌套计算不自等', async () => {
+  const order = []
+  const host = {
+    updateVariables: async () => ({ updated: true }), updateMessages: async () => ({ updated: true }),
+    createMessages: async () => ({ updated: true })
+  }
+  let depth = 0
+  const deps = {
+    host, createRuntime: fakeRuntimeFactory(), hookLoadBudgetMs: 0,
+    project: scripts => ({ scripts: Array.isArray(scripts) ? scripts : [] }),
+    readCardExtensions: async () => ({ helperScripts: [] }),
+    // 深度闸：同一实例的 executeCommand 是首调定型的实例级 DI，嵌套结算会复用它——
+    // 不加闸会自递归（第二层被 busy 重入保护拦下，属正确行为，但会把外层带挂）。
+    executeCommand: async (text, variables) => {
+      depth += 1
+      order.push('core-depth' + depth)
+      if (depth === 1) {
+        const nestedResult = await executeServerSettlement({
+          ...deps, ...callInput(fixtureChat(), { transaction: { eventId: 'mvu-work:inline-n', draft: fixtureChat() }, eventId: 'mvu-work:inline-n' })
+        })
+        order.push('nested-handled=' + nestedResult.handled)
+      }
+      variables.stat_data = { ok: depth }
+    }
+  }
+  const result = await executeServerSettlement({ ...deps, ...callInput(fixtureChat()) })
+  assert.strictEqual(result.handled, true)
+  assert(order.includes('core-depth2'), '嵌套派发应真正执行（走到核心）')
+  assert(order.includes('nested-handled=true'), '嵌套计算应在外层等待其结果时完成（无自等死锁）')
+  assert(order.indexOf('core-depth2') < order.indexOf('nested-handled=true'))
+})
+
 console.log('\n服务端执行 + 核心运行时接缝：' + passed + ' 组通过 / ' + failed + ' 组失败')
 if (failed > 0) process.exitCode = 1

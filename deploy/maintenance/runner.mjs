@@ -5,7 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash, randomUUID } from 'node:crypto'
 import { redactStartupLine } from './startup-log.mjs'
-import { maintenanceBudget } from './budget.mjs'
+import { maintenanceBudget, successBudgetMs } from './budget.mjs'
 import { options, runtimeFor, assertTargetAllowed, packagePolicyArgs } from './target.mjs'
 import { createDriver } from './driver.mjs'
 import { sourceAccess, assertPackageSource, assertSourceUninstalled, rehearseSource, finishSourceUninstall, finishRecoveredSourceUninstall, commitRecoveredPreimage, STANDARD_RECORD } from './source.mjs'
@@ -73,7 +73,16 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
       return { changed: !!removable?.recovery, action, line: adapter.line, initialState: wasRunning ? 'running' : 'stopped', finalState: wasRunning ? 'running' : 'stopped', elapsedMs: Math.round(budget.elapsed()), verified: true, verificationScope: wasRunning ? 'source-assembly-basic-health' : 'source-assembly-stopped', originalPlayabilityVerified: false, ...validation, ...(removable?.recovery ? { preimageRecovery: removable.recovery.provenance, sourceMetadataRepaired: true } : {}), data: '保留，未访问/转换/删除' }
     }
     // 只预演有限程序源码接缝，不创建第二套profile/node_modules或业务树。
-    rehearsal = await step('有限源码接缝预检及恢复材料', () => rehearseSource(action, source, adapter, evidenceDir, () => budget.remaining()))
+    if (action === 'uninstall' && state.withdrawnClean) {
+      // 宿主退出已撤缝：源码即作者原像，无恢复材料可演；protect幂等后重验零接管标记。
+      rehearsal = await step('宿主退出已撤缝：重验源码为作者原像（无恢复材料）', () => {
+        source.protect(); source.syntax(); assertSourceUninstalled(source)
+        const image = source.capture()
+        return { before: image, expected: image, withdrawnClean: true }
+      })
+    } else {
+      rehearsal = await step('有限源码接缝预检及恢复材料', () => rehearseSource(action, source, adapter, evidenceDir, () => budget.remaining()))
+    }
     baseline = rehearsal.before
     writeFileSync(path.join(evidenceDir, 'source-before.json'), JSON.stringify(baseline) + '\n', 'utf8')
     await step(wasRunning ? '重核目标并精确停止原实例' : '重核目标仍停止；不拉起', async () => {
@@ -85,6 +94,11 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
     if (action === 'install') {
       await step('目标profile官方离线装包/回读', () => driver.manage('install'))
       await step('作者未加载时接入插件接缝', () => { source.protect(); adapter.applyStandardSeams({ appDir: source.root }); if (!adapter.checkStandardSeams({ appDir: source.root }).ready) throw Error('接缝未ready') })
+    } else if (state.withdrawnClean) {
+      // 退出撤缝态：源码已是作者原像（disposer撤净），无接缝可卸，仅移除装配；原档与数据库不动。
+      await step('卸载装配（源码已为作者原像，无接缝可卸）；保留原档和数据库', () => { assertSourceUninstalled(source) })
+      await step('目标profile官方离线卸包/回读', () => driver.manage('uninstall'))
+      result = { outcome: { withdrawnClean: true, restored: [], mainRestored: [], hadMainManifest: false }, archived: [], data: '用户数据未访问、未删除、未转换', protection: '独立原件保护保留' }
     } else {
       const raw = baseline[STANDARD_RECORD], record = raw ? JSON.parse(Buffer.from(raw, 'base64').toString('utf8')) : null
       await step('卸载自有接缝；保留原档和数据库', () => { result = rehearsal.recovery ? finishRecoveredSourceUninstall(source, adapter, record, rehearsal, path.join(evidenceDir, 'source-archives')) : finishSourceUninstall(source, adapter, record, path.join(evidenceDir, 'source-archives')) })
@@ -109,10 +123,17 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
         progress('失败恢复：原装配/源码及原运行状态；不盲目重试')
         if (newProcess) await driver.stopIfAlive(newProcess)
         else await driver.stopFailedStart?.()
-        await driver.restorePackage()
-        source.restore(baseline)
-        if (!baseline[STANDARD_RECORD]) source.protect()
-        source.syntax()
+        if (baseline) {
+          await driver.restorePackage()
+          source.restore(baseline)
+          if (!baseline[STANDARD_RECORD]) source.protect()
+          source.syntax()
+        } else {
+          // 失败发生在**源码基线捕获之前**（预检阶段就抛）：源码树与 profile 装配都一字未改，
+          // 没有可恢复的对象；早期版本在这里拿 undefined 去 source.restore ⇒
+          // "Cannot convert undefined or null to object"（真机实测踩到）。
+          progress('失败发生在源码基线之前：源码与装配未修改，无需恢复')
+        }
         if (state?.wasRunning !== false) { const restored = await driver.start({ recovery: true }); await driver.verifyRecovery(restored) }
         else await driver.assertStopped()
       } catch (recovery) {
@@ -130,10 +151,16 @@ export function runCli(url, adapter) {
       console.log(`${adapter.packageName} 离线装卸（macOS/Linux/WSL2 CLI；作者2.5.0/DSH rc.2）\nnode deploy/maintenance.mjs install|uninstall [--home <已有安装目录>] [--port <核对端口>] [--systemd-unit <既有单元>] [--prepare-env] [--check] [--background]\n默认apply；本地完整包不联网、不索取网页凭证、不复制依赖/存档。运行中停止后按原方式恢复；原本停止则保持停止。包就绪后60秒成功预算；异常恢复独立处理。网页/真实玩法由用户确认。\nV2运行中目标须已带--experimental-vm-modules；默认不改启动配置。--prepare-env（仅install）显式授权两件环境预修：①systemd单元ExecStart补VM旗标（备份原unit、失败自动回滚）；②旧代维护残留备份隔离到证据目录（只移动不删除）。四个解析依赖须离线可用，不补装宿主peer、不联网补依赖。`)
       return
     }
-    if (!['linux', 'darwin'].includes(process.platform)) throw Error('SH入口支持macOS/Linux/WSL2，不在原生Windows启动服务')
+    if (!['linux', 'darwin', 'win32'].includes(process.platform)) throw Error('不支持的平台：' + process.platform)
     const op = options(process.argv.slice(2)); assertTargetAllowed(op)
+    // 原生 Windows 目前只放行**桌面版**（Electron，宿主标记 .dsh-tavern-local.json）：
+    // 它的停/启不由安装器接管（只做存在性判定＋提示用户从托盘退出），装包走桌面版自己的 CLI。
+    // Windows **CLI 版**需要把服务停/启交还作者的生命周期命令，该通路尚未接线——明确拒绝，不猜测。
+    if (process.platform === 'win32' && op.host !== 'desktop') {
+      throw Error('原生 Windows 仅支持酒馆桌面版（data/harness 布局）；Windows CLI 版安装通路尚未接线，拒绝猜测')
+    }
     // 每次Node交接的启动/import/目录识别也算入共享时间，不在worker入口重新从零计时。
-    const budget = maintenanceBudget({ elapsed: Number(op.elapsed || 0) + performance.now() }), root = path.dirname(path.dirname(fileURLToPath(url))), runtime = runtimeFor(op)
+    const budget = maintenanceBudget({ milliseconds: successBudgetMs(op.host), elapsed: Number(op.elapsed || 0) + performance.now() }), root = path.dirname(path.dirname(fileURLToPath(url))), runtime = runtimeFor(op)
     budget.remaining()
     packageFiles(root)
     const evidence = op.evidence ? path.resolve(op.evidence) : path.join(op.home, 'maintenance', adapter.packageName, new Date().toISOString().replace(/[:.]/g, '-') + '-' + randomUUID())
@@ -146,12 +173,17 @@ export function runCli(url, adapter) {
       budget.remaining()
       const args = [path.join(staged, 'deploy', 'maintenance.mjs'), op.action, '--home', op.home, '--app', op.app, '--profile', op.profile, op.check ? '--check' : '--apply', '--internal', '--evidence', evidence, '--elapsed', String(budget.elapsed()), ...(op.port ? ['--port', op.port] : []), ...(op['systemd-unit'] ? ['--systemd-unit', op['systemd-unit']] : []), ...(op['prepare-env'] ? ['--prepare-env'] : [])]
       if (op.background) {
-        const fd = openSync(path.join(evidence, 'job.log'), 'wx', 0o600), child = spawn(process.execPath, args, { cwd: op.app, detached: true, stdio: ['ignore', fd, fd] }); closeSync(fd)
+        // Windows 上 detached:true 的语义是"新控制台窗口"（POSIX 才是脱离会话）——必须显式隐藏，
+        // 否则用户会看到一连串弹出的命令行窗口。后台模式仍需 detached 以在父进程退出后继续。
+        const fd = openSync(path.join(evidence, 'job.log'), 'wx', 0o600), child = spawn(process.execPath, args, { cwd: op.app, detached: true, windowsHide: true, stdio: ['ignore', fd, fd] }); closeSync(fd)
         await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject) }); child.unref()
         console.log('维护已后台启动；PID=' + child.pid + '；结果=' + path.join(evidence, 'result.json')); return
       }
       // 默认等待同一独立作业结果；Ctrl-C或终端断开不会中断恢复，且用户能看到进度。
-      const child = spawn(process.execPath, args, { cwd: op.app, detached: true, stdio: 'inherit' })
+      // **Windows 上保持 detached + windowsHide**：detached 让子进程有自己的（隐藏）控制台，
+      // 父终端的 Ctrl-C 不会传给它（恢复不中断——这是本路径的既有承诺）；windowsHide 隐藏
+      // 新控制台（否则就是用户实测的"不停弹命令行窗口"）；输出经 stdio:inherit 仍显示在本窗口。
+      const child = spawn(process.execPath, args, { cwd: op.app, detached: true, windowsHide: true, stdio: 'inherit' })
       const detach = () => { child.unref(); console.error('终端中断；维护/恢复继续。结果：' + path.join(evidence, 'result.json')); process.exit(130) }
       process.once('SIGINT', detach); process.once('SIGTERM', detach)
       const code = await new Promise((resolve, reject) => { child.once('exit', resolve); child.once('error', reject) })
@@ -166,7 +198,9 @@ export function runCli(url, adapter) {
         if (op.check) {
           const state = await driver.preflight(op.action); assertPackageSource(source, adapter)
           if (state.noop && op.action === 'uninstall') assertSourceUninstalled(source)
-          const inspection = state.noop && op.action === 'uninstall' ? null : rehearseSource(state.noop ? 'uninstall' : op.action, source, adapter, evidence, () => budget.remaining())
+          const inspection = state.noop && op.action === 'uninstall' ? null
+            : state.withdrawnClean && op.action === 'uninstall' ? { result: { withdrawnClean: true, note: '宿主退出已撤缝：源码即作者原像，卸载仅移除装配' } }
+            : rehearseSource(state.noop ? 'uninstall' : op.action, source, adapter, evidence, () => budget.remaining())
           result = { check: true, changed: false, initialState: state.wasRunning ? 'running' : 'stopped', ...(inspection?.result || {}), ...(inspection?.recovery ? { repairAvailable: true, targetModified: false } : {}), leftovers: findLegacyLeftovers(source.root), elapsedMs: Math.round(budget.elapsed()) }
           budget.remaining()
         } else result = await executeMaintenance({ action: op.action, adapter, driver, source, evidenceDir: evidence, progress, budget, prepareEnv: !!op['prepare-env'] })

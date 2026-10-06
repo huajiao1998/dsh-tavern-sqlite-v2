@@ -1,10 +1,10 @@
 // 目标profile原地离线装卸；保留原运行状态，无认证、无依赖树副本。
-import { existsSync, readFileSync, writeFileSync, realpathSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, realpathSync, mkdirSync, symlinkSync, rmSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import net from 'node:net'
-import { command, findProcess, readProcess, sameProcess, stripSecrets, waitExit, processAlive } from './process.mjs'
+import { command, findProcess, readProcess, sameProcess, stripSecrets, waitExit, processAlive, desktopTavernProcesses } from './process.mjs'
 import { pause, maintenanceBudget } from './budget.mjs'
 import { runtimeFor, packagePolicyArgs, assertTargetAllowed } from './target.mjs'
 import { parseSystemdProperties, systemdOwner, assertSystemdTarget, assertSystemdUnchanged } from './systemd.mjs'
@@ -13,12 +13,33 @@ import { waitSystemdExecIdentity } from './start-identity.mjs'
 import { STANDARD_RECORD } from './source.mjs'
 import { AUTHOR_VERSION } from '../../lib/standard-host.js'
 const family = ['dsh-tavern-storage-sqlite', 'dsh-tavern-storage-sqlite-v1', 'dsh-tavern-storage-sqlite-v2', 'dsh-tavern-sqlite-v1', 'dsh-tavern-sqlite-v2']
-// V2精确允许的四个解析器依赖：分别是本行唯一允许的第三方依赖，未知一律拒绝，不放宽依赖政策。
-const PARSER_DEPENDENCIES = ['json5', 'jsonrepair', 'lodash', 'yaml']
+// 运行时依赖**必须为零**：四个解析器依赖（lodash/yaml/json5/jsonrepair）已 vendor 进包内
+// （见 lib/vendor/VENDOR.md + manifest.json）。零依赖是"任何宿主都能离线安装"的前提：
+// 桌面版宿主的 pnpm 离线元数据缓存里没有 lodash/json5/jsonrepair，声明依赖会 ERR_PNPM_NO_OFFLINE_META。
+const VENDOR_ENTRIES = { lodash: 'lib/vendor/lodash/lodash.min.js', json5: 'lib/vendor/json5/index.mjs', jsonrepair: 'lib/vendor/jsonrepair/esm/index.js', yaml: 'lib/vendor/yaml/dist/index.js' }
+/**
+ * 供应链护栏（安装前必过）：包只能有零运行时依赖，且 vendor 账本与四个入口文件必须齐全。
+ * 任一不符即拒绝安装——不放宽依赖政策。
+ */
+export function assertPackageDependencies(pkg, root) {
+  const declared = Object.keys(pkg.dependencies || {})
+  if (declared.length > 0) throw Error('本包要求零运行时依赖（解析器依赖已 vendor 进包内）；发现：' + declared.join('、') + '，拒绝安装')
+  const manifestFile = path.join(root, 'lib', 'vendor', 'manifest.json')
+  if (!existsSync(manifestFile)) throw Error('缺少 vendor 账本 lib/vendor/manifest.json，拒绝安装')
+  let manifest
+  try { manifest = json(manifestFile) } catch (error) { throw Error('vendor 账本无法解析：' + (error && error.message)) }
+  for (const [name, entry] of Object.entries(VENDOR_ENTRIES)) {
+    const recorded = manifest.packages?.[name]
+    if (!recorded || recorded.version === undefined) throw Error('vendor 账本缺少 ' + name + ' 的记录，拒绝安装')
+    if (!existsSync(path.join(root, entry))) throw Error('vendor 入口缺失：' + entry + '，拒绝安装')
+  }
+  return { packages: Object.fromEntries(Object.entries(VENDOR_ENTRIES).map(([name]) => [name, manifest.packages[name].version])) }
+}
 const json = p => JSON.parse(readFileSync(p, 'utf8'))
 const profileState = dir => { const data = json(path.join(dir, 'package.json')); return { data, deps: data.dependencies || {}, bundles: data.dsh?.profile?.bundles || [] } }
 export async function packageCommand(exe, args, { cwd, env, timeout = 20000 } = {}) {
-  const child = spawn(exe, args, { cwd, env, detached: process.platform !== 'win32', stdio: 'inherit' })
+  // windowsHide：Windows 上避免控制台闪烁；detached 仅在 POSIX 用于建立进程组（便于整组终止）。
+  const child = spawn(exe, args, { cwd, env, detached: process.platform !== 'win32', windowsHide: true, stdio: 'inherit' })
   let timer, force, timedOut = false
   const signal = name => { try { if (process.platform === 'win32') child.kill(name); else process.kill(-child.pid, name) } catch (error) { if (error.code !== 'ESRCH') throw error } }
   await new Promise((resolve, reject) => {
@@ -49,8 +70,318 @@ export function assertLaunchMode(action, adapter, argv) {
   if (!argv.includes('--experimental-vm-modules')) throw Error('V2需要既有Node --experimental-vm-modules；默认不静默改启动命令（显式加 --prepare-env 可授权自动补旗标并留备份）')
   return { required: true }
 }
+/**
+ * 桌面版（Electron）驱动：**不接管停/启**（桌面版没有可由安装器管理的服务），
+ * 装包走桌面版自己的 CLI 入口（`<exe> --expose-internals <app>/lib/desktop-cli.js plugin …`），
+ * 能力探针改为「维护进程 Node 能力 ＋ Worker 内 vm 能力」两项。
+ *
+ * 与 CLI/POSIX 路径的分工是**整体替换**，不是修补：POSIX 的进程身份（/proc argv/cwd/代次）
+ * 与 systemd 所有权在 Windows 没有等价物，自造一套弱化版会削弱"认领前必须确证同一对象"的护栏。
+ * 桌面版因此只做**存在性判定**：目标在跑就拒绝安装并提示用户从托盘退出，绝不杀进程。
+ */
+/**
+ * 读取 profile 已有 node_modules 使用的 pnpm store 目录。
+ * 桌面版（Desktop 2.0.13 自带 pnpm 11.8.0）把 store 放在 `<tavernRoot>/data/cache/pnpm/v11`，
+ * 而 pnpm 11 在 store 与既有链接不一致时会直接 **ERR_PNPM_UNEXPECTED_STORE 拒绝安装**：
+ * 因此必须把既有 store 显式交给这次安装，而不是让它回落到默认的 `<盘>\.pnpm-store\v11`。
+ * 只读 `.modules.yaml` 的 storeDir 字段（自发现，不猜路径、不写死）。
+ */
+export function pnpmStoreDir(profileDir) {
+  const file = path.join(profileDir, 'node_modules', '.modules.yaml')
+  if (!existsSync(file)) return null
+  try {
+    // 该文件是 YAML 但键值写成 JSON 风格：`"storeDir": "D:\\Program Files ...\\v11",`
+    // ——键可能带引号，路径里的反斜杠是**双写转义**，取到值后要还原。
+    const hit = /^\s*"?storeDir"?:\s*"?(.+?)"?\s*,?\s*$/m.exec(readFileSync(file, 'utf8'))
+    if (!hit) return null
+    const value = hit[1].trim().replace(/\\\\/g, '\\')
+    return value || null
+  } catch { return null }
+}
+
+/**
+ * 宿主 peer 投影（桌面版专用，2026-10-06 真机根因修复）。
+ *
+ * 桌面版 Electron 的模块解析覆盖层把 `@deepseek-ai/*` 锚到 **CLI 版才有的**
+ * `<DSH_HOME>/runtime/lib/node_modules`（桌面安装没有该目录），而 `dsh-app-boot` 生成的
+ * 插件私有农场 `<profile>/.dsh-module-fallback/node_modules` 又按设计**排除**安装自带的包
+ *（`installationPackageNames`），于是"插件声明的宿主 peer"在桌面端谁也解析不到 ⇒ 插件加载失败、
+ * 整个插件树进恢复模式（真机实测）。
+ *
+ * 这里把插件声明的 `@deepseek-ai/*` peer **投影进它自己的私有农场**，目标取**桌面应用自己的**
+ * `resources/app/node_modules/@deepseek-ai/<name>`——与宿主 harness 加载的是同一份真实路径，
+ * 因此 Node 模块缓存命中同一实例（宿主补丁必须打在同一个实例上，复制一份是错的）。
+ * 投影清单落一个标记文件，卸载时只摘我们建的那些，绝不覆盖/删除别人的投影。
+ */
+const HOST_PEER_MARKER = '.dsh-tavern-sqlite-v2-host-peers.json'
+export function hostPeerNames(pkg) {
+  return Object.keys(pkg.peerDependencies || {}).filter(name => name.startsWith('@deepseek-ai/'))
+}
+export function ensureHostPeerLinks(pkg, desktop, profileDir) {
+  const names = hostPeerNames(pkg)
+  if (names.length === 0) return []
+  const scopeDir = path.join(profileDir, '.dsh-module-fallback', 'node_modules', '@deepseek-ai')
+  const sourceDir = path.join(desktop.appDir, 'node_modules', '@deepseek-ai')
+  mkdirSync(scopeDir, { recursive: true })
+  const created = []
+  for (const name of names) {
+    const leaf = name.split('/')[1]
+    const target = path.join(sourceDir, leaf)
+    if (!existsSync(path.join(target, 'package.json'))) throw Error('桌面版运行时缺少宿主 peer：' + name + '（' + target + '）；拒绝安装一个加载不起来的插件')
+    const link = path.join(scopeDir, leaf)
+    if (existsSync(link)) {
+      if (realpathSync(link) !== realpathSync(target)) throw Error('插件农场里已有指向别处的 ' + name + '：拒绝覆盖既有投影')
+      continue
+    }
+    symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir')
+    created.push(leaf)
+  }
+  writeFileSync(path.join(scopeDir, HOST_PEER_MARKER), JSON.stringify({ package: pkg.name, created }, null, 2) + '\n', 'utf8')
+  return created
+}
+export function removeHostPeerLinks(profileDir) {
+  const scopeDir = path.join(profileDir, '.dsh-module-fallback', 'node_modules', '@deepseek-ai')
+  const marker = path.join(scopeDir, HOST_PEER_MARKER)
+  if (!existsSync(marker)) return []
+  let created = []
+  try { created = JSON.parse(readFileSync(marker, 'utf8')).created || [] } catch { created = [] }
+  const removed = []
+  for (const leaf of created) {
+    const link = path.join(scopeDir, leaf)
+    // 只删我们记过的、且确实还是"链接"的条目；普通目录视为他人投影，不动。
+    try { if (existsSync(link)) { rmSync(link, { recursive: true, force: true }); removed.push(leaf) } } catch { /* 摘除失败不掩盖原错误，下次卸载重试 */ }
+  }
+  rmSync(marker, { force: true })
+  return removed
+}
+
+/**
+ * 把插件写成 profile 的 **`link:` 依赖 + bundle**（与作者自家插件同形状）。
+ * 只增删我们自己那一条，其余字段（含 `dshTavern.*` 作者管理清单）原样保留、不改语义。
+ */
+export function writeProfileLink(profileDir, packageName, target) {
+  const file = path.join(profileDir, 'package.json')
+  const data = json(file)
+  data.dependencies = { ...(data.dependencies || {}), [packageName]: 'link:' + target.split(path.sep).join('/') }
+  const bundles = Array.isArray(data.dsh?.profile?.bundles) ? data.dsh.profile.bundles : []
+  if (!bundles.includes(packageName)) data.dsh = { ...(data.dsh || {}), profile: { ...(data.dsh?.profile || {}), bundles: [...bundles, packageName] } }
+  writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf8')
+}
+export function removeProfileLink(profileDir, packageName) {
+  const file = path.join(profileDir, 'package.json')
+  const data = json(file)
+  if (data.dependencies) delete data.dependencies[packageName]
+  const bundles = data.dsh?.profile?.bundles
+  if (Array.isArray(bundles)) data.dsh.profile.bundles = bundles.filter(name => name !== packageName)
+  writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf8')
+}
+
+/**
+ * 把宿主 peer 作为 junction 放进**插件自己的 node_modules**（2026-10-06 真机第三次修复）。
+ *
+ * 桌面版 Electron 的解析覆盖层对 `@deepseek-ai/*` 有一个硬锚点 `<home>/runtime/lib/node_modules`
+ *（CLI 版布局，桌面安装里不存在），并且只对"linked profile 模块"才放行共享回退根——
+ * 而我们的包实体在 profile 之外，实测 `file:` 与 `link:` 两种形状都仍被拉到那个死锚点上。
+ *
+ * 作者自家的插件之所以能加载，是因为它们的 `@deepseek-ai/*` 依赖**就在自己的 node_modules 里**
+ * （`tavern-plugin/package.json` 把 dsh-tools/dsh-agent 等列为 dependencies），走**普通 Node 上溯**
+ * 就能命中，完全不经过覆盖层那条规则。
+ *
+ * 这里照同样的形状：把包里声明的宿主 peer 逐个 junction 到**桌面应用自己的副本**
+ * （`resources/app/node_modules/@deepseek-ai/<name>`）——realpath 与 harness 加载的是同一份，
+ * 保证模块实例一致（宿主补丁必须打在同一个实例上）。整包目录在卸载时一并删除，无需另记清单。
+ */
+export function linkHostPeersIntoPackage(pkg, desktop, installDir) {
+  const names = Object.keys(pkg.peerDependencies || {}).filter(name => name.startsWith('@deepseek-ai/'))
+  if (names.length === 0) return []
+  const linked = []
+  for (const name of names) {
+    const source = path.join(desktop.appDir, 'node_modules', ...name.split('/'))
+    if (!existsSync(path.join(source, 'package.json'))) throw Error('桌面版运行时缺少宿主 peer：' + name + '（' + source + '）；拒绝安装一个加载不起来的插件')
+    const link = path.join(installDir, 'node_modules', ...name.split('/'))
+    mkdirSync(path.dirname(link), { recursive: true })
+    rmSync(link, { recursive: true, force: true })
+    symlinkSync(source, link, process.platform === 'win32' ? 'junction' : 'dir')
+    linked.push(name)
+  }
+  return linked
+}
+
+export function createDesktopDriver(op, adapter, packageRoot, evidence, budget, { runtime, runPackage = packageCommand, presence = desktopTavernProcesses, activeBudget = budget, logger = console } = {}) {
+  const desktop = runtime.desktop, installed = path.join(op.profileDir, 'node_modules', adapter.packageName)
+  let prior = null, originalDependencyBytes = {}
+  const driver = { runtime, recoveryPackage: null, wasRunning: false, host: 'desktop' }
+  const storeDir = pnpmStoreDir(op.profileDir)
+  const env = {
+    ...stripSecrets(process.env),
+    ELECTRON_RUN_AS_NODE: '1', DSH_HOME: op.home, DSH_TAVERN_CLI_HOME: op.home,
+    npm_config_runtime: 'electron', npm_config_target: desktop.electronVersion,
+    // 与桌面版自己的装包环境对齐（desktop-package-manager.mjs 同款）：disturl 指向 Electron 头，
+    // CI 抑制交互提示。缺这两项时 pnpm 在离线模式下的行为与桌面自家通路不一致。
+    npm_config_disturl: 'https://electronjs.org/headers', CI: 'true',
+    pnpm_config_update_notifier: 'false', npm_config_offline: 'true', pnpm_config_offline: 'true',
+  }
+  // pnpm 11 的 store-dir **只认 CLI flag**（桌面版 dshmarket 的 issue #244 明确记录：
+  // 项目 .npmrc / 用户 .npmrc / pnpm-workspace.yaml 一律无效，环境变量也不行），
+  // 而 store 与既有 node_modules 不一致时 pnpm 会 ERR_PNPM_UNEXPECTED_STORE 拒绝一切 add/remove。
+  // 因此把 `.modules.yaml` 记录的**既有 store** 作为显式 flag 传给这次装包（不换 store、只沿用）。
+  // **必须给值加内嵌双引号**：dsh CLI 会把参数拼成字符串再交给 pnpm，而该路径含空格；
+  // 实测四种写法只有 `--store-dir="…"` 能通过 store 校验（无引号会被截成 "D:\Program"）。
+  const storeArgs = storeDir ? ['--store-dir="' + storeDir + '"'] : []
+  const running = () => presence({ root: op.tavernRoot, runtimeDir: desktop.root })
+  const assertStopped = async () => {
+    const list = running()
+    if (list.length) {
+      throw Error('酒馆桌面版正在运行（PID ' + list.map(item => item.pid).join(',') + '）：桌面版没有可由安装器停/启的服务，请先从托盘退出酒馆后再安装（不杀进程、不修改运行中的程序）')
+    }
+  }
+  const assertAssembly = action => {
+    const state = profileState(op.profileDir), present = !!state.deps[adapter.packageName] && state.bundles.includes(adapter.packageName) && existsSync(installed)
+    const other = deps => Object.fromEntries(Object.entries(deps).filter(([key]) => key !== adapter.packageName).sort(([a], [b]) => a.localeCompare(b)))
+    if (JSON.stringify(other(state.deps)) !== JSON.stringify(other(prior.deps)) || JSON.stringify(state.bundles.filter(s => s !== adapter.packageName)) !== JSON.stringify(prior.bundles.filter(s => s !== adapter.packageName))) throw Error('装卸改变非目标依赖/bundle，拒绝成功')
+    for (const [file, bytes] of Object.entries(originalDependencyBytes || {})) if (bytes && (!existsSync(file) || !readFileSync(file).equals(bytes))) throw Error('官方操作改变既有非目标软件包，拒绝冒认单包安装成功')
+    if (present !== (action === 'install')) throw Error('目标依赖/bundle/链接回读不一致')
+    if (action === 'uninstall' && (state.deps[adapter.packageName] || state.bundles.includes(adapter.packageName) || existsSync(installed))) throw Error('卸载仍有装配残留')
+    return state
+  }
+  // 桌面版从不启动/停止酒馆（由用户从托盘操作），因此恢复路径里的 stop 家族方法**绝不能抛**：
+  // runner 的失败恢复**总会**调 stopFailedStart()（runner.mjs:111），抛错会让恢复在
+  // `source.restore(baseline)` **之前**中断，留下"改了源码没恢复"的半装状态（真机实测踩到过）。
+  // 语义：不杀任何进程、不代启；若目标在跑只响亮告警，恢复照常继续。
+  const noStop = async label => {
+    const list = running()
+    if (list.length) logger?.warn?.('[desktop-driver] ' + label + '：目标酒馆正在运行（PID ' + list.map(item => item.pid).join(',') + '），不杀进程；源码/装配恢复继续，重启后生效')
+    return { changed: false, host: 'desktop', running: list.length > 0 }
+  }
+  return Object.assign(driver, {
+    async prepareEnvironment() {
+      // 桌面版没有 systemd 单元可改，也**不需要** --experimental-vm-modules：
+      // 缺 vm 时插件自己走 Worker 路径（execArgv 带旗标），故此处不做事、不假装成功。
+      return { changed: false, host: 'desktop', reason: '桌面版经 Worker 取得 vm 能力，无需环境预修' }
+    },
+    async preflight(action) {
+      const pkg = json(path.join(packageRoot, 'package.json'))
+      if (pkg.name !== adapter.packageName) throw Error('维护入口与本地包身份不一致')
+      assertPackageDependencies(pkg, packageRoot)
+      for (const peer of Object.keys(pkg.peerDependencies || {})) {
+        const manifest = path.join(desktop.peerRoot, ...peer.split('/'), 'package.json')
+        if (!existsSync(manifest) || json(manifest).version !== '0.1.5-rc.2') throw Error('桌面版既有宿主peer缺失/未适配：' + peer + '；不自动安装第二份宿主')
+        // 宿主 peer 还必须在**桌面应用自己**的 node_modules 里存在——投影（见 ensureHostPeerLinks）
+        // 就是指向那一份，保证与 harness 加载的是同一模块实例。
+        const hostCopy = path.join(desktop.appDir, 'node_modules', ...peer.split('/'), 'package.json')
+        if (!existsSync(hostCopy)) throw Error('桌面版应用侧缺少宿主 peer 同实例副本：' + peer + '（' + hostCopy + '）')
+      }
+      prior = profileState(op.profileDir)
+      originalDependencyBytes = Object.fromEntries(Object.keys(prior.deps).filter(name => name !== adapter.packageName).map(name => {
+        const file = path.join(op.profileDir, 'node_modules', ...name.split('/'), 'package.json')
+        return [file, existsSync(file) ? readFileSync(file) : null]
+      }))
+      for (const name of family) if (name !== adapter.packageName && (prior.deps[name] || prior.bundles.includes(name))) throw Error('另一版本线已安装，先用所属包卸载')
+      const author = json(path.join(op.app, 'tavern-plugin', 'package.json'))
+      if (author.name !== 'dsh-tavern-plugin' || author.version !== AUTHOR_VERSION) throw Error('作者版本未适配')
+      const patch = readFileSync(path.join(op.profileDir, 'cordis.patch.yml'), 'utf8').replace(/^\s*#.*$/gm, '').trim()
+      if (patch !== '[]' && patch !== '') throw Error('profile自定义patch非空，请先核冲突；不覆盖用户配置')
+      // `--check` 是只读预检，允许酒馆开着；真正写前的停止态断言在 assertIdentity/manage 里
+      //（runner 在装包前还会再调一次 assertStopped）。这里只记录当前是否在跑，便于如实报告。
+      const runningNow = running().length > 0
+      // 能力探针①：维护进程的 Node 必须能开 node:sqlite(STRICT) 与 zstd（不要求 vm，桌面版由 Worker 提供）。
+      const probe = "import {DatabaseSync} from 'node:sqlite';import {zstdDecompressSync} from 'node:zlib';const db=new DatabaseSync(':memory:');db.exec('CREATE TABLE probe(k INTEGER PRIMARY KEY) STRICT');db.close();if(typeof zstdDecompressSync!=='function')throw Error('缺少zstd')"
+      await runPackage(process.execPath, ['--input-type=module', '-e', probe], { cwd: op.app, env, timeout: activeBudget.remaining(2500) })
+      // 能力探针②：**Worker 内**必须有 vm.SourceTextModule（这是桌面版跑服务端 ESM 卡脚本的唯一通路）。
+      // 注意 clearTimeout：不清理的话定时器会把探针进程多吊住 8 秒（每次安装白等）。
+      const workerProbe = "import {Worker} from 'node:worker_threads';const code=\"const vm=require('node:vm');const {parentPort}=require('node:worker_threads');parentPort.postMessage(typeof vm.SourceTextModule)\";const worker=new Worker(code,{eval:true,execArgv:['--experimental-vm-modules']});const seen=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Worker 探针超时')),8000);worker.once('message',message=>{clearTimeout(timer);resolve(message);worker.terminate()});worker.once('error',error=>{clearTimeout(timer);reject(error)})});if(seen!=='function')throw Error('Worker 内缺少 vm.SourceTextModule')"
+      await runPackage(process.execPath, ['--input-type=module', '-e', workerProbe], { cwd: op.app, env, timeout: activeBudget.remaining(9000) })
+      const present = !!prior.deps[adapter.packageName]
+      if (present !== prior.bundles.includes(adapter.packageName) || present !== existsSync(installed)) throw Error('目标装配不完整，拒绝猜测')
+      let withdrawnClean = false
+      if (present) {
+        if (json(path.join(installed, 'package.json')).name !== adapter.packageName) throw Error('现装包身份错误')
+        const { copyPackage, samePackage } = await import('./runner.mjs')
+        driver.recoveryPackage = samePackage(packageRoot, realpathSync(installed)) ? packageRoot : path.join(evidence, 'original-package')
+        if (driver.recoveryPackage !== packageRoot) copyPackage(realpathSync(installed), driver.recoveryPackage)
+        if (action === 'install' && driver.recoveryPackage !== packageRoot) throw Error('现装不同代；先用本地所属代卸载，不自动升级')
+        // 宿主正常退出由标准host disposer撤缝并删记录（装配保留）：该态install按首装重建，
+        // uninstall仅卸装配；非该态仍要求记录在场，缺记录即拒绝（不猜）。
+        if (!existsSync(path.join(op.app, STANDARD_RECORD))) {
+          const { sourceAccess, withdrawnCleanState } = await import('./source.mjs')
+          if (!withdrawnCleanState(sourceAccess(op.app, adapter.targets))) throw Error('已装包但缺源码恢复记录')
+          withdrawnClean = true
+        }
+      } else if (existsSync(path.join(op.app, STANDARD_RECORD))) throw Error('包不在但接缝在，拒绝认领')
+      driver.wasRunning = false
+      return { noop: (action === 'install' ? present : !present) && !withdrawnClean, wasRunning: false, host: 'desktop', runningNow, ...(withdrawnClean ? { withdrawnClean: true } : {}) }
+    },
+    async assertIdentity() {
+      // 桌面版不做进程身份认领（Windows 无 argv/cwd/代次可核）；写前只需确证目标不在跑。
+      await assertStopped()
+    },
+    assertStopped,
+    // 生命周期：不抛（见 noStop 注释）。start 也不代启——桌面版由用户从托盘启动。
+    stop: () => noStop('停止请求'),
+    stopIfAlive: () => noStop('停止请求'),
+    stopFailedStart: () => noStop('失败启动清理'),
+    async start() { logger?.warn?.('[desktop-driver] 桌面版不代启动酒馆：请用户从托盘手动启动'); return null },
+    async stoppedAfterError() { return (await running()).length === 0 },
+    beginRecovery() {},
+    async restorePackage() {
+      // 与 POSIX 驱动同语义：把 **profile 装配**恢复到操作前状态——本来就装着 ⇒ 用恢复包重装；
+      // 本来没装 ⇒ 卸掉；两态都没有 ⇒ 断言确实未装。**绝不往包源（packageRoot）写**。
+      if (prior?.deps?.[adapter.packageName]) await driver.manage('install', driver.recoveryPackage || packageRoot)
+      else if (profileState(op.profileDir).deps[adapter.packageName] || existsSync(installed)) await driver.manage('uninstall')
+      else assertAssembly('uninstall')
+      return { changed: true, host: 'desktop' }
+    },
+    async manage(action, root = packageRoot) {
+      await assertStopped()
+      // **桌面版按作者的 `link:` 形状安装，不走 pnpm**（2026-10-06 真机根因）：
+      // 桌面版 Electron 的解析覆盖层把"profile 包解析到共享回退根 `<home>/profiles/node_modules`"
+      // 判为 obsolete 而拒绝，**只有 linked profile 模块才允许走共享回退**
+      //（`resources/app/lib/module-resolution-*.js` 的 canUseProfileSharedDependencyUrl 要求父模块是 linked）。
+      // 作者自己的插件全是 `link:` 形状，所以它们的 `@deepseek-ai/*` 能从共享根解析、拿到与 harness
+      // 同一实例。走 pnpm 的 `file:` 安装则注定解析失败（真机两次实测）。这同时绕开了 pnpm 11 在
+      // 桌面宿主上的 store/离线元数据/remove 参数三个坑。
+      const installDir = path.join(op.home, 'plugins', adapter.packageName)
+      const linkPath = path.join(op.profileDir, 'node_modules', adapter.packageName)
+      const { copyPackage, samePackage } = await import('./runner.mjs')
+      if (action === 'install') {
+        rmSync(installDir, { recursive: true, force: true })
+        mkdirSync(path.dirname(installDir), { recursive: true })
+        copyPackage(root, installDir)
+        linkHostPeersIntoPackage(json(path.join(root, 'package.json')), desktop, installDir)
+        writeProfileLink(op.profileDir, adapter.packageName, installDir)
+        rmSync(linkPath, { recursive: true, force: true })
+        mkdirSync(path.dirname(linkPath), { recursive: true })
+        symlinkSync(installDir, linkPath, process.platform === 'win32' ? 'junction' : 'dir')
+        assertAssembly(action)
+        if (!samePackage(root, realpathSync(linkPath))) throw Error('链接安装后的包字节不是选定本地代，拒绝成功')
+      } else {
+        removeProfileLink(op.profileDir, adapter.packageName)
+        rmSync(linkPath, { recursive: true, force: true })
+        rmSync(installDir, { recursive: true, force: true })
+        assertAssembly(action)
+      }
+    },
+    async verify(action, _adapter, _opts = {}) {
+      // `existing:true` 是 runner **幂等路径**（已处于目标状态时的复核）的语义，
+      // 不是"对运行中实例复验"——这里绝不能抛，否则桌面端重装/幂等检查直接失败。
+      // 桌面版不做进程/HTTP 验收：酒馆由用户退出/重开，页面由用户确认。
+      assertAssembly(action)
+      if (action === 'install' && !adapter.checkStandardSeams({ appDir: op.app }).ready) throw Error('完整源码接缝未ready')
+      return {
+        runtimeVerified: false, state: 'stopped', host: 'desktop',
+        requiresRestart: '请从托盘退出并重新启动酒馆桌面版，再从 Profile 菜单进入 tavern 由用户确认页面与玩法',
+        webVerification: '桌面版不做 HTTP/页面自动验收；插件加载与页面由用户重启后确认',
+      }
+    },
+    async verifyRecovery() { return driver.verify('install', adapter, {}) },
+  })
+}
+
 export function createDriver(op, adapter, packageRoot, evidence, budget, { processFinder = findProcess, processReader = readProcess, runPackage = packageCommand, request = fetch, runtimeResolver = runtimeFor, runCommand = command, portOpen = tcpOpen, alive = processAlive } = {}) {
   const runtime = runtimeResolver(op), context = { ...op, ...runtime }, installed = path.join(op.profileDir, 'node_modules', adapter.packageName)
+  // 桌面版（Electron）走整体替换的独立驱动：POSIX 的进程身份与 systemd 所有权在 Windows 无等价物，
+  // 不做"半套身份校验"，只做存在性判定＋桌面版自己的装包入口。CLI/POSIX 路径一行未改。
+  if (op.host === 'desktop') return createDesktopDriver(op, adapter, packageRoot, evidence, budget, { runtime, runPackage })
   let original, prior, unit, latest, stopSignalled = false, launch = 0, recovery = false, activeBudget = budget
   let originalDependencyBytes
   const env = { ...stripSecrets(process.env), DSH_HOME: op.home, DSH_TAVERN_CLI_HOME: op.home, pnpm_config_update_notifier: 'false', npm_config_offline: 'true', pnpm_config_offline: 'true' }
@@ -154,9 +485,8 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { proce
       assertTargetAllowed(op)
       const pkg = json(path.join(packageRoot, 'package.json'))
       if (pkg.name !== adapter.packageName) throw Error('维护入口与本地包身份不一致')
-      // V2只允许精确四个解析器依赖；未知依赖一律拒绝，不放宽供应链政策。
-      const declared = Object.keys(pkg.dependencies || {}).sort()
-      if (JSON.stringify(declared) !== JSON.stringify([...PARSER_DEPENDENCIES].sort())) throw Error('V2依赖须精确为json5/jsonrepair/lodash/yaml；未知依赖拒绝安装')
+      // 供应链护栏：零运行时依赖 + vendor 账本齐全（解析器依赖已打进包内）。
+      assertPackageDependencies(pkg, packageRoot)
       for(const peer of Object.keys(pkg.peerDependencies||{})){
         const manifest=path.join(op.home,'runtime','lib','node_modules',...peer.split('/'),'package.json')
         if(!existsSync(manifest)||json(manifest).version!=='0.1.5-rc.2')throw Error('既有宿主peer缺失/未适配：'+peer+'；不自动安装第二份宿主')
@@ -200,18 +530,24 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { proce
       await runPackage('pnpm', ['--version'], { cwd: op.app, env, timeout: activeBudget.remaining(2500) })
       const present = !!prior.deps[adapter.packageName]
       if (present !== prior.bundles.includes(adapter.packageName) || present !== existsSync(installed)) throw Error('目标装配不完整，拒绝猜测')
+      let withdrawnClean = false
       if (present) {
         if (json(path.join(installed, 'package.json')).name !== adapter.packageName) throw Error('现装包身份错误')
         const { copyPackage, samePackage } = await import('./runner.mjs')
         driver.recoveryPackage = samePackage(packageRoot, realpathSync(installed)) ? packageRoot : path.join(evidence, 'original-package')
         if (driver.recoveryPackage !== packageRoot) copyPackage(realpathSync(installed), driver.recoveryPackage)
         if (action === 'install' && driver.recoveryPackage !== packageRoot) throw Error('现装不同代；先用本地所属代卸载，不自动升级')
-        if (!existsSync(path.join(op.app, STANDARD_RECORD))) throw Error('已装包但缺源码恢复记录')
+        // 与桌面版同款"退出撤缝态"：宿主正常退出后disposer已撤缝删记录，源码即作者原像。
+        if (!existsSync(path.join(op.app, STANDARD_RECORD))) {
+          const { sourceAccess, withdrawnCleanState } = await import('./source.mjs')
+          if (!withdrawnCleanState(sourceAccess(op.app, adapter.targets))) throw Error('已装包但缺源码恢复记录')
+          withdrawnClean = true
+        }
       } else if (existsSync(path.join(op.app, STANDARD_RECORD))) throw Error('包不在但接缝在，拒绝认领')
       driver.wasRunning = !!original
       if (original) { context.port = original.port; context.host = original.host }
       // 不运行官方--dump-config，避免构造Host或自动扫描原档。
-      return { noop: action === 'install' ? present : !present, wasRunning: !!original }
+      return { noop: (action === 'install' ? present : !present) && !withdrawnClean, wasRunning: !!original, ...(withdrawnClean ? { withdrawnClean: true } : {}) }
     },
     async assertIdentity() {
       const current = processFinder(context)

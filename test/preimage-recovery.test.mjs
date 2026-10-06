@@ -37,7 +37,7 @@ function fixture(t){
  let serial=0
  const evidence=()=>{const dir=path.join(history,new Date(1791240000000+serial++*1000).toISOString().replace(/[:.]/g,'-')+'-'+randomUUID());fs.mkdirSync(dir,{recursive:true});return dir}
  const events=[]
- const driver={noop:false,preflight:async()=>({wasRunning:false,noop:driver.noop}),assertIdentity:async()=>events.push('identity'),assertStopped:async()=>events.push('stopped'),stop:async()=>events.push('stop'),start:async()=>{throw Error('停止态不得启动')},manage:async action=>events.push('manage:'+action),verify:async()=>({basicHealthVerified:true}),beginRecovery(){},stoppedAfterError:async()=>false,restorePackage:async()=>events.push('restorePackage')}
+ const driver={noop:false,preflight:async action=>{const {withdrawnCleanState}=await import('../deploy/maintenance/source.mjs');const clean=withdrawnCleanState(access);return {wasRunning:false,noop:driver.noop&&!clean,withdrawnClean:clean}},assertIdentity:async()=>events.push('identity'),assertStopped:async()=>events.push('stopped'),stop:async()=>events.push('stop'),start:async()=>{throw Error('停止态不得启动')},manage:async action=>events.push('manage:'+action),verify:async()=>({basicHealthVerified:true}),beginRecovery(){},stoppedAfterError:async()=>false,restorePackage:async()=>events.push('restorePackage')}
  const run=(action,dir=evidence())=>executeMaintenance({action,adapter,driver,source:access,evidenceDir:dir})
  return {root,app,access,original,history,evidence,driver,events,run}
 }
@@ -133,4 +133,28 @@ test('无可靠材料、不同作者候选及真实源码漂移均停前拒绝�
  fs.appendFileSync(f.access.file(index),'\n// 真实活动源码漂移\n','utf8');const drifted=f.access.capture()
  await assert.rejects(f.run('uninstall'),/漂移/)
  assert.deepEqual(f.access.capture(),drifted,'真实漂移不得修改目标或after')
+})
+
+test('宿主退出已撤缝（包在/记录无/源码净）：uninstall仅卸装配不重放恢复，install重建接缝与记录',async t=>{
+ const f=fixture(t)
+ await f.run('install')
+ // 模拟宿主正常退出：标准host disposer按官方卸缝API撤缝并删记录，装配保留。
+ adapter.uninstallStandardSeams({appDir:f.app})
+ assert.ok(!fs.existsSync(f.access.file(STANDARD_RECORD)),'退出撤缝后标准记录应不存在')
+ const withdrawn=f.access.capture()
+ // 退出撤缝态uninstall：无恢复材料可演，源码保持作者原像，仅走装配卸载。
+ f.events.length=0
+ const removed=await f.run('uninstall')
+ assert.equal(removed.changed,true)
+ assert.ok(removed.outcome.withdrawnClean===true,'结果应标记退出撤缝态')
+ assert.ok(f.events.includes('manage:uninstall'),'装配卸载必须执行')
+ assert.ok(!f.events.includes('restorePackage'),'无失败恢复')
+ f.access.assertImage(withdrawn,'源码保持作者原像不动')
+ // 退出撤缝态install：按首装重建接缝与标准记录。
+ f.events.length=0
+ const reinstalled=await f.run('install')
+ assert.equal(reinstalled.changed,true)
+ assert.ok(fs.existsSync(f.access.file(STANDARD_RECORD)),'install必须重建标准记录')
+ assert.equal(adapter.checkStandardSeams({appDir:f.app}).ready,true)
+ assert.equal(JSON.parse(fs.readFileSync(f.access.file(STANDARD_RECORD),'utf8')).before[index],f.original[index],'重建记录的前像必须是真实作者原像')
 })

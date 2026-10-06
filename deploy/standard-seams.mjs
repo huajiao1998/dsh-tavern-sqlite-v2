@@ -12,6 +12,7 @@ import { applyRollbackTransform } from './core-rollback-transform.mjs'
 import { applyModelErrorTransform } from './model-error-transform.mjs'
 import { applyCompactionWarningTransform } from './compaction-warning-transform.mjs'
 import { applyRowHistoryTransform, applyRowTimelineTransform } from './row-rollback-transform.mjs'
+import { applySettlementRoundTransform } from './settlement-round-transform.mjs'
 import { applyRollbackBusinessTimelineTransform, applyRollbackBusinessTurnTransform } from './rollback-business-transform.mjs'
 import { applyRollbackWorldbookHistoryHostTransform } from './rollback-worldbook-history-transform.mjs'
 import { applyCleanRollbackTransform } from './clean-rollback-transform.mjs'
@@ -136,7 +137,7 @@ function buildCore(appDir) {
   write.set(DOMAIN + 'worldbook-library.js',applyRollbackWorldbookLibraryTransform(text(appDir,DOMAIN+'worldbook-library.js')))
   if(existsSync(inside(appDir,DOMAIN+'card-summary-cache.js')))write.set(DOMAIN+'card-summary-cache.js',applyWorldbookSummaryCacheTransform(text(appDir,DOMAIN+'card-summary-cache.js')))
   write.set(DOMAIN + 'round-history.js', applyCleanRollbackTransform(applyRowHistoryTransform(applyRollbackTransform(text(appDir, DOMAIN + 'round-history.js')).text)))
-  write.set(DOMAIN + 'story-timeline.js', applyRollbackBusinessTimelineTransform(applyRowTimelineTransform(text(appDir, DOMAIN + 'story-timeline.js'))))
+  write.set(DOMAIN + 'story-timeline.js', applySettlementRoundTransform(applyRollbackBusinessTimelineTransform(applyRowTimelineTransform(text(appDir, DOMAIN + 'story-timeline.js')))))
   write.set(DOMAIN + 'turn-orchestration.js', applyRollbackBodyCommitTurnTransform(applyRollbackBodySignalTurnTransform(applyRollbackSharedBranchTurnTransform(applyRollbackBusinessTurnTransform(text(appDir, DOMAIN + 'turn-orchestration.js'))))))
   write.set(DOMAIN + 'settlement-jobs.js', applyRollbackBodyCommitJobsTransform(applySettlementQuiescenceTransform(text(appDir, DOMAIN + 'settlement-jobs.js'))))
   write.set(DOMAIN + 'foreground-handoff.js', applyRollbackBodyCommitHandoffTransform(applyRollbackBodySignalHandoffTransform(applyForegroundQuiescenceTransform(text(appDir, DOMAIN + 'foreground-handoff.js')))))

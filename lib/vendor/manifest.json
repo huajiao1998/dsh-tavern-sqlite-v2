@@ -1,0 +1,47 @@
+{
+  "vendoredAt": "2026-10-06",
+  "reason": "安装零外部依赖：Windows 桌面版的 pnpm 离线元数据缓存里没有 lodash/json5/jsonrepair（作者用 lodash-es），离线解析失败 ERR_PNPM_NO_OFFLINE_META；改为把运行时依赖打进包内，任何宿主都能离线安装。",
+  "source": "https://registry.npmmirror.com",
+  "packages": {
+    "lodash": {
+      "version": "4.17.21",
+      "entry": "lodash/lodash.min.js",
+      "entrySha256": "a9705dfc47c0763380d851ab1801be6f76019f6b67e40e9b873f8b4a0603f7a9",
+      "license": "MIT",
+      "fileSha256": {
+        "lodash/lodash.min.js": "a9705dfc47c0763380d851ab1801be6f76019f6b67e40e9b873f8b4a0603f7a9",
+        "lodash/LICENSE": "f71e8ed126b46346494aad5486874cd8f0aafe95092ed67d2e3cb6110f939abc"
+      }
+    },
+    "json5": {
+      "version": "2.2.3",
+      "entry": "json5/index.mjs",
+      "entrySha256": "12db0fd3eac76597c0f5aaef2e013d8267a235c773589effc36b1a8a80a1314d",
+      "license": "MIT",
+      "fileSha256": {
+        "json5/index.mjs": "12db0fd3eac76597c0f5aaef2e013d8267a235c773589effc36b1a8a80a1314d",
+        "json5/LICENSE.md": "53e59feb13058722d977c699eb0407c7bce2f93c949b681bbd2ff31698535927"
+      }
+    },
+    "jsonrepair": {
+      "version": "3.15.0",
+      "entry": "jsonrepair/esm/index.js",
+      "entrySha256": "523d175b61d8517fd3ba90cd2f065c6ecd45f4c95ea7ac706a9d87ccaceb7faf",
+      "license": "MIT",
+      "fileSha256": {
+        "jsonrepair/esm/index.js": "523d175b61d8517fd3ba90cd2f065c6ecd45f4c95ea7ac706a9d87ccaceb7faf",
+        "jsonrepair/LICENSE.md": "fd50f5abb7eeb614c8d1293b9f239a5238d7536e3a9a9a8929a082c82d12b3fd"
+      }
+    },
+    "yaml": {
+      "version": "2.9.1",
+      "entry": "yaml/dist/index.js",
+      "entrySha256": "2d58984e0ae80de4acbd8f009fab332f5ce77d9e1a5f138a3058a0ada6567fb9",
+      "license": "ISC",
+      "fileSha256": {
+        "yaml/dist/index.js": "2d58984e0ae80de4acbd8f009fab332f5ce77d9e1a5f138a3058a0ada6567fb9",
+        "yaml/LICENSE": "5bba27375d93e9119f76c1015f7672cf9ad5f70952296e0842fb2243d6376869"
+      }
+    }
+  }
+}

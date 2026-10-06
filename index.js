@@ -8,7 +8,8 @@
 // jsonl 停写是唯一路径。物理回退 = 还原 profiles/tavern/cordis.patch.yml
 // 备份 + 重启（jsonl 后端原样接管；已迁移会话数据在 .db，两源不互见须知）。
 import { createRequire } from "node:module"
-import { readdirSync } from "node:fs"
+import { readdirSync, existsSync } from "node:fs"
+import { fileURLToPath } from "node:url"
 import path from "node:path"
 import os from "node:os"
 // §4.1「未迁移档可看不可玩」：开始轮次前过一道门（见 guardTurnStart）
@@ -20,9 +21,34 @@ import { assertRollbackSessionWritable, rollbackSchedulingBarrier } from "./lib/
 import { legacyArtifactFor, readLegacySession, statLegacySession, createLegacyReadHandle } from "./lib/legacy-session-reader.js"
 
 const dshHome = process.env.DSH_HOME || path.join(os.homedir(), ".dsh-tavern")
-const runtimeModules = path.join(dshHome, "runtime/lib/node_modules/@deepseek-ai")
+// 宿主包锚点候选（有序，命中即止）。**必须加载宿主真正使用的那一份**——我们继承
+// JsonlSessionPersistence、还要给宿主会话打补丁，加载到第二份副本等于没接管。
+//   1   `<home>/runtime/lib/node_modules`——**CLI 宿主真身**，与 POSIX 维护驱动核peer用的是同一路径
+//       （deploy/maintenance/target.mjs:107、driver.mjs:484），也是本文件 0.2.2 及以前一直加载的
+//       路径；放第一位保证既有 Linux 部署行为逐字节不变（若两代布局并存也不会悄悄换一份实例）。
+//   2   `<home>/runtime/node_modules`——另一代 CLI 布局兜底（此前缺失时直接失败，只增不换）。
+//   3   桌面版（Electron utilityProcess 的 process.execPath 即应用目录下的可执行文件，
+//       宿主自己的 @deepseek-ai 就在 resources/app/node_modules——2026-10-06 真机实测
+//       桌面版没有 $DSH_HOME/runtime 目录，只认 1/2 必然 Cannot find module）。
+//   4   本包自带 node_modules（安装器按作者插件同形状注入的同实例 junction，见
+//       deploy/maintenance/driver.mjs linkHostPeersIntoPackage）。
+//   5   共享安装闭包（dsh-app-boot 在 <home>/profiles/node_modules 供外挂解析的兜底）。
+const hostModuleBases = [
+	path.join(dshHome, "runtime", "lib", "node_modules", "@deepseek-ai"),
+	path.join(dshHome, "runtime", "node_modules", "@deepseek-ai"),
+	process.versions.electron
+		? path.join(path.dirname(process.execPath), "resources", "app", "node_modules", "@deepseek-ai")
+		: null,
+	path.join(path.dirname(fileURLToPath(import.meta.url)), "node_modules", "@deepseek-ai"),
+	path.join(dshHome, "profiles", "node_modules", "@deepseek-ai"),
+].filter(Boolean)
 const requireFrom = (segment) => {
-	const entry = path.join(runtimeModules, segment)
+	const entry = hostModuleBases.map((base) => path.join(base, segment)).find((candidate) => existsSync(candidate))
+	if (entry === undefined) {
+		throw new Error(
+			`宿主包 ${segment} 不在任何已知锚点（候选：${hostModuleBases.join(" ; ")}）`,
+		)
+	}
 	return createRequire(entry)(entry)
 }
 

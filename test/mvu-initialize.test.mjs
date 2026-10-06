@@ -220,7 +220,10 @@ test('⑥ 非法输入中止且输入变量保持原值', async () => {
             variables: input,
             worldbooks: [{ name: '书', entries: [{ comment: '[initvar] 坏内容', content: 'a: *未定义锚点' }] }],
         }),
-        /\[initvar\] 条目解析失败/,
+        // 两条都是响亮拒绝、都不吞成绿色：真解析链下 jsonrepair 会把坏内容"修复"成字符串，
+        // 走 mvu-initialize.js:94 的"解析结果不是变量对象"严格闸（该闸注释明确按用户要求 strict）；
+        // DI 桩或真 YAML 直接抛错时走 :90 的"解析失败"。断言钉安全性质，不钉具体分支文案。
+        /\[initvar\] 条目(解析失败|解析结果不是变量对象)/,
         '上游遇解析错 strict throw，不得吞成绿色',
     )
     // 解析成标量的合法内容不是变量对象：上游 `if (parsedData)` 会静默跳过，

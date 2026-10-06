@@ -36,6 +36,21 @@ if (result.status !== 0) throw Error('打包失败')
 const digest = createHash('sha256').update(fs.readFileSync(path.join(out, tarball))).digest('hex')
 const url = values.repository ? `https://github.com/${values.repository}/releases/download/${tag}/${tarball}` : '__DSH_RELEASE_URL__'
 fs.writeFileSync(path.join(out, 'install.sh'), embedded.replace('__DSH_RELEASE_URL__', () => url).replace('__DSH_RELEASE_SHA256__', () => digest), 'utf8')
-fs.writeFileSync(path.join(out, 'SHA256SUMS'), digest + '  ' + tarball + '\n', 'utf8')
-fs.writeFileSync(path.join(out, 'release.json'), JSON.stringify({ package: pkg.name, version: pkg.version, repository: values.repository || null, tag, asset: tarball, sha256: digest, published: false, command: values.repository ? `curl -fsSL https://raw.githubusercontent.com/${values.repository}/main/install.sh | sh` : null }, null, 2) + '\n', 'utf8')
-console.log(JSON.stringify({ out, asset: tarball, sha256: digest, repositoryConfigured: !!values.repository, uploaded: false }))
+// —— Windows 一键包（0.2.3）：zip 顶层目录 dsh-tavern-sqlite-v2/ = 包体 + 根 install.ps1 ——
+// 分发例外：zip 内 install.ps1 带 UTF-8 BOM（PowerShell 5.1 对无 BOM 脚本按 ANSI 解码，中文提示会乱码）。
+// tgz 内保持无 BOM（POSIX 侧 PowerShell 7 按 UTF-8 读，且仓库源码规约是无 BOM/LF）。
+const zipName = pkg.name + '-' + pkg.version + '-win.zip'
+const zipStageRoot = path.join(out, 'win-zip'), zipStage = path.join(zipStageRoot, 'dsh-tavern-sqlite-v2')
+fs.mkdirSync(zipStage, { recursive: true })
+fs.cpSync(packRoot, zipStage, { recursive: true })
+fs.writeFileSync(path.join(zipStage, 'install.ps1'), Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), fs.readFileSync(path.join(root, 'deploy', 'install.ps1'))]))
+const zipTool = spawnSync('tar', ['-a', '-cf', path.join(out, zipName), '-C', zipStageRoot, 'dsh-tavern-sqlite-v2'], { stdio: 'inherit', timeout: 30000 })
+if (zipTool.error || zipTool.status !== 0) {
+  const alt = spawnSync('zip', ['-r', '-q', path.join(out, zipName), 'dsh-tavern-sqlite-v2'], { cwd: zipStageRoot, timeout: 30000 })
+  if (alt.error || alt.status !== 0) throw Error('Windows zip 打包失败：需要 bsdtar（Windows 自带 tar）或 zip 命令')
+}
+fs.rmSync(zipStageRoot, { recursive: true, force: true })
+const zipDigest = createHash('sha256').update(fs.readFileSync(path.join(out, zipName))).digest('hex')
+fs.writeFileSync(path.join(out, 'SHA256SUMS'), digest + '  ' + tarball + '\n' + zipDigest + '  ' + zipName + '\n', 'utf8')
+fs.writeFileSync(path.join(out, 'release.json'), JSON.stringify({ package: pkg.name, version: pkg.version, repository: values.repository || null, tag, asset: tarball, sha256: digest, assetZip: zipName, sha256Zip: zipDigest, published: false, command: values.repository ? `curl -fsSL https://raw.githubusercontent.com/${values.repository}/main/install.sh | sh` : null }, null, 2) + '\n', 'utf8')
+console.log(JSON.stringify({ out, asset: tarball, sha256: digest, assetZip: zipName, sha256Zip: zipDigest, repositoryConfigured: !!values.repository, uploaded: false }))

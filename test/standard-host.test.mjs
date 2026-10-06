@@ -472,7 +472,9 @@ ok('常量与导出（id/inject/runtime 版本/默认放行名单）')
   const direct = runtimeDirectPaths(REAL_HOME)
   const dshCandidates = direct[RUNTIME_PACKAGE_NAME]
   const bootCandidates = direct[BOOT_PACKAGE_NAME]
-  assert.equal(dshCandidates.length, 2, '每个包两个 runtime 候选')
+  // 0.2.3 起按宿主追加兜底候选（Electron 应用 node_modules / 共享安装闭包），只追加不插队：
+  // 钉死的是"前两位 = 两代 CLI runtime 布局且顺序不变"，总数允许 ≥2（Linux 行为零变化靠顺序保证）。
+  assert.ok(dshCandidates.length >= 2, `runtime 候选至少两个（实际 ${dshCandidates.length}）`)
   assert.match(dshCandidates[0], /runtime[\\/]node_modules[\\/]@deepseek-ai[\\/]dsh[\\/]package\.json$/, '第一候选 = runtime/node_modules（目标真身）')
   assert.match(dshCandidates[1], /runtime[\\/]lib[\\/]node_modules[\\/]@deepseek-ai[\\/]dsh[\\/]package\.json$/, '第二候选 = runtime/lib/node_modules（在产脚本写法）')
   assert.match(bootCandidates[0], /runtime[\\/]node_modules[\\/]@deepseek-ai[\\/]dsh-app-boot[\\/]package\.json$/)

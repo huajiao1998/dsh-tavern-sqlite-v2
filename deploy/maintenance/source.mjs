@@ -87,6 +87,14 @@ export function assertSourceUninstalled(access){
   const code=Buffer.from(body,'base64').toString('utf8');if(/dsh-tavern-(?:storage-)?sqlite(?:-v[12])?/.test(code)||code.includes('[dsh-tavern-standard-owned:v1]'))throw new Error('活动源码仍接管：'+rel)
  }
 }
+// 宿主正常退出时标准host disposer会撤缝并删标准记录，profile装配完整保留——"退出撤缝态"。
+// 源码此时即作者原像：install可按首装重建接缝与记录，uninstall只卸装配。仍要求
+// assertSourceUninstalled全绿（无任何记录、活动源码零接管标记）；半撤/脏树不认，维持原拒绝。
+export function withdrawnCleanState(access){
+ if(existsSync(access.file(STANDARD_RECORD)))return false
+ try{assertSourceUninstalled(access)}catch{return false}
+ return true
+}
 // 修复只写已重放验证过的before；after及活动源码一字不改。
 export function commitRecoveredPreimage(access,rehearsal){
  access.assertImage(rehearsal.before)
