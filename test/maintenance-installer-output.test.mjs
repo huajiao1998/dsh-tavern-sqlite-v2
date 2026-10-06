@@ -41,13 +41,28 @@ test('PS1双流日志与CLI失败报告连到真实调用位置，不依赖用�
   assert.ok(!installer.includes("maintenance\\dsh-tavern-sqlite-v2"), '用户日志不得再进酒馆深层维护目录')
   assert.match(installer, /trap \{/) // 未捕获异常必须写日志并停住等用户，不许闪退
   assert.match(installer, /\$script:installLogWriter\.WriteLine\(\$text\)/) // 更新/下载分支输出同步进安装日志
+  // 日志必须在任何校验之前就打开：否则早期失败（没找到酒馆/Node、参数不合法）连日志都没有。
+  const openAt = installer.indexOf('$script:installLogWriter = New-LogWriter $script:installLogPath')
+  assert.ok(openAt > 0 && openAt < installer.indexOf("$packageJson = Join-Path $root 'package.json'"), '日志必须在包校验前打开')
+  const wait = installer.slice(installer.indexOf('function Wait-Exit'), installer.indexOf('function Fail('))
+  assert.ok(!wait.includes("$Host.Name -eq 'ConsoleHost'"), '等待条件不得依赖 ConsoleHost，否则宿主不同就闪退')
+  assert.match(wait, /Read-Host/)
+  // 双击安全入口：外层 .cmd 必须绕过执行策略、把输出落盘并总是暂停（解析错误/策略拦截也要留证据）。
+  const launcher = readFileSync(new URL('../deploy/run-install.cmd', import.meta.url), 'utf8')
+  assert.match(launcher, /-ExecutionPolicy Bypass/)
+  assert.match(launcher, />> "%LOG%" 2>&1/)
+  assert.match(launcher, /^\s*pause\s*$/m)
+  assert.match(readFileSync(new URL('../scripts/build-release.mjs', import.meta.url), 'utf8'), /run-install\.cmd/, '发行包必须带上该入口')
   const runner = readFileSync(new URL('../deploy/maintenance/runner.mjs', import.meta.url), 'utf8')
   assert.match(runner, /reportMaintenanceFailure\(error, evidence, Math\.round\(budget\.elapsed\(\)\)\)/)
   assert.match(runner, /if \(!error\.maintenanceReported\) console\.log/)
 })
 
 if (process.platform === 'win32') {
-  const helper = installer.slice(installer.indexOf('function Invoke-Maintenance('), installer.indexOf('# ——— 4.'))
+  // 只抽取两个真实函数：New-LogWriter（建UTF8日志句柄）＋Invoke-Maintenance（跑维护）。
+  // 不整段加载脚本：避免执行包校验、找酒馆、菜单等顶层代码。
+  const helper = installer.slice(installer.indexOf('function New-LogWriter('), installer.indexOf('$script:installLogPath ='))
+    + installer.slice(installer.indexOf('function Invoke-Maintenance('), installer.indexOf('# ——— 4.'))
   assert.ok(helper.includes('return $code'), '只抽取维护调用函数，不执行菜单或联网')
   test('PS1未捕获异常写日志并停住等用户，不闪退', t => {
     for (const shell of ['pwsh', path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')]) {
@@ -113,4 +128,41 @@ if (process.platform === 'win32') {
       assert.ok(!log.includes('fixture-bearer-value'))
     })
   }
+  // 早期校验失败（没找到酒馆/没找到Node/参数不合法）发生在维护子进程之前：
+  // 旧实现的日志是懒创建的，这类失败只打印在窗口里、不落盘，用户什么都发不出来。
+  test('PS1早期失败也必生成install.log（不再只在窗口一闪）', t => {
+    const root = temp(t), ps5 = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    assert.ok(existsSync(ps5), 'Windows PowerShell 5必须在场，不SKIP')
+    const dir = path.join(root, 'pkg'), deployDir = path.join(dir, 'deploy')
+    spawnSync('cmd', ['/c', 'mkdir', deployDir], { windowsHide: true })
+    // 只造出「校验能过、但酒馆目录无效」的最小包：真实发行包同款带BOM脚本。
+    writeFileSync(path.join(dir, 'install.ps1'), Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), readFileSync(new URL('../deploy/install.ps1', import.meta.url))]))
+    writeFileSync(path.join(dir, 'package.json'), readFileSync(new URL('../package.json', import.meta.url)))
+    writeFileSync(path.join(deployDir, 'maintenance.mjs'), '// 占位：仅用于通过入口存在性校验\n')
+    const logFile = path.join(dir, 'install.log')
+    const result = spawnSync(ps5, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(dir, 'install.ps1'), 'install', '-TavernHome', path.join(root, 'no-such-tavern'), '-Yes'], { encoding: 'utf8', timeout: 30000, windowsHide: true })
+    assert.ifError(result.error)
+    assert.equal(result.status, 1, result.stdout + result.stderr)
+    assert.ok(existsSync(logFile), '失败必须留下日志文件')
+    const log = readFileSync(logFile, 'utf8')
+    assert.match(log, /不是有效的酒馆安装/)
+    assert.match(log, /安装器 —— 日志：/, '日志开头就要写明位置')
+  })
+  // 有一类失败在 PowerShell 脚本开始执行之前就发生（无BOM乱码、执行策略拦截），
+  // 脚本自己的 trap 根本跑不到；只有外层 .cmd 能留下证据并阻止窗口闪退。
+  test('cmd入口把PowerShell解析错误也写进install.log，窗口不闪退', t => {
+    const root = temp(t), dir = path.join(root, 'no-bom')
+    spawnSync('cmd', ['/c', 'mkdir', dir], { windowsHide: true })
+    // 故意放无BOM副本：PS5按GBK解码中文必然解析失败，正是用户看到的"一闪就没"。
+    writeFileSync(path.join(dir, 'install.ps1'), readFileSync(new URL('../deploy/install.ps1', import.meta.url)))
+    writeFileSync(path.join(dir, 'run-install.cmd'), readFileSync(new URL('../deploy/run-install.cmd', import.meta.url)))
+    const logFile = path.join(dir, 'install.log')
+    const result = spawnSync('cmd', ['/c', 'run-install.cmd', 'install', '-TavernHome', path.join(root, 'no-such-tavern'), '-Yes', '<', 'nul'], { cwd: dir, encoding: 'utf8', timeout: 30000, windowsHide: true })
+    assert.ifError(result.error)
+    assert.notEqual(result.status, 0, '解析失败必须是非零退出')
+    assert.ok(existsSync(logFile), '.cmd 必须留下日志')
+    const log = readFileSync(logFile, 'utf8')
+    assert.ok(log.length > 100, '日志必须包含真实错误文本')
+    assert.match(log, /install\.ps1/, '日志要指向出问题的脚本')
+  })
 }

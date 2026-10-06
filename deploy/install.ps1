@@ -25,17 +25,35 @@ $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding } catch {}
 $root = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 $repo = 'huajiao1998/dsh-tavern-sqlite-v2'
-# 安装器自己的日志（不是酒馆维护证据）：脚本同目录固定 install.log，每次覆盖；
-# 用户报错只找手边这一个文件。$script:installLogWriter 供 Say/Ok/Warn 同步落盘。
+# 安装器自己的日志（不是酒馆维护证据）：脚本同目录 install.log，每次运行覆盖。
+# **必须在任何校验之前就打开**：否则前面几步失败（没找到酒馆/Node、参数不合法）会连日志都没有，
+# 用户只看到窗口一闪，没有任何可发回的原因（2026-10-07 实测踩到）。
+# 脚本目录不可写时退回 %TEMP%，并如实告知真实路径。
+function New-LogWriter([string]$path) {
+  $w = [System.IO.StreamWriter]::new($path, $false, [System.Text.UTF8Encoding]::new($false))
+  $w.NewLine = "`n"
+  $w.AutoFlush = $true
+  return $w
+}
 $script:installLogPath = Join-Path $root 'install.log'
 $script:installLogWriter = $null
+try { $script:installLogWriter = New-LogWriter $script:installLogPath }
+catch {
+  $alt = Join-Path $env:TEMP 'dsh-tavern-install.log'
+  try { $script:installLogWriter = New-LogWriter $alt; $script:installLogPath = $alt } catch { $script:installLogWriter = $null }
+}
 
 function Say([string]$text) { Write-Host $text; try { if ($script:installLogWriter) { $script:installLogWriter.WriteLine($text) } } catch {} }
 function Ok([string]$text) { $line = '√ ' + $text; Write-Host $line -ForegroundColor Green; try { if ($script:installLogWriter) { $script:installLogWriter.WriteLine($line) } } catch {} }
 function Warn([string]$text) { $line = '! ' + $text; Write-Host $line -ForegroundColor Yellow; try { if ($script:installLogWriter) { $script:installLogWriter.WriteLine($line) } } catch {} }
-# 双击运行时保留窗口等用户看一眼；输入被重定向（自动化/管道）或显式 -Yes 时不等待，避免挂住。
+# 双击运行时保留窗口等用户看一眼；显式 -Yes 或输入被重定向（自动化/管道）时不等待，避免挂住。
+# 只要还连着控制台就等（不再要求 Host 必须是 ConsoleHost：宿主判断过窄会让窗口直接消失）。
 # 只有用户主动点窗口叉关闭或输入 0 退出才是正常结束；其他任何异常退出前都必须停住等用户看。
-function Wait-Exit { if ($Yes) { return }; if ($Host.Name -eq 'ConsoleHost' -and -not [Console]::IsInputRedirected) { Read-Host '按回车退出' | Out-Null } }
+function Wait-Exit {
+  if ($Yes) { return }
+  if ([Console]::IsInputRedirected) { return }
+  try { Read-Host '按回车退出' | Out-Null } catch {}
+}
 function Fail([string]$text) { Write-Host ''; $line = '× ' + $text; Write-Host $line -ForegroundColor Red; try { if ($script:installLogWriter) { $script:installLogWriter.WriteLine(''); $script:installLogWriter.WriteLine($line) } } catch {}; Wait-Exit; exit 1 }
 
 # 全脚本异常兜底：任何未捕获异常（联网失败/解压失败/维护崩溃…）都先写日志再停住等用户，
@@ -43,11 +61,7 @@ function Fail([string]$text) { Write-Host ''; $line = '× ' + $text; Write-Host 
 trap {
   $msg = '× 安装器异常退出：' + $_.Exception.Message
   try {
-    if (-not $script:installLogWriter) {
-      $script:installLogWriter = [System.IO.StreamWriter]::new($script:installLogPath, $false, [System.Text.UTF8Encoding]::new($false))
-      $script:installLogWriter.NewLine = "`n"
-      $script:installLogWriter.AutoFlush = $true
-    }
+    if (-not $script:installLogWriter) { $script:installLogWriter = New-LogWriter $script:installLogPath }
     $script:installLogWriter.WriteLine($msg)
     $script:installLogWriter.WriteLine('  完整日志：' + $script:installLogPath)
   } catch {}
@@ -64,6 +78,8 @@ if ($Help) {
   Say '不带参数运行 = 打开菜单（安装/更新/卸载/预检）'
   exit 0
 }
+# 第一行就把日志位置说清楚：用户不必猜、不必翻目录。
+Say ('dsh-tavern-sqlite-v2 安装器 —— 日志：' + $script:installLogPath)
 # 参数值手工校验（不用 ValidateSet：-File 调用方式下空默认值会被误判为非法值）
 if ($Action -and @('install', 'update', 'uninstall', 'check') -notcontains $Action) {
   Fail ('未知动作：' + $Action + '（可用：install | update | uninstall | check）')
@@ -152,14 +168,15 @@ function Find-NodeRuntime([hashtable]$tavern) {
 function Invoke-Maintenance([hashtable]$tavern, [hashtable]$node, [string]$entry, [string]$verb, [switch]$Check, [string]$LogFile = '') {
   $argv = @($entry, $verb, '--home', $tavern.home)
   if ($Check) { $argv += '--check' }
-  # 安装器自己的日志（不是酒馆维护证据）：正式运行永远是脚本同目录固定 install.log，
-  # $LogFile 仅供自动化测试指定隔离位置。
-  if (-not $LogFile) { $LogFile = $script:installLogPath }
-  $logFile = $LogFile
-  if ($script:installLogWriter) { try { $script:installLogWriter.Dispose() } catch {} }
-  $script:installLogWriter = [System.IO.StreamWriter]::new($logFile, $false, [System.Text.UTF8Encoding]::new($false))
-  $script:installLogWriter.NewLine = "`n"
-  $script:installLogWriter.AutoFlush = $true
+  # 日志已在脚本开头打开并全程复用；$LogFile 仅供自动化测试指定隔离位置。
+  if ($LogFile -and $LogFile -ne $script:installLogPath) {
+    if ($script:installLogWriter) { try { $script:installLogWriter.Dispose() } catch {} }
+    $script:installLogWriter = New-LogWriter $LogFile
+    $script:installLogPath = $LogFile
+  } elseif (-not $script:installLogWriter) {
+    $script:installLogWriter = New-LogWriter $script:installLogPath
+  }
+  $logFile = $script:installLogPath
   $writer = $script:installLogWriter
   Say ('安装日志：' + $logFile)
   $saved = $env:ELECTRON_RUN_AS_NODE
@@ -181,8 +198,9 @@ function Invoke-Maintenance([hashtable]$tavern, [hashtable]$node, [string]$entry
     if ($code -ne 0) { Warn ('维护失败（exit ' + $code + '）；完整日志：' + $logFile) }
     return $code
   } finally {
-    if ($writer -eq $script:installLogWriter) { $script:installLogWriter = $null }
-    try { $writer.Dispose() } catch {}
+    # 不在这里关日志：它是脚本级句柄，后面还有「安装完成/已卸载」等提示要落盘；
+    # AutoFlush 已保证内容实时写盘，进程退出时由系统回收句柄。
+    try { $script:installLogWriter.Flush() } catch {}
     $ErrorActionPreference = $savedErrorAction
     if ($node.runAsNode) { if ($null -eq $saved) { Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue } else { $env:ELECTRON_RUN_AS_NODE = $saved } }
   }

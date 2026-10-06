@@ -46,6 +46,10 @@ const zipStageRoot = path.join(out, 'win-zip'), zipStage = path.join(zipStageRoo
 fs.mkdirSync(zipStage, { recursive: true })
 fs.cpSync(packRoot, zipStage, { recursive: true })
 fs.writeFileSync(path.join(zipStage, 'install.ps1'), Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), fs.readFileSync(path.join(root, 'deploy', 'install.ps1'))]))
+// 双击安全入口：纯 ASCII 的 .cmd，绕过执行策略、把所有输出（含PS解析错误）落进 install.log 并总是暂停。
+// 0.2.6 实测教训：有些失败在 PowerShell 脚本开始执行之前就发生（无BOM乱码、执行策略拦截），
+// 那种情况脚本自己的 trap 根本跑不到，只有外层 .cmd 能留下证据并阻止窗口闪退。
+fs.copyFileSync(path.join(root, 'deploy', 'run-install.cmd'), path.join(zipStage, 'run-install.cmd'))
 const zipTool = spawnSync('tar', ['-a', '-cf', path.join(out, zipName), '-C', zipStageRoot, 'dsh-tavern-sqlite-v2'], { stdio: 'inherit', timeout: 30000, windowsHide: true })
 if (zipTool.error || zipTool.status !== 0) {
   const alt = spawnSync('zip', ['-r', '-q', path.join(out, zipName), 'dsh-tavern-sqlite-v2'], { cwd: zipStageRoot, timeout: 30000, windowsHide: true })
