@@ -5,9 +5,11 @@ import { readFile, stat } from 'node:fs/promises'
 import { gunzipSync } from 'node:zlib'
 import path from 'node:path'
 import { createVariableArchive } from './lib/variable-archive.js'
-import { createChatProjectionReads, readProjectionHeader, readSqlSnapshot } from './lib/chat-projection-reads.js'
+import { createChatProjectionReads, readSqlSnapshot } from './lib/chat-projection-reads.js'
 import { revisions as componentRevisions } from './lib/component-revisions.js'
 import { createRollbackWorldbookHistory } from './lib/rollback-worldbook-history.js'
+import { computeTimelinePlan, writeTimelineNodes, verifyTimelineNodes, readTimelineTree, ensureTimelineNodesTable, usesTimelineNodes } from './lib/timeline-nodes.js'
+import { stmt } from './lib/statement-cache.js'
 
 // 本模块**不再直接 import 作者的三个模块**（copy-json-tree / chat-session-state / json-mutation）：
 // 它们是作者的代码，必须由作者树的「薄垫片」注入（见 deploy/chat-sqlite-store.shim.js）。
@@ -92,7 +94,7 @@ export function createChatSqliteStore(options = {}) {
   const now = typeof options.now === 'function' ? options.now : Date.now
   const mutationTails = new Map()
   const limit = (value, fallback) => Number.isSafeInteger(value) && value >= 0 ? value : fallback
-  const cacheMaxBytes = limit(options.cacheMaxBytes, 256 * 1024 * 1024)
+  const cacheMaxBytes = limit(options.cacheMaxBytes, 64 * 1024 * 1024)   // P2-b：256→64MB（单档 ~8-20MB；8 档并发防气球）
   const maxCachedChats = limit(options.maxCachedChats, 8)
   const readCache = new Map()
   // SQL摘要/投影结果与完整Chat缓存分离，按连接+提交revision失效；仅出借脱离副本。
@@ -140,7 +142,9 @@ export function createChatSqliteStore(options = {}) {
   function bumpGeneration(chatId) {
     const id = safeChatId(chatId)
     generations.set(id, (generations.get(id) || 0) + 1)
-    projectionReads.forget(id)
+    // 2026-10-06 P1：不再整条 forget 投影缓存（旧行为让修A 的分部件失效从未生效）。
+    // 写路径改用 projectionReads.invalidate(id, written.touched) 按键级精确失效；
+    // 档被删除时仍由 remove() 显式 forget。
   }
 
   function dbFile(chatId) {
@@ -196,8 +200,9 @@ export function createChatSqliteStore(options = {}) {
       const storedSet = new Set(stored.map(row => row.key))
       const deleteField = db.prepare('DELETE FROM archive_head_fields WHERE key = ?')
       const updateOrd = db.prepare('UPDATE archive_head_fields SET ord = ? WHERE key = ?')
+      const removedKeys = []
       for (const row of stored) {
-        if (!want.has(row.key)) deleteField.run(row.key)
+        if (!want.has(row.key)) { deleteField.run(row.key); removedKeys.push(row.key) }
         else if (Number(row.ord) !== ordOf.get(row.key)) updateOrd.run(ordOf.get(row.key), row.key)
       }
       // ---- 头部值：只写变化的键 ----
@@ -215,10 +220,31 @@ export function createChatSqliteStore(options = {}) {
         ON CONFLICT(key) DO UPDATE SET ord = excluded.ord, kind = excluded.kind, value_json = excluded.value_json`)
       keys.forEach((key, index) => {
         if (key === 'messages') { upsertField.run(key, index, 1, null); return }   // 占位：参与键序
+        if (key === 'timeline') {
+          // P2-a（D-5）：timeline 数据在子行表，head_fields 只留 NULL 占位（键序参与，同 messages 先例）。
+          // 占位只在缺失时插入；ord 变更由上方键序循环处理。
+          if (!storedSet.has(key)) upsertField.run(key, index, 0, null)
+          return
+        }
         if (!changed.has(key)) return
         const value = chat[key]
         upsertField.run(key, index, 0, jsonText(value))
       })
+      // ---- P2-a（D-5）：timeline 子行写（同事务）。path 级变更映射到子行写集，不再整键 2.5MB 重写。 ----
+      let timelineTouched
+      if (!want.has('timeline')) {
+        if (storedSet.has('timeline')) {                       // timeline 键被删除（防御）：清全部子行
+          stmt(db, 'DELETE FROM archive_timeline_nodes').run()
+          timelineTouched = { rows: [], full: true }
+        }
+      } else if (changed.has('timeline') || !storedSet.has('timeline')) {
+        const plan = computeTimelinePlan(changes, chat.timeline)
+        // 审查修复②（2026-10-06）：changed 的"新增键防御"（上方 !storedSet.has(key) 兜底）可能把
+        // timeline 标进 changed 而 changes 里没有对应条目——首写/防御路径无既有行可比对，一律全量落。
+        if (!storedSet.has('timeline')) plan.full = true
+        timelineTouched = writeTimelineNodes(db, chat.timeline, plan)
+        verifyTimelineNodes(db, chat.timeline)                  // fail-loud：ord 连续＋行数一致
+      }
       // ---- 楼层：先定"本次真的写了哪些楼"，再由变量归档在**同一事务**里决定实际落库的形态 ----
       const prevCount = Number(db.prepare('SELECT COUNT(*) AS n FROM archive_messages').get().n)
       let rewriteAll = changes === null
@@ -303,9 +329,10 @@ export function createChatSqliteStore(options = {}) {
       }
       // ---- 修A：按实际改动范围 bump 部件版本（投影缓存据此做选择性失效）----
       // header 变了 = changed 集合非空（头字段有增删改）；messages 变了 = 有楼被写/截断/全量重写。
+      // prepared.written 含 K4 修剪改写的楼（可能不在业务 touched 里），必须一起算进 messages。
       const compRev = componentRevisions(db)
-      const headerChanged = changed.size > 0
-      const messagesChanged = rewriteAll || touchedIndices.length > 0 || truncated
+      const headerChanged = changed.size > 0 || removedKeys.length > 0
+      const messagesChanged = rewriteAll || touchedIndices.length > 0 || truncated || prepared.written.length > 0
       if (headerChanged) compRev.header++
       if (messagesChanged) compRev.messages++
       const beforeMessages = readCache.get(chatId)?.state.chat.messages
@@ -313,7 +340,8 @@ export function createChatSqliteStore(options = {}) {
       density.set(storedMessages, !rewriteAll && density.get(beforeMessages) === true
         ? touchedIndices.every(index => validMessage(storedMessages[index]))
         : storedMessages.every(validMessage))
-      return { chat: storedChat, changes }
+      // 写后精确失效载荷：顶层键（含被删键）＋楼层是否变化＋timeline 子行粒度；revision 供投影缓存消费本次推进。
+      return { chat: storedChat, changes, touched: { revision, keys: [...new Set([...changed, ...removedKeys])], messages: messagesChanged, timeline: timelineTouched } }
     } catch (error) {
       if (useTransaction) { try { db.exec('ROLLBACK') } catch { /* Connection-level failure; nothing to roll back. */ } }
       throw error
@@ -355,6 +383,7 @@ export function createChatSqliteStore(options = {}) {
     if (tables.has('archive_head_fields')) {
       // 已是 v3：变量表可能是这次接入才有的（旧 v3 档没有）——**早返回也必须建**，否则读写变量全部落空。
       variables.ensureTables(db)
+      upgradeTimelineToNodes(db)      // P2-a：v3→v4（timeline 子行化），幂等
       return
     }
     const hasState = tables.has('archive_state')
@@ -417,9 +446,33 @@ export function createChatSqliteStore(options = {}) {
         try { db.exec('ROLLBACK') } catch { /* Connection-level failure; nothing to roll back. */ }
         throw error
       }
+      // P2-a：v2→v3 落完 head 行后，同 open 内继续 v3→v4（timeline 子行化）。
+      // 两段事务：中途崩溃则下次 open 的 v3 早返回路径自愈（幂等）。
+      upgradeTimelineToNodes(db)
       return
     }
     createV3Tables(db)
+  }
+
+  /** P2-a（D-5）：v3→v4——timeline 从 head_fields 整键搬到子行表（同事务，幂等，无双形态窗口）。
+   *  2.5MB 档一次性 <100ms；迁移后 head 行置 NULL 占位（键序保留）。 */
+  function upgradeTimelineToNodes(db) {
+    const hasTable = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='archive_timeline_nodes'").get()
+    const headRow = db.prepare("SELECT value_json FROM archive_head_fields WHERE key='timeline'").get()
+    if (hasTable && (headRow === undefined || headRow.value_json == null)) return   // 已是 v4
+    db.exec('BEGIN')
+    try {
+      ensureTimelineNodesTable(db)
+      const current = db.prepare("SELECT value_json FROM archive_head_fields WHERE key='timeline'").get()
+      if (current?.value_json != null) {
+        writeTimelineNodes(db, JSON.parse(current.value_json), { full: true })
+        db.prepare("UPDATE archive_head_fields SET value_json=NULL WHERE key='timeline'").run()
+      }
+      db.exec('COMMIT')
+    } catch (error) {
+      try { db.exec('ROLLBACK') } catch { /* Connection-level failure; nothing to roll back. */ }
+      throw error
+    }
   }
 
   function createV3Tables(db) {
@@ -439,6 +492,7 @@ export function createChatSqliteStore(options = {}) {
       message_index INTEGER PRIMARY KEY,
       message_json TEXT NOT NULL
     )`)
+    ensureTimelineNodesTable(db)     // P2-a：新档直接 v4（timeline 子行表）
     variables.ensureTables(db)     // 变量快照/state 与本档同库同连接（不另建 variables.db）
   }
 
@@ -453,6 +507,12 @@ export function createChatSqliteStore(options = {}) {
     let placed = false
     for (const field of fields) {
       if (field.kind === 1 || field.key === 'messages') { chat.messages = messages; placed = true; continue }
+      if (field.key === 'timeline' && field.value_json === null && usesTimelineNodes(db)) {
+        // P2-a：子行形态（占位 NULL）→ 从子行表组装（冷路径，无行缓存；成本与整键 parse 同级）
+        const timeline = readTimelineTree(db).value
+        if (timeline !== undefined) chat.timeline = timeline
+        continue
+      }
       if (field.value_json === null) continue        // 与 v2 一致：值 undefined 的键在重建时被略过
       chat[field.key] = JSON.parse(field.value_json)
     }
@@ -639,6 +699,7 @@ export function createChatSqliteStore(options = {}) {
       // 复用调用方及内部整理的最终写集；不再全档比较，也不漏掉额外修剪楼。
       changes = written.changes
       bumpGeneration(chatId)
+      projectionReads.invalidate(chatId, written.touched)
       const recentChanges = knownChanges(chatId, state)
       forgetState(chatId)
       rememberState(chatId, generationStamp(chatId), {
@@ -686,10 +747,12 @@ export function createChatSqliteStore(options = {}) {
       const existed = existsSync(dbFile(chatId))
       const db = handle(chatId, { create: true })
       let storedChat = next
+      let touched
       try {
         const written = writeChat(db, chatId, next, revision, now(), changes)
         storedChat = written.chat
         changes = written.changes
+        touched = written.touched
       } catch (error) {
         // 半迁移防线：本次调用**新建**了库却写失败 ⇒ 删掉这个库，退回 legacy（旧档原样保留）。
         // 已存在的库不动（里面是当前态，删了才是真丢数据）。
@@ -704,6 +767,7 @@ export function createChatSqliteStore(options = {}) {
         throw error
       }
       bumpGeneration(chatId)
+      if (touched) projectionReads.invalidate(chatId, touched)
       const remembered = { chat: storedChat, revision, legacy: false, frameCount: 0, frameBytes: 0 }
       if (firstWrite) {
         rememberState(chatId, generationStamp(chatId), remembered)
@@ -765,16 +829,18 @@ export function createChatSqliteStore(options = {}) {
   }
 
   // ---------- 读取面 ----------
-  /** 数据库原生读源的补数器：老楼 variables 被 K4 修剪后，按同库快照表逐楼补回（legacy 原件不补）。 */
-  function hydratorFor(chatId, state) {
+  /** 批量补数器（2026-10-06 P1）：一次快照 + 一次版本校验 + 一次（按连续区间）快照查询补齐所选楼。
+   *  实测 readSlice 833 次、均值 24.25ms，其中约 20ms 是逐楼 BEGIN/COMMIT + revision 查询。
+   *  老楼 variables 被 K4 修剪后按同库快照表补回（legacy 原件不补）。 */
+  function batchHydratorFor(chatId, state) {
     if (!state || state.legacy === true) return null
     const db = handle(chatId)
     if (db === null) return null
-    return (index, row) => readSqlSnapshot(db, () => {
+    return (indices, rows) => readSqlSnapshot(db, () => {
       if (Number(db.prepare('SELECT revision FROM archive_head WHERE id=1').get()?.revision) !== state.revision) {
         throw revisionNotFound(chatId, state.revision, '变量补数输入已经过期')
       }
-      return variables.hydrateRow(db, chatId, index, row)
+      return variables.hydrateIndices(db, chatId, indices, rows)
     })
   }
 
@@ -834,7 +900,7 @@ export function createChatSqliteStore(options = {}) {
     const state = await cachedState(chatId)
     return state ? projectDisplayRuntimeState(state.chat, turn) : undefined
   }
-  function slice(chat, indices, fields, hydrate) {
+  function slice(chat, indices, fields, hydrate, batch) {
     const { messages: rawMessages, ...allHead } = chat
     const messages = Array.isArray(rawMessages) ? rawMessages : []
     if (indices.some(i => !Number.isSafeInteger(i) || i < 0 || i >= messages.length)) throw new Error('消息楼层不存在')
@@ -859,13 +925,18 @@ export function createChatSqliteStore(options = {}) {
         target[parts.at(-1)] = source
       }
     }
-    const selected = typeof hydrate === 'function' ? indices.map(i => hydrate(i, messages[i])) : indices.map(i => messages[i])
-    return { chat: structuredClone({ ...head, messages: selected }), messageCount: messages.length, denseMessages: dense(rawMessages) }
+    // 补数：优先批量（一次快照 + 一次版本校验）；旧逐楼补数器保留给单点调用者。
+    const rows = indices.map(index => messages[index])
+    if (typeof batch === 'function' && rows.length) batch(indices, rows)
+    else if (typeof hydrate === 'function') for (let position = 0; position < indices.length; position++) rows[position] = hydrate(indices[position], rows[position])
+    // 脱离：copyJsonTree 与作者 slice 的 structuredClone 同语义（纯 JSON 树、只共享不可变原始值），
+    // 实测 4MB 头部＋48 楼：2.98ms → 0.06ms（50×）。作者 records 层也用同一份实现。
+    return { chat: copyJsonTree({ ...head, messages: rows }), messageCount: messages.length, denseMessages: dense(rawMessages) }
   }
   async function readSlice(chatId, indices = [], fields) {
     const state = await cachedState(chatId)
     return state && !indices.some(i => i >= (state.chat.messages?.length || 0))
-      ? slice(state.chat, indices, fields, hydratorFor(chatId, state))
+      ? slice(state.chat, indices, fields, null, batchHydratorFor(chatId, state))
       : undefined
   }
   function rememberChanges(previous, revision, changes) {
@@ -932,7 +1003,7 @@ export function createChatSqliteStore(options = {}) {
     const state = await cachedState(chatId)
     if (revision === state?.revision) return undefined
     const changed = changedIndices(chatId, state, revision)
-    return changed ? { ...slice(state.chat, changed.indices, fields, hydratorFor(chatId, state)), ...changed,
+    return changed ? { ...slice(state.chat, changed.indices, fields, null, batchHydratorFor(chatId, state)), ...changed,
       ...changeEvidence(chatId, state, revision) } : undefined
   }
   async function readViewDelta(chatId, revision) {
@@ -941,12 +1012,14 @@ export function createChatSqliteStore(options = {}) {
     if (!changed || revision === state.revision
       || Object.values(state.chat.timeline?.operations || {}).some(op => op?.kind === 'body' && op.status === 'foreground-completed')
       || !dense(state.chat.messages)) return undefined
-    const dirty = new Set(changed.indices), detached = new Map()
+    const dirty = [...new Set(changed.indices)], detached = new Map()
     const scoped = helpers.createScopedMessages, lazyHeader = helpers.copyLazyHistoryHeader
-    const hydrate = hydratorFor(chatId, state)
     // dirty老楼在返回前按当前SQL快照补回，保证后续提交/回退不能把新变量混进旧delta。
     // 非dirty楼只抓不可变state的引用，访问时才脱离；不把Proxy送入structuredClone。
-    for (const index of dirty) detached.set(index, copyJsonTree(hydrate ? hydrate(index, state.chat.messages[index]) : state.chat.messages[index]))
+    const dirtyRows = dirty.map(index => state.chat.messages[index])
+    const batch = batchHydratorFor(chatId, state)
+    if (batch && dirtyRows.length) batch(dirty, dirtyRows)
+    dirty.forEach((index, position) => detached.set(index, copyJsonTree(dirtyRows[position])))
     const rowAt = index => {
       if (!detached.has(index)) {
         const {variables: _swipeVariables, ...display} = state.chat.messages[index]
@@ -1056,7 +1129,9 @@ export function createChatSqliteStore(options = {}) {
       // 写路径自检保证楼层 0..n-1 连续、行内容是对象（写入口 jsonText 兜底 'null' 的退化值不可能来自正常写路径）。
       complete: () => true,
       header(fields) {
-        return readProjectionHeader(db, fields, revision)
+        // P1（R-5）：形状池化（'settlement'＝全键清检查点）＋出借前脱离；
+        // 窗口读不再每次重解析整份头部（实测整头 4MB parse ≈ 2.4ms/次 × readWindow 226 次）。
+        return projectionReads.header(db, chatId, fields)
       },
       rows(from, to) {
         if (!(to > from)) return []

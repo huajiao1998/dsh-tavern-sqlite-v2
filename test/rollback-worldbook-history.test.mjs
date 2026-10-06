@@ -32,7 +32,7 @@ test('8轮不变书只存1历史版本；普通更新不插入、不写当前书
  db.exec('CREATE TABLE writes(kind TEXT); CREATE TRIGGER count_book AFTER INSERT ON archive_worldbook_history BEGIN INSERT INTO writes VALUES(\'history\'); END; CREATE TRIGGER count_head AFTER UPDATE ON archive_head_fields WHEN NEW.key=\'openingWorldbookSnapshot\' BEGIN INSERT INTO writes VALUES(\'head\'); END;')
  const original=await store.read(id)
  for(let i=1;i<=8;i++)await update(store,id,c=>attach(c,'t'+i))
- const saved=await store.read(id),text=db.prepare("SELECT value_json FROM archive_head_fields WHERE key='timeline'").get().value_json
+ const saved=await store.read(id),text=db.prepare("SELECT group_concat(value_json,'') AS all_text FROM archive_timeline_nodes").get().all_text ?? ''   // P2-a：timeline 落子行，侧证读全部子行拼接
  assert.equal(rows(db).length,1);assert.ok(!text.includes('原创完整世界书标记'));assert.deepEqual(saved.openingWorldbookSnapshot,big)
  assert.equal(original.timeline.checkpoints.length,0,'外借旧根不得被compact改写')
  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM writes WHERE kind='history'").get().n,1)

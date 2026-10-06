@@ -31,7 +31,25 @@ const openStore = () => { const s = createChatSqliteStore({ dataRoot: root, lega
 const sideDb = id => { const db = new DatabaseSync(path.join(chatsRoot, id, 'archive.db')); sides.push(db); return db }
 const one = (db, q, ...a) => db.prepare(q).get(...a)
 const json = v => (v === undefined ? undefined : JSON.parse(v))
-const headOf = (db, k) => json(one(db, 'SELECT value_json FROM archive_head_fields WHERE key=?', k)?.value_json)
+const headOf = (db, k) => {
+  if (k === 'timeline') {
+    // P2-a（v4）：timeline 落子行表（head 行是 NULL 占位）——侧证从子行组装；旧形态兜底。
+    const rows = db.prepare('SELECT node_key, ord, value_json FROM archive_timeline_nodes').all()
+    if (rows.length === 0) return json(one(db, 'SELECT value_json FROM archive_head_fields WHERE key=?', k)?.value_json)
+    const timeline = {}, checkpoints = []
+    let operations
+    for (const row of rows) {
+      const value = JSON.parse(row.value_json)
+      if (row.node_key === '@meta') Object.assign(timeline, value)
+      else if (row.node_key.startsWith('checkpoints#')) checkpoints[Number(row.ord)] = value
+      else (operations ||= {})[row.node_key.slice(11)] = value
+    }
+    timeline.checkpoints = checkpoints
+    timeline.operations = operations || {}
+    return timeline
+  }
+  return json(one(db, 'SELECT value_json FROM archive_head_fields WHERE key=?', k)?.value_json)
+}
 const rowAt = (db, i) => json(one(db, 'SELECT message_json FROM archive_messages WHERE message_index=?', i)?.message_json)
 const rowCount = db => Number(one(db, 'SELECT COUNT(*) AS n FROM archive_messages').n)
 const headRev = db => Number(one(db, 'SELECT revision FROM archive_head WHERE id=1').revision)
