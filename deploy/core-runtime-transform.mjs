@@ -101,6 +101,10 @@ const DISPATCH_EVENT_ANCHOR = [
   '  }\n'
 ].join('')
 
+const DISPATCH_EVENT_RECENT_ANCHOR = DISPATCH_EVENT_ANCHOR.replace(
+  '    const eventContext = input.context || await context(input.sessionId, input.chat, input.transientUserText)\n',
+  '    // `recent`: the browser keeps its history lease, so send the recent window\n    // instead of projecting every floor into the event.\n    const recent = !input.context && input.recent === true ? await options.resolveHelperWindow?.(input.sessionId) : undefined\n    const eventContext = input.context || (recent ? { contextWindow: recent } : await context(input.sessionId, input.chat, input.transientUserText))\n')
+
 const DISPATCH_EVENT_NEXT = [
   '  async function dispatchEvent(input = {}) {\n',
   '    ' + SNIPPET + ' 事件路由：变量核心（MESSAGE_RECEIVED）由服务端结算通道执行，\n',
@@ -138,7 +142,9 @@ const LIFECYCLE_TAIL_NEXT = [
   '    const browserScripts = serverEvent ? serverEvent.browserScripts : null\n',
   "    if (browserScripts === 0) return { handled: serverEvent ? serverEvent.handled === true : false, serverOwned: true, browserDispatched: false, serverHandled: serverEvent ? serverEvent.handled === true : false, serverHooks: serverEvent ? serverEvent.hooks : null, args: structuredClone(input.args || []) }\n",
   '    // 服务端钩子可能已改变量 ⇒ 浏览器上下文**重新取**（绝不复用调用方传进来的旧 context）。\n',
-  '    const eventContext = await context(input.sessionId, input.chat, input.transientUserText)\n',
+  '    // [dsh-tavern-browser-recent-context:v1] 窗口仅供浏览器；服务端仍使用完整权威chat。\n',
+  '    const recent = input.recent === true ? await options.resolveHelperWindow?.(input.sessionId) : undefined\n',
+  '    const eventContext = recent ? { contextWindow: recent } : await context(input.sessionId, input.chat, input.transientUserText)\n',
   '    const dispatched = await options.scriptDispatch.dispatch(input.sessionId, input.name, input.args, eventContext)\n',
   '    return { ...dispatched, serverOwned: true, browserDispatched: true, serverHandled: serverEvent ? serverEvent.handled === true : false, serverHooks: serverEvent ? serverEvent.hooks : null }\n',
   '  }\n'
@@ -406,6 +412,11 @@ export function runtimeTransformApplied(source) {
   if (!source.includes(RUNTIME_MARKER)) return false
   const marks = source.split(RUNTIME_MARKER).length - 1
   if (marks !== 1) throw new Error('核心运行时接缝版本标记出现 ' + marks + ' 次（应为 1）：拒绝判断')
+  if (source.includes('// [dsh-tavern-browser-recent-context:v1]')) {
+    for (const fragment of ['// [dsh-tavern-browser-recent-context:v1]', '    const recent = input.recent === true ? await options.resolveHelperWindow?.(input.sessionId) : undefined', '    const eventContext = recent ? { contextWindow: recent } : await context(input.sessionId, input.chat, input.transientUserText)']) {
+      if (source.split(fragment).length !== 2) throw new Error('浏览器recent消费面标记不完整/重复，拒绝判断')
+    }
+  }
   // 旧代（缺作者2.5生成消费面）是**已知且可升级**的中间态：只要旧代实现齐全就放行给升级路径，
   // 升级分支会补齐新面；若连旧代都不齐全，继续按不完整抛错。
   const oldGenComplete = REQUIRED_OLD_GEN.every(required => source.includes(required))
@@ -451,13 +462,18 @@ export function applyRuntimeTransform(source) {
     if (!source.includes('signal: input.signal,')) source = replaceUnique(source,
       '        sessionId, draft: transaction.draft, transaction, messageId, swipeId,',
       '        sessionId, draft: transaction.draft, transaction, messageId, swipeId,\n        signal: input.signal,', '服务端结算取消信号')
+    if (!source.includes('// [dsh-tavern-browser-recent-context:v1]')) source = replaceUnique(source,
+      '    const eventContext = await context(input.sessionId, input.chat, input.transientUserText)\n    const dispatched = await options.scriptDispatch.dispatch(input.sessionId, input.name, input.args, eventContext)',
+      '    // [dsh-tavern-browser-recent-context:v1] 窗口仅供浏览器；服务端仍使用完整权威chat。\n    const recent = input.recent === true ? await options.resolveHelperWindow?.(input.sessionId) : undefined\n    const eventContext = recent ? { contextWindow: recent } : await context(input.sessionId, input.chat, input.transientUserText)\n    const dispatched = await options.scriptDispatch.dispatch(input.sessionId, input.name, input.args, eventContext)', '浏览器recent窗口消费面升级')
     return source
   }
   let out = source
   out = replaceUnique(out, IMPORT_ANCHOR,
     IMPORT_ANCHOR + RUNTIME_MARKER + ' 服务端执行消费者薄垫片（作者树文件由部署侧创建，实现归本包）\n' + SHIM_SPECIFIER + '\n',
     '① 顶部垫片 import')
-  out = replaceUnique(out, DISPATCH_EVENT_ANCHOR, DISPATCH_EVENT_NEXT, '② dispatchEvent 事件路由（核心拒绝浏览器 / 生命周期服务端优先）')
+  const eventVariants = [DISPATCH_EVENT_ANCHOR, DISPATCH_EVENT_RECENT_ANCHOR]
+  if (eventVariants.reduce((count, anchor) => count + out.split(anchor).length - 1, 0) !== 1) throw new Error('核心运行时dispatchEvent新旧布局缺失/混合/重复，拒绝施缝')
+  out = replaceUnique(out, eventVariants.find(anchor => out.includes(anchor)), DISPATCH_EVENT_NEXT, '② dispatchEvent 事件路由（核心拒绝浏览器 / 生命周期服务端优先）')
   out = replaceUnique(out, LIFECYCLE_TAIL_ANCHOR, LIFECYCLE_TAIL_NEXT, '②b 纯计算卡立即回执（browserScripts===0 不下发）')
   out = replaceUnique(out, BUSY_ANCHOR, '', '③ 删执行前 busy 判断')
   out = replaceUnique(out, DISPATCH_ANCHOR, DISPATCH_NEXT, '④ MESSAGE_RECEIVED 浏览器派发 → 服务端执行')

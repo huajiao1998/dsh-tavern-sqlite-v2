@@ -7,8 +7,12 @@ export function applyRollbackHostTransform(source){
  next=once(next,'  const worldbookRecallLog = createWorldbookRecallLog({ store: profileData })',"  const worldbookRecallLog = createRollbackWorldbookRecallLog({ store: profileData, dataRoot })\n  ctx.effect(() => () => worldbookRecallLog.dispose(), 'dsh-tavern: 召回SQLite释放')")
  next=once(next,'    if (!autoCompaction || compactionAbort.signal.aborted || compactionTimers.has(sessionId)) return','    if (rollbackSchedulingBarrier.has(sessionId) || !autoCompaction || compactionAbort.signal.aborted || compactionTimers.has(sessionId)) return')
  next=once(next,'    if (legacyViewSeams.readOnlyChat(chat)) return',"    if (rollbackSchedulingBarrier.has(chat.sessionId) || str(metadata?.source).startsWith('rollback.') || legacyViewSeams.readOnlyChat(chat)) return")
- next=once(next,'      readRevision: readChatRevision, write: writeChat, update: updateChat, readSlice: chatPersistence.readSlice },','      readRevision: readChatRevision, write: writeChat, update: updateChat, readSlice: chatPersistence.readSlice, rollbackArchivePath: chatJournalStore.rollbackArchivePath },')
- next=once(next,'    cancelSettlement,\n    present: view,',`    cancelSettlement,
+ next=once(next,'readSlice: chatPersistence.readSlice },','readSlice: chatPersistence.readSlice, rollbackArchivePath: chatJournalStore.rollbackArchivePath },')
+ const presentations=['view','presentStory'].map(name=>'    cancelSettlement,\n    present: '+name+',')
+ if(presentations.reduce((count,anchor)=>count+next.split(anchor).length-1,0)!==1)throw Error('回退Host展示布局缺失或重复')
+ const presentation=presentations.find(anchor=>next.includes(anchor))
+ const presentationName=presentation.endsWith('presentStory,')?'presentStory':'view'
+ next=once(next,presentation,`    cancelSettlement,
     cleanupRollbackSides: (chat, turn) => worldbookRecallLog.pruneRollback(chat, turn, chat.timeline.branchId),
     quiesceRollback: async chat => {
       await foregroundHandoff.whenIdle(chat.sessionId)
@@ -20,7 +24,7 @@ export function applyRollbackHostTransform(source){
       await candidateWorldbookPreparation?.whenIdle(chat.sessionId)
       await tavernScriptHostAdapter.whenIdle(chat.sessionId)
     },
-    present: view,`)
+    present: ${presentationName},`)
  return next
 }
 export function applyTemplateQuiescenceTransform(source){

@@ -2,7 +2,12 @@
 function once(source,old,next){if(source.split(old).length!==2)throw Error('正文提交归属锚点缺失/不唯一：'+old.slice(0,100));return source.replace(old,next)}
 export function applyRollbackBodyCommitTurnTransform(source){
  const marker='// [dsh-tavern-body-commit-owner:v1]'
- if(source.includes(marker))return source
+ if(source.includes(marker)){
+  for(const fragment of ['function rollbackBodyCommitMatches(chat,input)', '!rollbackBodyCommitMatches(current,input)', '!rollbackBodyCommitMatches(chat,input)']) {
+   if(source.split(fragment).length!==2)throw Error('正文提交归属消费者缺失/重复：'+fragment)
+  }
+  return source
+ }
  let next=marker+`\nfunction rollbackBodyCommitMatches(chat,input) {
  const owner=input.rollbackBodyOwner,op=chat.timeline?.operations?.[owner?.operationId]
  return !!owner && !chat.rollbackPending && owner.chatId===chat.id && owner.sessionId===chat.sessionId && owner.turn===Number(input.turn) && owner.branchId===chat.timeline?.branchId && op?.kind==='body' && ['running','completed'].includes(op.status) && Number(op.turn)===owner.turn && op.basedOn?.branchId===owner.branchId
@@ -10,8 +15,10 @@ export function applyRollbackBodyCommitTurnTransform(source){
 `+source
  next=once(next,'    await store.updateChat(chat.id, async current => {',`    await store.updateChat(chat.id, async current => {
       if(!rollbackBodyCommitMatches(current,input)){result={saved:false,reason:'stale-body-owner'};return undefined}`)
- return once(next,'  async function finalizeSnapshot(input, chat, writeChat, expectedTimeline) {',`  async function finalizeSnapshot(input, chat, writeChat, expectedTimeline) {
-    if(['story','script'].includes(chat.mode || 'story') && !rollbackBodyCommitMatches(chat,input))return {saved:false,reason:'stale-body-owner'}`)
+ const snapshots=['  async function finalizeSnapshot(input, chat, writeChat, expectedTimeline) {','  async function finalizeSnapshot(input, chat, writeChat, expectedTimeline, history) {']
+ if(snapshots.reduce((count,anchor)=>count+next.split(anchor).length-1,0)!==1)throw Error('正文提交归属：未知/重复finalizeSnapshot签名')
+ const snapshot=snapshots.find(anchor=>next.includes(anchor))
+ return once(next,snapshot,snapshot+`\n    if(['story','script'].includes(chat.mode || 'story') && !rollbackBodyCommitMatches(chat,input))return {saved:false,reason:'stale-body-owner'}`)
 }
 export function applyRollbackBodyCommitHandoffTransform(source){
  const marker='// [dsh-tavern-body-commit-handoff:v1]'

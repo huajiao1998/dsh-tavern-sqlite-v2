@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite'
+import { isProxy } from 'node:util/types'
 import { assertRollbackChatWritable } from './lib/rollback-barrier.js'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
@@ -104,6 +105,32 @@ export function createChatSqliteStore(options = {}) {
   const sizes = new WeakMap()
   const density = new WeakMap()
   const validMessage = row => row && typeof row === 'object' && !Array.isArray(row)
+  // 整档保存必须是完整JSON楼层；复制前拒绝作者scoped/旧代Proxy，否则品牌会丢失、空洞会落成null。
+  function assertCompleteMessages(messages) {
+    if (!Array.isArray(messages) || isProxy(messages) || helpers.isScopedMessages?.(messages)) {
+      throw new Error('局部读取的对话不能整档保存：messages必须是完整普通数组')
+    }
+    for (let index = 0; index < messages.length; index++) {
+      if (!Object.hasOwn(messages, index) || !validMessage(messages[index])) {
+        throw new Error('局部读取的对话不能整档保存：消息楼层缺失或无效（' + index + '）')
+      }
+    }
+  }
+  function assertCompleteChat(chat) {
+    if (chat && Object.hasOwn(chat, 'messages')) assertCompleteMessages(chat.messages)
+  }
+  function assertPatchMessages(change) {
+    if (!change || !Array.isArray(change.path)) throw new Error('Invalid journal patch path')
+    if (change.op === 'set' && change.path.length === 0) assertCompleteChat(change.value)
+    if (change.path[0] !== 'messages') return
+    if (change.path.length === 1 && change.op === 'set') assertCompleteMessages(change.value)
+    if (change.path.length === 1 && change.op === 'splice') assertCompleteMessages(change.items ?? [])
+    if (change.path.length === 2 && (change.op === 'delete' || change.op === 'set')) {
+      if (change.op === 'delete' || !Number.isSafeInteger(change.path[1]) || change.path[1] < 0 || !validMessage(change.value)) {
+        throw new Error('消息楼层不能设为空洞；范围成员变化请使用完整splice')
+      }
+    }
+  }
   function dense(messages) {
     if (!Array.isArray(messages)) return false
     if (!density.has(messages)) density.set(messages, messages.every(validMessage))
@@ -675,6 +702,10 @@ export function createChatSqliteStore(options = {}) {
       if (changes.length === 0) { metadata.assertCurrent?.(); return slice(state.chat, []).chat }
       const normalized = []
       for (const change of changes) {
+        assertPatchMessages(change)
+        if (change.path[0] === 'messages' && change.path.length === 2 && change.op === 'set' && change.path[1] >= state.chat.messages.length) {
+          throw new Error('消息楼层越界；追加请使用完整splice')
+        }
         if (change.op === 'set' && change.value === undefined) {
           if (!change.path.length) throw new Error('Journal root cannot be undefined')
           const current = applyJsonChangesShared(state.chat, normalized)
@@ -720,6 +751,7 @@ export function createChatSqliteStore(options = {}) {
       assertRollbackChatWritable(current, metadata)
       const produced = await updater(copyJsonTree(current))
       if (produced === undefined) return copyJsonTree(current)
+      assertCompleteChat(produced)
       // L1（2026-09-30）：脱离草稿用【结构化拷贝】而非 JSON 文本往返。
       //   copy-json-tree.js 的契约就是 "detach an already parsed JSON tree, sharing only immutable
       //   primitive values" —— 与 jsonClone 同一目的，但不序列化（大字符串按引用共享）。
@@ -996,8 +1028,13 @@ export function createChatSqliteStore(options = {}) {
     const sorted = [...indices].sort((a, b) => a - b)
     return { indices: sorted, baseRevision: revision, revision: state.revision }
   }
-  async function readChangedIndices(chatId, revision) {
-    return changedIndices(chatId, await cachedState(chatId), revision)
+  async function readChangedIndices(chatId, revision, options = {}) {
+    const limit = options?.limit
+    if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 0)) throw new Error('Invalid change coverage limit')
+    const state = await cachedState(chatId)
+    // limit是追溯revision跨度，不截断索引；内存证据不足仍由changedIndices明确返回undefined。
+    if (limit !== undefined && state && state.revision - revision > limit) return undefined
+    return changedIndices(chatId, state, revision)
   }
   async function readChangedSlice(chatId, revision, fields) {
     const state = await cachedState(chatId)
@@ -1085,6 +1122,15 @@ export function createChatSqliteStore(options = {}) {
     return result
   }
 
+  // Helper的最后变量楼不等于MVU-ready楼：选中槽的null/空对象也是真值。
+  function hasSelectedVariables(row) {
+    if (!row || typeof row !== 'object' || row.role === 'tavern-helper') return false
+    const values = row.variables
+    const count = Math.max(Array.isArray(values) ? values.length : 0, Array.isArray(row.swipes) ? row.swipes.length : 0, 1)
+    const selected = Math.max(0, Math.min(count - 1, Number(row.swipeId) || 0))
+    return Array.isArray(values) && values.length > 0 && values[selected] !== undefined
+  }
+
   /** 作者 indexedMessages 的 eligible 判据（chat-journal-store.js:150-155）：选中 swipe 的 variables 同时有 stat_data 与 schema。 */
   function mvuEligible(row) {
     if (!row || typeof row !== 'object') return false
@@ -1155,6 +1201,20 @@ export function createChatSqliteStore(options = {}) {
         const row = db.prepare('SELECT message_json FROM archive_messages WHERE message_index = ?').get(index)
         return row === undefined ? undefined : variables.hydrateRow(db, chatId, index, parseRow(row.message_json))
       },
+      currentRevision() { return Number(db.prepare('SELECT revision FROM archive_head WHERE id=1').get()?.revision) },
+      worldMessage() {
+        // 仅SQL筛楼号、按需补一楼；复用同库快照与readWindow相同hydrate，不物化整档正文。
+        const candidates = stmt(db, `SELECT m.message_index FROM archive_messages m
+          WHERE COALESCE(json_extract(m.message_json,'$.role'),'') <> 'tavern-helper'
+            AND (json_type(m.message_json,'$.variables') IS NOT NULL
+              OR EXISTS (SELECT 1 FROM variable_snapshots v WHERE v.message_index=m.message_index))
+          ORDER BY m.message_index DESC`).iterate()
+        for (const candidate of candidates) {
+          const index = Number(candidate.message_index)
+          if (hasSelectedVariables(this.row(index))) return index
+        }
+        return null
+      },
       // 被 K4 修剪的老楼：行里没有 variables，合格判据走快照表（selected + mvu_ready），仍然 swipe 精确
       previousMvu(before) {
         return variables.previousMvu(db, before)
@@ -1192,6 +1252,11 @@ export function createChatSqliteStore(options = {}) {
         return out
       },
       row(index) { return detach(messages[index]) },
+      currentRevision() { return revision },
+      worldMessage() {
+        for (let index=messages.length-1; index>=0; index--) if (hasSelectedVariables(messages[index])) return index
+        return null
+      },
       previousMvu(before) {
         const exclusive = Number(before)
         if (!Number.isSafeInteger(exclusive) || exclusive <= 0) return -1
@@ -1226,7 +1291,9 @@ export function createChatSqliteStore(options = {}) {
     if (requirePartial && from === 0) return null
     const chat = source.header(fields ?? (includeCheckpoints ? undefined : 'settlement'))
     chat.messages = source.rows(from, end)
-    return { chat, messageCount: source.messageCount, from, to: end - 1, revision: source.revision }
+    const worldMessage = source.worldMessage()
+    assertPinnedRevision(chatId, source.revision, source.currentRevision())
+    return { chat, messageCount: source.messageCount, from, to: end - 1, revision: source.revision, worldMessage }
   }
 
   /** 真身 native-conversation-storage.js:254-279：Helper 只读投影（无 range=全量；带 range=闭区间切片）。 */

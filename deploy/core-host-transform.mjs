@@ -53,8 +53,13 @@ export function applyHostTransform(source) {
         presetRegexScripts: activeSnapshot?.regexScripts || [], extensions,
         characterVariables: extensions?.variables || {} })
     },`, '服务端卡脚本与模型生成')
-  next = once(next, 'readRevision: readChatRevision, write: writeChat, update: updateChat },\n    sessions:',
-    'readRevision: readChatRevision, write: writeChat, update: updateChat, readSlice: chatPersistence.readSlice },\n    sessions:', '回退head行键读接口')
+  const readSlotVariants = [
+    ['readRevision: readChatRevision, write: writeChat, update: updateChat },\n    sessions:', 'readRevision: readChatRevision, write: writeChat, update: updateChat, readSlice: chatPersistence.readSlice },\n    sessions:'],
+    ['return selected && { ...selected, chat: normalizeChat(selected.chat) }\n      } },\n    sessions:', 'return selected && { ...selected, chat: normalizeChat(selected.chat) }\n      }, readSlice: chatPersistence.readSlice },\n    sessions:'],
+  ]
+  if (readSlotVariants.reduce((count, [anchor]) => count + next.split(anchor).length - 1, 0) !== 1) throw new Error('核心接入锚点不唯一：回退head行键读接口（有限新旧布局）')
+  const readSlot = readSlotVariants.find(([anchor]) => next.includes(anchor))
+  next = once(next, readSlot[0], readSlot[1], '回退head行键读接口')
   next = once(next, '    sessionPatch,\n  })\n\n  const bodyEditor',
     "    sessionPatch,\n    variableStore: variableSqliteStore,\n    persistenceProvider: () => ctx.get('sessionPersistence'),\n    projectionsProvider: () => ctx.get('sessionProjections'),\n    projectionCacheProvider: () => ctx.get('sessionProjectionCache'),\n    tokenMeterProvider: () => ctx.get('tokenMeter'),\n    webServerProvider: () => ctx.get('webServer'),\n  })\n\n  const bodyEditor", '完整回退实时服务')
   next = once(next, '    helperRuntime.diagnostics.push(...(Array.isArray(cardExtensions.remoteAssetDiagnostics)',

@@ -22,7 +22,25 @@ const BODY=`${START}
 
 `
 const SYNC_BODY=BODY.replace('webServerProvider: () => typeof webServerProvider === \'function\' ? webServerProvider() : webServerProvider,', 'rollbackSyncProvider: () => typeof rollbackSyncProvider === \'function\' ? rollbackSyncProvider() : rollbackSyncProvider,')
+// 新作者布局直接接最终消费者；不先修补随即会删除的软回退/历史窗口路径。
+export function applyLatestCleanRollbackTransform(source) {
+ const regenStart='  async function regenRecent(chatId, guidance, sessionId) {'
+ const replayStart='  // ---------- 重放失败回合（移除被中断的回复，原样重发本轮输入） ----------'
+ const regenCall='    try { return await regenRecent(chat.id, guidance, sessionId) ?? await regenBody(chat.id, guidance, sessionId) }'
+ for(const anchor of [START,END,regenStart,replayStart,regenCall,
+   '  async function rollbackRecent(reference, requestedTurn, restoredAgent) {',
+   '    const bounded = await rollbackRecent(chat, requestedTurn, restoredAgent)',
+   '  async function finishRollback(']) {
+   if(source.split(anchor).length!==2)throw new Error('新作者唯一回退布局缺失或重复：'+anchor)
+ }
+ const from=source.indexOf(regenStart),to=source.indexOf(replayStart)
+ if(to<=from)throw new Error('新作者重生成函数边界无效')
+ let next=source.slice(0,from)+source.slice(to)
+ next=next.replace(regenCall,'    // SQLite只有当前态：重生成沿行级checkpoint，不探测不存在的历史正文。\n    try { return await regenBody(chat.id, guidance, sessionId) }')
+ return applyCleanRollbackTransform(next)
+}
 export function applyCleanRollbackTransform(source) {
+ if (source.includes(MARKER) && (source.split(MARKER).length!==2 || source.split(START).length!==2 || source.split(END).length!==2)) throw new Error('统一物理回退消费者重复/边界不唯一')
  if (source.includes('rollbackSyncProvider')) {
   if(!source.includes(SYNC_BODY) || source.split('rollbackSyncProvider, variableStore, quiesceRollback, cleanupRollbackSides })').length!==2) throw new Error('同连接统一回退消费者不完整')
   return source

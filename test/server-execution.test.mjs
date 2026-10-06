@@ -203,7 +203,12 @@ await test('变换：锚点命中 + 浏览器痕迹清零 + 服务端执行接�
   assert.ok(out.includes('const browserScripts = serverEvent ? serverEvent.browserScripts : null'), '浏览器下发前先取真投影计数')
   assert.ok(out.includes('if (browserScripts === 0) return {'), '纯计算卡（browserScripts=0）立即回执，不等浏览器')
   assert.ok(!out.includes('input.context || await context(input.sessionId'), '浏览器上下文重新取（不复用可能过期的 input.context）')
-  assert.ok(out.includes('const eventContext = await context(input.sessionId, input.chat, input.transientUserText)'), '服务端钩子改变量后重取上下文')
+  // 服务端钩子已在上面跑过 ⇒ 浏览器上下文必须是**现取**的：recent 走现取有界窗口，其余走完整投影重取。
+  // 改成顺序断言（比原来的整串字面更强）：重取必须排在服务端钩子之后、下发浏览器之前，且仍不复用 input.context。
+  const refetch = 'const eventContext = recent ? { contextWindow: recent } : await context(input.sessionId, input.chat, input.transientUserText)'
+  assert.ok(out.includes(refetch), '服务端钩子改变量后重取上下文')
+  assert.ok(out.indexOf('await serverExecution.dispatchLifecycleEvent({') < out.indexOf(refetch), '浏览器上下文重取必须发生在服务端钩子之后')
+  assert.ok(out.indexOf(refetch) < out.indexOf('options.scriptDispatch.dispatch(input.sessionId, input.name, input.args, eventContext)'), '浏览器上下文重取必须发生在下发浏览器之前')
   assert.ok(out.includes('commandText: internalText'), '核心收到与浏览器同形的 internalText')
   assert.ok(out.includes('originalText,'), 'BEFORE_MESSAGE_UPDATE 只拿前台原文')
   assert.ok(out.includes('const settledText = rewrittenText === null ? originalText : rewrittenText'), '改写正文落回正文槽')
