@@ -6,6 +6,7 @@ import {sourceAccess,finishSourceUninstall,STANDARD_RECORD} from './source.mjs'
 
 const historyRecords=['.tavern-seams.json','.tavern-legacy-view-seams.json','.tavern-save-ui-seam.json']
 const indexRel='tavern-plugin/lib/index.js'
+const backupName=/\.(?:pre-seams-[\w-]+\.bak|legacy-view-seams\.backup|save-ui[^/]*\.backup)$/
 const packageRel='tavern-plugin/package.json'
 const operationName=/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex')
@@ -36,6 +37,9 @@ export function recoverSourcePreimage({access,adapter,evidenceDir,before,checkBu
   if(p===path.dirname(p))break
  }
  const currentRecord=JSON.parse(Buffer.from(before[STANDARD_RECORD],'base64').toString('utf8'))
+ const ownedBackups=new Set()
+ for(const name of historyRecords)if(before[name])for(const item of JSON.parse(Buffer.from(before[name],'base64').toString('utf8')).entries||[])if(item.backup){access.file(item.backup);ownedBackups.add(item.backup)}
+ const preserved=Object.fromEntries(Object.entries(before).filter(([rel,body])=>body!==null&&backupName.test(rel)&&!ownedBackups.has(rel)))
  const attempts=[],valid=[],seen=new Set();let readBytes=0
  const dirs=readdirSync(root,{withFileTypes:true}).filter(e=>operationName.test(e.name)&&path.resolve(root,e.name)!==path.resolve(evidenceDir)).sort((a,b)=>b.name.localeCompare(a.name)).slice(0,64)
  for(const [ordinal,entry]of dirs.entries()){
@@ -66,8 +70,8 @@ export function recoverSourcePreimage({access,adapter,evidenceDir,before,checkBu
    for(const rel of active)if(applied[rel]!==before[rel])throw Error('候选重放与当前活动源码不一致：'+rel)
    const replayRecord=JSON.parse(readFileSync(replay.file(STANDARD_RECORD),'utf8'))
    finishSourceUninstall(replay,adapter,replayRecord,path.join(evidenceDir,'preimage-candidate-'+ordinal,'archives'))
-   const expected=replay.capture()
-   valid.push({expected,record:{...currentRecord,before:cleanBefore},provenance:{source:path.posix.join(entry.name,'source-before.json'),sha256:digest(bytes),verifiedActiveFiles:active.length,method:'clean-install-replay-byte-equality',afterUnchanged:true}})
+   const expected={...replay.capture(),...preserved}
+   valid.push({expected,record:{...currentRecord,before:{...cleanBefore,...preserved}},provenance:{source:path.posix.join(entry.name,'source-before.json'),sha256:digest(bytes),verifiedActiveFiles:active.length,method:'clean-install-replay-byte-equality',afterUnchanged:true}})
   }catch(error){attempts.push({source:entry.name,reason:error.message})}
  }
  mkdirSync(evidenceDir,{recursive:true})

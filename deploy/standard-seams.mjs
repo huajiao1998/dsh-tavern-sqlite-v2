@@ -84,8 +84,8 @@ function snapshot(appDir) {
     return [rel, existsSync(file) ? readFileSync(file).toString('base64') : null]
   }))
 }
-function restore(appDir, before) {
-  for (const rel of new Set([...artifacts(appDir), ...Object.keys(before)])) {
+function restore(appDir, before, owned = artifacts(appDir)) {
+  for (const rel of new Set([...owned, ...Object.keys(before)])) {
     const file = inside(appDir, rel), body = before[rel]
     if (body == null) { if (existsSync(file)) unlinkSync(file) }
     else { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, Buffer.from(body, 'base64')) }
@@ -245,7 +245,8 @@ export function uninstallStandardSeams({ appDir } = {}) {
   const originalIndex = Buffer.from(indexImage, 'base64').toString('utf8')
   if (originalIndex.includes('[dsh-tavern-core-host:v1]')) throw new Error('前像污染：标准代前像含完整核心接缝；拒绝落盘恢复，请由一键维护入口验证历史安装材料')
   try {
-    restore(appDir, record.before)
+    // 卸载只撤record明确覆盖的文件；事后出现的无关备份不因遍历而被删除。
+    restore(appDir, record.before, Object.keys(record.after))
     // 只恢复本标准代拥有的升级前像；预先存在的历史接缝不冒认、不猜测撤除。
     // 裸作者首装的before就是裸源码；旧已施缝树恢复为其升级前代，整包移除仍须历史记录维护。
     unlinkSync(file)

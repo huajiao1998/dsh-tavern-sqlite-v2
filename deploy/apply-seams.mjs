@@ -303,8 +303,10 @@ export function uninstallAllSeams({ appDir }) {
   // 2026-10-06 修复：清扫孤儿 .pre-seams-*.bak（manifest 未引用的残留）——
   // 卸载后残留的备份会在下次装回时被 ensureBackup 复用（哪怕内容已污染），
   // 形成"卸载恢复出脏前像 → 锚点找不到"死循环（188 实测）。
-  // 只删孤儿：manifest 引用的备份由 finishSourceUninstall 归档，不在此处动。
+  // 限定本缝声明条目：manifest 引用的备份由 finishSourceUninstall 归档，不在此处动；
+  // 其他维护或未知来源的 .bak 不清扫，防止 uninstallAllSeams 的目录扫描与标准卸缝的明确集合打架。
   const referencedBackups = new Set(entries.filter(e => e.backup).map(e => path.posix.normalize(e.backup)))
+  const ownedPrefixes = new Set(entries.filter(e => e.rel && !e.created).map(e => path.posix.normalize(e.rel) + '.pre-seams-'))
   for (const dirRel of ['tavern-plugin/lib', 'tavern-plugin/lib/domain']) {
     const dir = path.join(APP, dirRel)
     if (!existsSync(dir)) continue
@@ -312,6 +314,7 @@ export function uninstallAllSeams({ appDir }) {
       if (!/\.pre-seams-[\w.-]+\.bak$/.test(name)) continue
       const rel = path.posix.join(dirRel, name)
       if (referencedBackups.has(rel)) continue
+      if (![...ownedPrefixes].some(prefix => rel.startsWith(prefix))) continue
       try { unlinkSync(path.join(dir, name)) } catch { /* 清不了不挡卸载 */ }
     }
   }

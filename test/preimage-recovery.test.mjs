@@ -63,7 +63,9 @@ test('首装→幂等启动→disposer撤标准代→再启动→整包卸载：
  adapter.uninstallStandardSeams({appDir:f.app})
  adapter.applyStandardSeams({appDir:f.app})
  assert.equal(JSON.parse(fs.readFileSync(f.access.file(STANDARD_RECORD),'utf8')).before[index],f.original[index])
+ const unrelated=index+'.pre-seams-unrelated.bak';fs.writeFileSync(f.access.file(unrelated),'另一项维护的材料','utf8')
  await f.run('uninstall');f.access.assertImage(f.original)
+ assert.equal(fs.readFileSync(f.access.file(unrelated),'utf8'),'另一项维护的材料','普通卸载不得删除记录外材料')
  assert.equal(fs.readFileSync(decoy,'utf8'),'原创业务诱饵')
  assert.ok(!f.events.includes('stop'))
 })
@@ -101,7 +103,9 @@ test('受管备份污染：不能删除旧备份再复制当前缝合态重建',
 
 test('一键uninstall直接恢复旧坏记录，无需用户先手工改记录或哈希',async t=>{
  const f=fixture(t);await f.run('install');const record=pollute(f)
+ const unrelated=index+'.pre-seams-unrelated.bak';fs.writeFileSync(f.access.file(unrelated),'另一项维护的材料','utf8')
  const removed=await f.run('uninstall')
+ assert.equal(fs.readFileSync(f.access.file(unrelated),'utf8'),'另一项维护的材料','自动恢复不删除未认领材料')
  assert.equal(removed.preimageRecovery.afterUnchanged,true)
  assert.ok(removed.preimageRecovery.source.endsWith('/source-before.json'))
  f.access.assertImage(f.original)
