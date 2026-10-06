@@ -50,6 +50,8 @@ curl -fsSL https://raw.githubusercontent.com/huajiao1998/dsh-tavern-sqlite-v2/ma
 2. 右键其中的 `install.ps1` →「使用 PowerShell 运行」进入菜单（安装 / 更新 / 卸载 / 只读预检）；也支持命令行：`.\install.ps1 install|update|uninstall|check`；
 3. 桌面版安装/卸载前请从托盘**完全退出**酒馆，完成后重新启动生效；本机未装 Node 时安装器可复用桌面版自带运行时；菜单里的「更新」会自动校验官方包再先卸旧、后装新。
 
+**0.2.8 修复发行包缺文件（重要）**：0.2.5–0.2.7 的包缺少 `lib/vendor/yaml/dist/**`（74 个文件，公开仓 `.gitignore` 的 `dist/` 误伤），导致安装被 vendor 台账护栏拒绝。本版补齐全部 vendor 文件，并让构建自带包完整性门禁（逐文件比对＋vendor 台账＋zip 内容核对，缺一项即构建失败）。安装阶段的结果 JSON 与日志都落在 `install.ps1` 同目录。
+
 **0.2.7 安装器闪退修复**：日志改为进入脚本立即打开——没找到酒馆/Node、参数不合法这类早期失败同样留下 `install.log`；等待条件不再依赖宿主类型，除 `-Yes` 外一律停住等用户查看。**Windows 推荐双击 `run-install.cmd`**：绕过执行策略、把全部输出（含 PowerShell 解析错误）写入同目录 `install.log` 并总是暂停，双击不会闪退。
 
 **0.2.6 安装器日志边界与异常兜底**：安装器日志（不是酒馆维护证据）固定落 `install.ps1` 同目录 `install.log`，每次覆盖，用户报错只找手边这一个文件；更新/下载分支输出同步进日志；未捕获异常先写日志再停住等用户查看，除点叉/输入0外不闪退。`install.log` 属运行产物，不进发行包。
