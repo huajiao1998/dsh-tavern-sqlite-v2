@@ -1,0 +1,132 @@
+// 真实有限作者接缝+原创driver：不联网、不SSH、不启服务、不访问任何真实存档。
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import {fileURLToPath} from 'node:url'
+import {createHash,randomUUID} from 'node:crypto'
+import {spawnSync} from 'node:child_process'
+import {applyAllSeams} from '../deploy/apply-seams.mjs'
+import {maintenanceAdapter as adapter} from '../deploy/maintenance.mjs'
+import {sourceAccess,rehearseSource,STANDARD_RECORD} from '../deploy/maintenance/source.mjs'
+import {executeMaintenance} from '../deploy/maintenance/runner.mjs'
+
+const workspace=fileURLToPath(new URL('../../../',import.meta.url))
+const authorSha='5d2ffacf4231c9f45dc641b9db9e0286c4fa5f60'
+const authorArchive=path.join(workspace,'tmp/upstream25-author-fixture','dsh-tavern-'+authorSha+'.tar.gz')
+const index='tavern-plugin/lib/index.js'
+const hash=bytes=>createHash('sha256').update(bytes).digest('hex')
+function fixture(t){
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'v2-preimage-proof-')),app=path.join(root,'app')
+ t.after(()=>{assert.ok(path.basename(root).startsWith('v2-preimage-proof-'));fs.rmSync(root,{recursive:true,force:true})})
+ let author=process.env.TAVERN_LATEST_AUTHOR_ROOT
+ if(!author){
+  assert.ok(fs.existsSync(authorArchive),'缺固定作者2.5.0归档，不SKIP或冒称通过')
+  const unpack=path.join(root,'unpack');fs.mkdirSync(unpack)
+  assert.equal(spawnSync('tar',['-xzf',authorArchive,'-C',unpack],{stdio:'inherit'}).status,0)
+  author=path.join(unpack,'dsh-tavern-'+authorSha)
+ }
+ assert.equal(JSON.parse(fs.readFileSync(path.join(author,'tavern-plugin/package.json'),'utf8')).version,'2.5.0','不伪造fixture版本')
+ for(const rel of [...adapter.targets,'tavern-plugin/package.json']){
+  const src=path.join(author,rel);if(!fs.existsSync(src))continue
+  const dst=path.join(app,rel);fs.mkdirSync(path.dirname(dst),{recursive:true});fs.copyFileSync(src,dst)
+ }
+ const access=sourceAccess(app,adapter.targets);access.protect()
+ const original=access.capture(),history=path.join(root,'maintenance',adapter.packageName)
+ let serial=0
+ const evidence=()=>{const dir=path.join(history,new Date(1791240000000+serial++*1000).toISOString().replace(/[:.]/g,'-')+'-'+randomUUID());fs.mkdirSync(dir,{recursive:true});return dir}
+ const events=[]
+ const driver={noop:false,preflight:async()=>({wasRunning:false,noop:driver.noop}),assertIdentity:async()=>events.push('identity'),assertStopped:async()=>events.push('stopped'),stop:async()=>events.push('stop'),start:async()=>{throw Error('停止态不得启动')},manage:async action=>events.push('manage:'+action),verify:async()=>({basicHealthVerified:true}),beginRecovery(){},stoppedAfterError:async()=>false,restorePackage:async()=>events.push('restorePackage')}
+ const run=(action,dir=evidence())=>executeMaintenance({action,adapter,driver,source:access,evidenceDir:dir})
+ return {root,app,access,original,history,evidence,driver,events,run}
+}
+function pollute(f){
+ const file=f.access.file(STANDARD_RECORD),record=JSON.parse(fs.readFileSync(file,'utf8')),current=fs.readFileSync(f.access.file(index))
+ record.before[index]=current.toString('base64')
+ // 合成旧现场：污染备份与其旧代after原本就是配对的；产品恢复不允许改after。
+ const backup=Object.keys(record.after).find(rel=>rel.startsWith(index+'.pre-seams-'))
+ assert.ok(backup,'真实首装必须有主入口备份')
+ fs.writeFileSync(f.access.file(backup),current);record.after[backup]=hash(current)
+ fs.writeFileSync(file,JSON.stringify(record)+'\n','utf8')
+ return record
+}
+
+test('首装→幂等启动→disposer撤标准代→再启动→整包卸载：最早保护前像保真',async t=>{
+ const f=fixture(t),decoy=path.join(f.root,'data/chats/synthetic.db')
+ fs.mkdirSync(path.dirname(decoy),{recursive:true});fs.writeFileSync(decoy,'原创业务诱饵','utf8')
+ await f.run('install')
+ const record=JSON.parse(fs.readFileSync(f.access.file(STANDARD_RECORD),'utf8'))
+ assert.equal(record.before[index],f.original[index])
+ assert.equal(adapter.applyStandardSeams({appDir:f.app}).changed,false)
+ assert.equal(adapter.applyStandardSeams({appDir:f.app}).changed,false)
+ adapter.uninstallStandardSeams({appDir:f.app})
+ adapter.applyStandardSeams({appDir:f.app})
+ assert.equal(JSON.parse(fs.readFileSync(f.access.file(STANDARD_RECORD),'utf8')).before[index],f.original[index])
+ await f.run('uninstall');f.access.assertImage(f.original)
+ assert.equal(fs.readFileSync(decoy,'utf8'),'原创业务诱饵')
+ assert.ok(!f.events.includes('stop'))
+})
+
+test('历史坏前像：check不改目标→同版install自动修元数据且after不变→uninstall成功',async t=>{
+ const f=fixture(t),installedEvidence=f.evidence()
+ await f.run('install',installedEvidence)
+ const polluted=pollute(f),baseline=f.access.capture()
+ assert.throws(()=>adapter.uninstallStandardSeams({appDir:f.app}),/前像污染/)
+ assert.deepEqual(f.access.capture(),baseline,'低层卸载写前拒绝')
+ const inspected=rehearseSource('uninstall',f.access,adapter,f.evidence())
+ assert.equal(inspected.result.repairAvailable,true)
+ assert.ok(inspected.recovery.provenance.verifiedActiveFiles>30)
+ assert.deepEqual(f.access.capture(),baseline,'check仅写自己的副本证据')
+ assert.deepEqual(inspected.recovery.record.after,polluted.after)
+ f.driver.noop=true;f.events.length=0
+ const repaired=await f.run('install')
+ assert.equal(repaired.changed,true);assert.equal(repaired.sourceMetadataRepaired,true)
+ assert.ok(!f.events.some(value=>/^(?:stop|manage:)/.test(value)),'幂等修复不改装配或服务状态')
+ const corrected=JSON.parse(fs.readFileSync(f.access.file(STANDARD_RECORD),'utf8'))
+ assert.equal(corrected.before[index],f.original[index]);assert.deepEqual(corrected.after,polluted.after)
+ assert.equal(Object.hasOwn(corrected.before,STANDARD_RECORD),false,'恢复记录不得捕获自身，否则restore提前删自身')
+ for(const rel of adapter.targets.filter(value=>value.endsWith('.js')))assert.equal(f.access.capture()[rel],baseline[rel],'活动源码保持逐字节：'+rel)
+ f.driver.noop=false
+ await f.run('uninstall');f.access.assertImage(f.original)
+})
+
+test('受管备份污染：不能删除旧备份再复制当前缝合态重建',async t=>{
+ const f=fixture(t);await f.run('install');pollute(f)
+ const shim=f.access.file('tavern-plugin/lib/domain/chat-sqlite-store.js');fs.unlinkSync(shim)
+ const baseline=f.access.capture()
+ assert.throws(()=>applyAllSeams({appDir:f.app}),/前像污染/)
+ assert.deepEqual(f.access.capture(),baseline,'备份及源码全部保留，不把删脏重建冒充修复')
+})
+
+test('一键uninstall直接恢复旧坏记录，无需用户先手工改记录或哈希',async t=>{
+ const f=fixture(t);await f.run('install');const record=pollute(f)
+ const removed=await f.run('uninstall')
+ assert.equal(removed.preimageRecovery.afterUnchanged,true)
+ assert.ok(removed.preimageRecovery.source.endsWith('/source-before.json'))
+ f.access.assertImage(f.original)
+ assert.ok(Object.keys(record.after).length>30)
+})
+
+test('无可靠材料、不同作者候选及真实源码漂移均停前拒绝，不能靠修after放行',async t=>{
+ const f=fixture(t),installedEvidence=f.evidence();await f.run('install',installedEvidence)
+ pollute(f);const baseline=f.access.capture(),file=path.join(installedEvidence,'source-before.json'),originalEvidence=fs.readFileSync(file)
+ const recordPath=f.access.file(STANDARD_RECORD),recordBytes=fs.readFileSync(recordPath),missing=JSON.parse(recordBytes.toString('utf8'))
+ missing.before[index]=null;fs.writeFileSync(recordPath,JSON.stringify(missing),'utf8');const invalid=f.access.capture(),entryBytes=fs.readFileSync(f.access.file(index))
+ assert.throws(()=>adapter.uninstallStandardSeams({appDir:f.app}),error=>/^标准前像缺合法作者入口/.test(error.message))
+ assert.deepEqual(f.access.capture(),invalid,'入口前像为空时也必须写前拒绝')
+ assert.deepEqual(fs.readFileSync(f.access.file(index)),entryBytes,'null入口拒绝时目标入口字节不变，不留半恢复')
+ assert.deepEqual(fs.readFileSync(recordPath),Buffer.from(JSON.stringify(missing),'utf8'),'null入口拒绝不改记录，不由拒绝路径重写前像')
+ fs.writeFileSync(recordPath,recordBytes)
+ fs.unlinkSync(file);f.events.length=0
+ await assert.rejects(f.run('uninstall'),/前像.*不可(?:恢复|验证)|没有.*洁净安装前像/)
+ assert.deepEqual(f.access.capture(),baseline);assert.ok(!f.events.some(value=>/^(?:stop|manage:)/.test(value)))
+ const wrong=JSON.parse(originalEvidence.toString('utf8'));wrong[index]=Buffer.from(Buffer.from(wrong[index],'base64').toString('utf8')+'\n// 不同作者代的额外代码\n').toString('base64')
+ fs.writeFileSync(file,JSON.stringify(wrong),'utf8')
+ await assert.rejects(f.run('uninstall'),/前像.*不可(?:恢复|验证)|没有.*洁净安装前像/)
+ assert.deepEqual(f.access.capture(),baseline)
+ fs.writeFileSync(file,originalEvidence)
+ fs.appendFileSync(f.access.file(index),'\n// 真实活动源码漂移\n','utf8');const drifted=f.access.capture()
+ await assert.rejects(f.run('uninstall'),/漂移/)
+ assert.deepEqual(f.access.capture(),drifted,'真实漂移不得修改目标或after')
+})

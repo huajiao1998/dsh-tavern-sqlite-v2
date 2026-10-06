@@ -1,64 +1,71 @@
-# V2 本地优先一键安装 / 卸载
+# V2 一键安装 / 卸载
 
-> 本文是装卸协议，不承载开发进度或许可。仓库接续从[START](<../../../docs/START.md>)、[NOW](<../../../docs/NOW.md>)进入，显式确认[AGENTS](<../../../AGENTS.md>)并核Git；V1/V2状态与现装代看[共用台账](<../../../docs/workstreams/plugin/TASKS.md>)。V2仍本地未部署/未公开，命令存在不授权执行。
+包名与独立仓库：`dsh-tavern-sqlite-v2`。V2 使用服务端 MVU / 卡脚本 VM / ESM 与 SQLite；V1 使用作者浏览器执行。两版不能在同一实例共装。
 
-V2 的包名和独立仓库名均为 `dsh-tavern-sqlite-v2`。V2 保留服务端 MVU / 卡脚本 VM / ESM、SQLite 权威存储与干净回退；V1 仍使用作者浏览器执行。两版只能选一版，不能在同一实例同时安装。
+## 支持范围
 
-## 支持范围与前提
+- macOS、Linux、WSL2 CLI；已有作者 2.5.0、DSH / boot 0.1.5-rc.2、Node.js 22.19+、pnpm。未知作者源码布局、Desktop 或未知管理器明确拒绝，不猜测覆盖。
+- 四个解析依赖 json5、jsonrepair、lodash、yaml 必须在已有离线材料中可用。下载本插件包不等于联网安装第三方依赖；官方包管理固定 `--offline --ignore-scripts --config.auto-install-peers=false`。
+- V2 启动需要 `--experimental-vm-modules`。已有 systemd 单元可在 install 后加 `--prepare-env`，授权安装器备份并补上旗标、隔离旧维护备份，失败恢复；不加该选项时不改启动配置，缺旗标会在停服前拒绝。
 
-- 复用 V1 的 macOS、Linux、WSL2 CLI 维护流程；已有作者 2.5.0（5d2ffacf已验；d5b2e6c4的[源码接缝/完整恢复副本](<../../../docs/workstreams/plugin/UPSTREAM-RETIRED-MVU-V2-FIX-2026-10-05.md>)已通过，实际CLI/页面未验）、DSH / boot 0.1.5-rc.2、Node.js 22.19+ 及 pnpm。不另装酒馆、Node、Python或宿主 peer。Desktop、未知源码布局或管理器不冒称支持。
-- **无需手工预配 `--experimental-vm-modules`**：安装命令加 `--prepare-env`（仅 install），安装器自动把它补进 systemd 单元——备份原 unit 到维护证据目录、daemon-reload、按原方式重启复验、失败自动回滚，**安装完成后服务启动自带该参数**。同一开关还自动隔离旧代（V1 线）维护残留备份到维护证据目录（只移动不删除；无授权时列清单明确拒绝）。不加该开关维持默认：要求该参数已存在于启动命令，否则停服前明确拒绝（安装器默认不改动你的启动配置）；停止态指定 systemd 单元时也核原 ExecStart，纯停止态可离线安装但仍保持停止、未来启动须带该旗标。
-- 装卸调用官方包管理，固定 `--offline --ignore-scripts --config.auto-install-peers=false`。V2 声明的 json5、jsonrepair、lodash、yaml 必须在既有离线依赖材料中可用；缺依赖明确失败并恢复，不偷偷联网、不另建依赖树镜像。下载本插件 tgz 与安装第三方依赖是两件事。
-- 新包名不自动认领旧包或记录。已经安装旧名称或 V1 时，先用**其所属旧代安装器完整卸载**，保留旧包与恢复材料，再装 V2；新安装器写前拒绝共装或覆盖。
+## 公开一键命令
 
-## GitHub 一键命令（仓库和正式 Release 发布后生效）
-
-安装：
+安装到已有酒馆目录：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/huajiao1998/dsh-tavern-sqlite-v2/main/install.sh | sh
+curl -fsSL https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest/download/install.sh | sh -s -- install --home /绝对路径/已有酒馆安装目录
 ```
 
-卸载：
+卸载（保留原档和所有数据库）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/huajiao1998/dsh-tavern-sqlite-v2/main/install.sh | sh -s -- uninstall
+curl -fsSL https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest/download/install.sh | sh -s -- uninstall --home /绝对路径/已有酒馆安装目录
 ```
 
-仓库根 [install.sh](<../install.sh>) 是稳定入口，完整获取 latest 正式 Release 的安装 SH，再透传参数；下载失败或为空时不执行。正式 SH 固定同代 tgz 地址、版本与 SHA256。只上传 main 不发正式 Release，不会让上述命令安装新版。本轮仅生成本地文件，**未创建仓库、上传或验证远端 URL 可用**。
-
-## 本地离线安装 / 卸载（现在可用）
-
-在解压包的目录执行：
+检查恢复材料，但不改源码、装配或服务状态：
 
 ```sh
-sh deploy/install.sh install --home /绝对路径/已有酒馆安装根目录
-sh deploy/install.sh uninstall --home /绝对路径/已有酒馆安装根目录
+curl -fsSL https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest/download/install.sh | sh -s -- uninstall --check --home /绝对路径/已有酒馆安装目录
 ```
 
-只保留 Release SH 和 tgz 时：
+仓库根 `install.sh` 也会完整获取 latest 正式 Release SH 再执行；失败或空文件不执行。正式 SH 固定同代 tgz 地址、版本与 SHA256。
+
+升级已有旧版：先执行上述 uninstall，再执行 install。获取器仅在本地包版本与发行版一致时复用本地包，否则下载固定发行附件作为执行器；可用新执行器卸载同一版本线的旧版。坏包拒绝，不猜测跨 V1/V2 迁移。未安装时 uninstall 幂等返回。
+
+## 前像保护与旧记录自动恢复（0.2.1）
+
+- 不再删除含接缝内容的备份后从当前缝合态重建；保留备份并明确报告。
+- 标准记录缺失但核心接缝仍在时，不把当前入口捕获成新的“作者原文”。
+- 旧版卸载恢复链失效时，自动查本包 `maintenance/dsh-tavern-sqlite-v2/` 下已有的安装前像，不扫描存档、Git 或其他实例。
+- 候选必须是洁净安装前像，作者包身份匹配；在有限源码副本中重新施缝，**全部活动目标 JS 必须与当前源码逐字节相等**，并真实预演卸载成功，才可使用。不同候选产生不同卸载后像时拒绝猜测。
+- 修复只更新可验证的 `before`，**不修改 `after` 校验哈希**；真实源码漂移仍拒绝。执行前保存当前材料与证明结果，同版 install 也可修复这类元数据，不停止或重启服务。
+- `--check` 只写本次维护诊断副本，目标不改；结果会报告 `repairAvailable`。缺少或删除历史安装证据、候选不匹配、未知代际时仍安全拒绝，明确报“前像不可恢复”，不承诺修复任意外部篡改。
+
+## 离线入口
+
+完整解压包中执行：
 
 ```sh
-sh install.sh install --home /绝对路径/已有酒馆安装根目录 --package ./dsh-tavern-sqlite-v2-0.1.2.tgz
-sh install.sh uninstall --home /绝对路径/已有酒馆安装根目录
+sh deploy/install.sh install --home /绝对路径/已有酒馆安装目录
+sh deploy/install.sh uninstall --home /绝对路径/已有酒馆安装目录
 ```
 
-获取器按完整本地目录、显式 tgz、脚本旁/当前目录/缓存、已装包查找，只有缺包才下载固定附件。坏包直接拒绝，不联网替换；卸载使用本地所属代，不下载新版，未装时幂等返回。源码中的 [deploy/install.sh](<install.sh>) 不含可下载发行摘要，仅完整本地包可用；Release SH 必须由构建器生成。
+也可给正式 SH 指定本地包：`--package ./dsh-tavern-sqlite-v2-0.2.1.tgz`。源码 SH 不含发行摘要，不能单独用于联网下载；正式 SH 由构建器生成。
 
-自动识别仅看 `DSH_TAVERN_CLI_HOME`、`DSH_HOME`、当前目录和 `~/.dsh-tavern`，多个/找不到才要求 `--home`，不扫描磁盘或存档。`--port` 可核对原端口；`--systemd-unit xxx.service` 可明确既有单元。
+自动识别仅看 `DSH_TAVERN_CLI_HOME`、`DSH_HOME`、当前目录及 `~/.dsh-tavern`；多个目录或找不到时要求 `--home`，不扫描磁盘。`--port` 核对端口，`--systemd-unit` 指定已有单元。
 
-## 运行状态与保护
+## 服务、数据与验收
 
-原来运行：重核 PID / 代次 / cwd / home / 启动命令后精确停止，装卸成功或失败恢复都沿原方式恢复。原来停止：保持停止，不拉起。有限源码副本先预检和核恢复材料；不复制整个 profile / node_modules，不读取、复制、转换或删除存档和数据库，不自动迁移或代建新 ID 分叉。默认终端显示独立作业进度，终端中断后恢复继续；`--background` 返回作业结果路径，`--check` 只作预检、不装卸或停服。
+原来运行则按原管理方式恢复；原来停止则保持停止。停前重核 PID / 代次 / cwd / home / argv。维护不经迁移 launcher，不读取、复制、转换、删除存档或数据库，不代建新 ID 分叉。原档只读、用户手动新 ID 分叉原则不变。
 
-包准备后共享 60 秒成功预算；超时走失败恢复，恢复可能超过预算，不能冒报成功。无需用户名、密码或 Cookie；只证明源码、装配、准确进程与 HTTP 基础可达。401/403/跳转不代表认证插件库存或页面正常，用户须登录刷新验收。跨平台真实停启、现场性能和玩法仍须实测，本地断言不代证。
+包准备后共享 60 秒成功预算；超时保留失败原因并恢复原状态，不冒报成功。默认终端显示独立作业进度，终端断开后恢复继续；`--background` 返回证据目录。无需用户名、密码或 Cookie。
 
-## 独立仓库构建
+源码、装配、准确进程及 HTTP 基础健康不代表页面/玩法验收；用户须登录刷新确认。401/403/跳转只说明基础可达，性能和跨平台真实停启须另行实测。
 
-在包根运行：
+## 独立发行构建
 
 ```sh
 node scripts/build-release.mjs --out ./dist --repository huajiao1998/dsh-tavern-sqlite-v2
 ```
 
-输出目录必须不存在；生成固定版本 tgz、Release 用 install.sh、SHA256SUMS 和 release.json。不上传、不覆盖旧产物，内部测试、旧维护夹具及运维 README 不入 tgz。正常发布递增 package.version；必要时 `--tag` 指定新 tag，不能覆盖已发布附件。公开前仍须完成对应源码整理、许可证和敏感扫描；不要直接上传包含运维历史的整个工作区。
+输出目录须不存在，生成 tgz、固定版本 install.sh、SHA256SUMS、release.json。不上传、不覆盖旧附件，不包含内部测试或运维资料。只有正式发布新 Release 后，公网 latest 才会取得新代。

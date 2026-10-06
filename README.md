@@ -44,6 +44,8 @@ curl -fsSL https://raw.githubusercontent.com/huajiao1998/dsh-tavern-sqlite-v2/ma
 
 详细参数、本地离线安装、预检与失败恢复见[安装说明](<deploy/INSTALL.md>)。
 
+**0.2.1 装卸修复**：不再从当前缝合态重建作者前像。旧记录损坏时，一键维护器自动验证自身留下的洁净安装证据，副本重放必须与全部当前活动源码逐字节一致，才允许恢复；不修改 after 哈希放过真实漂移。同版 install 可只修复元数据，uninstall 可直接完成恢复后卸载。`uninstall --check` 仅诊断、不改目标。没有可靠材料则保留现场并明确拒绝，存档与数据库不动。
+
 ## 原档怎么继续使用？
 
 1. 安装后打开旧存档，以只读方式查看。

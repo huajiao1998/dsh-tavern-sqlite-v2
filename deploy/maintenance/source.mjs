@@ -5,6 +5,7 @@ import {createHash} from 'node:crypto'
 import {spawnSync} from 'node:child_process'
 import {protectAuthorStartup} from './author-safety.mjs'
 import {AUTHOR_VERSION} from '../../lib/standard-host.js'
+import {recoverSourcePreimage} from './preimage-recovery.mjs'
 export const STANDARD_RECORD='.tavern-standard-seams.json'
 const records=['.tavern-seams.json','.tavern-legacy-view-seams.json','.tavern-save-ui-seam.json']
 const directories=['.','tavern-plugin/lib','tavern-plugin/lib/domain','tavern-plugin/lib/hooks','tavern-plugin/src/client','tavern-plugin/src/client/features','tavern-plugin/src/client/ui','tavern-plugin/src/client/runtime','tavern-plugin/src/client/modules']
@@ -86,12 +87,42 @@ export function assertSourceUninstalled(access){
   const code=Buffer.from(body,'base64').toString('utf8');if(/dsh-tavern-(?:storage-)?sqlite(?:-v[12])?/.test(code)||code.includes('[dsh-tavern-standard-owned:v1]'))throw new Error('活动源码仍接管：'+rel)
  }
 }
-export function rehearseSource(action,access,adapter,evidenceDir){
+// 修复只写已重放验证过的before；after及活动源码一字不改。
+export function commitRecoveredPreimage(access,rehearsal){
+ access.assertImage(rehearsal.before)
+ const file=access.file(STANDARD_RECORD),old=readFileSync(file),record=rehearsal.recovery.record
+ const previous=JSON.parse(old.toString('utf8'))
+ if(JSON.stringify(record.after)!==JSON.stringify(previous.after))throw new Error('前像恢复不得修改after校验')
+ writeFileSync(file,JSON.stringify(record,null,2)+'\n','utf8')
+ return ()=>writeFileSync(file,old)
+}
+export function finishRecoveredSourceUninstall(access,adapter,stopRecord,rehearsal,archiveDir){
+ if(existsSync(access.file(STANDARD_RECORD))){
+  commitRecoveredPreimage(access,rehearsal)
+  return {...finishSourceUninstall(access,adapter,stopRecord,archiveDir),preimageRecovery:rehearsal.recovery.provenance}
+ }
+ // 原宿主disposer已撤标准代时，只允许停前记录描述的确切恢复状态，拒绝其他漂移。
+ access.assertImage(stopRecord.before)
+ access.restore(rehearsal.expected);access.protect();access.syntax();assertSourceUninstalled(access)
+ return {preimageRecovery:rehearsal.recovery.provenance,data:'用户数据未访问、未删除、未转换',protection:'独立原件保护保留'}
+}
+export function rehearseSource(action,access,adapter,evidenceDir,checkBudget=()=>{}){
+ if(action==='uninstall')assertPackageSource(access,adapter)
  const before=access.capture(),app=path.join(evidenceDir,'rehearsal'),test=sourceAccess(app,adapter.targets);test.restore(before)
  if(action==='install'&&records.some(name=>before[name]!==null))throw new Error('首装前历史记录仍在，先用所属包完整卸载；不复用危险历史前像')
  // 历史主manifest里app只是展示字段，卸载实际路径由调用的appDir限定。
  let result
  if(action==='install'){test.protect();test.syntax();result=adapter.applyStandardSeams({appDir:app});if(!adapter.checkStandardSeams({appDir:app}).ready)throw new Error('安装副本预检未ready')}
- else{const raw=before[STANDARD_RECORD];if(raw==null)throw new Error('卸载缺标准记录，先诊断不猜');result=finishSourceUninstall(test,adapter,JSON.parse(Buffer.from(raw,'base64')),path.join(evidenceDir,'rehearsal-archives'))}
+ else{
+  const raw=before[STANDARD_RECORD];if(raw==null)throw new Error('卸载缺标准记录，先诊断不猜')
+  try{result=finishSourceUninstall(test,adapter,JSON.parse(Buffer.from(raw,'base64')),path.join(evidenceDir,'rehearsal-archives'))}
+  catch(error){
+   let recovery
+   try{recovery=recoverSourcePreimage({access,adapter,evidenceDir,before,checkBudget})}
+   catch(recoveryError){throw new Error('卸载前像不可恢复；原错误：'+error.message+'；'+recoveryError.message,{cause:error})}
+   writeFileSync(path.join(evidenceDir,'preimage-recovery.json'),JSON.stringify(recovery.provenance,null,2)+'\n','utf8')
+   return {before,expected:recovery.expected,recovery,result:{preimageRecovery:recovery.provenance,repairAvailable:true,data:'用户数据未访问、未删除、未转换',protection:'独立原件保护保留'}}
+  }
+ }
  return {before,expected:test.capture(),result}
 }

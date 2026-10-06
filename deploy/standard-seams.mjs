@@ -198,6 +198,8 @@ export function applyStandardSeams({ appDir, authorVersion } = {}) {
   const core = buildCore(appDir)
   const before = snapshot(appDir), recordPath = inside(appDir, RECORD)
   const previousRecord = existsSync(recordPath) ? readFileSync(recordPath) : null
+  // 标准记录缺失时，不能把完整核心接管态捕获成“首装前像”。历史S1/S2升级仍由其manifest恢复链管理。
+  if (!previousRecord && text(appDir, 'tavern-plugin/lib/index.js').includes('[dsh-tavern-core-host:v1]')) throw new Error('前像污染：核心接缝仍在但标准记录缺失，拒绝从当前缝合态重建记录')
   try {
     applyAllSeams({ appDir })
     // 原S1/S2/legacy/UI会修改相同入口和客户端；核心转换必须用刚施缝的当前源码。
@@ -238,6 +240,10 @@ export function uninstallStandardSeams({ appDir } = {}) {
   checkStandardSeams({ appDir }) // 有漂移则不写：不能把旧作者源码覆盖到新版本。
   const current = snapshot(appDir), recordBytes = readFileSync(file)
   const record = JSON.parse(recordBytes.toString('utf8'))
+  const indexImage = record.before['tavern-plugin/lib/index.js']
+  if (typeof indexImage !== 'string' || !indexImage || Buffer.from(indexImage, 'base64').toString('base64') !== indexImage) throw new Error('标准前像缺合法作者入口，拒绝写入恢复')
+  const originalIndex = Buffer.from(indexImage, 'base64').toString('utf8')
+  if (originalIndex.includes('[dsh-tavern-core-host:v1]')) throw new Error('前像污染：标准代前像含完整核心接缝；拒绝落盘恢复，请由一键维护入口验证历史安装材料')
   try {
     restore(appDir, record.before)
     // 只恢复本标准代拥有的升级前像；预先存在的历史接缝不冒认、不猜测撤除。

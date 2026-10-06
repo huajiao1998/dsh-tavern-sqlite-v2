@@ -328,21 +328,25 @@ function applyHostWrites({ indexText, nextIndex, changes, shimNeedsWrite, previo
     if (!existsSync(target)) return undefined
     const dir = path.dirname(target)
     const prefix = path.basename(rel) + '.pre-seams-'
-    const existing = readdirSafe(dir).filter(n => n.startsWith(prefix) && n.endsWith('.bak')).sort()[0]
-    if (existing) {
-      // 2026-10-06 修复：已有备份可能被污染（内容为缝合后版本，188 实测）。
-      // 校验备份不含本包接缝标记——含则删除重建，防卸载恢复出脏前像。
-      const existingPath = path.join(dir, existing)
-      try {
-        const backupText = readFileSync(existingPath, 'utf8')
-        if (/dsh-tavern-(?:storage-)?sqlite(?:-v[12])?|\[dsh-tavern-/.test(backupText)) {
-          unlinkSync(existingPath)
-        } else {
-          return path.posix.join(path.dirname(rel), existing)
-        }
-      } catch { /* 读不了就重建 */ }
+    // 已有manifest的精确引用是恢复链，不能另选孤儿、更不能删旧备份后复制当前缝合态。
+    const owner = entries.find(entry => entry.rel === rel)
+    if (owner?.created) return undefined
+    const candidates = readdirSafe(dir).filter(n => n.startsWith(prefix) && n.endsWith('.bak')).sort()
+    if (owner && !owner.backup) fail('主接缝缺前像恢复材料：' + rel)
+    const existingRel = owner?.backup || (candidates.length === 1 ? path.posix.join(path.dirname(rel), candidates[0]) : undefined)
+    if (!owner && candidates.length > 1) fail('前像备份存在歧义，拒绝按文件名猜测：' + rel)
+    const isSeamed = code => /\[dsh-tavern-|from ['"]\.\/domain\/(?:chat-sqlite-store|legacy-view-seams|storage-[\w-]+)\.js['"]/.test(code)
+    if (existingRel) {
+      const existingPath = assertInside(APP, path.join(APP, existingRel))
+      if (!existsSync(existingPath)) fail('前像备份缺失：' + existingRel)
+      const backupBytes = readFileSync(existingPath)
+      if (rel === INDEX_REL && isSeamed(backupBytes.toString('utf8'))) fail('前像污染：' + existingRel + ' 含接缝内容；保留备份，交由一键维护入口验证历史安装前像')
+      if (!owner && !backupBytes.equals(readFileSync(target))) fail('孤儿前像与当前作者源码不一致，拒绝复用：' + existingRel)
+      return existingRel
     }
+    if (rel === INDEX_REL && isSeamed(readFileSync(target, 'utf8'))) fail('前像污染：当前入口已施缝且无可信备份，拒绝用它新建前像')
     const backupRel = path.posix.join(path.dirname(rel), `${path.basename(rel)}.pre-seams-${ts}.bak`)
+    if (existsSync(assertInside(APP, path.join(APP, backupRel)))) fail('前像备份目的已存在，拒绝覆盖：' + backupRel)
     copyFileSync(target, assertInside(APP, path.join(APP, backupRel)))
     backups.push(backupRel)
     return backupRel

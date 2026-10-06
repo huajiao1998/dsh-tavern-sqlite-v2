@@ -15,6 +15,7 @@ export function assertProtectedAuthor(source){
 }
 export function protectAuthorStartup(source){
  if(source.includes(AUTHOR_SAFETY_MARKER)){assertProtectedAuthor(source);return source}
+ if(!source.includes(STARTUP_MIGRATION)&&/\[dsh-tavern-|from ['"]\.\/domain\/(?:storage-[\w-]+|legacy-view-seams)\.js['"]/.test(source))throw new Error('前像污染：作者入口仍含插件接缝但缺原件保护原文；拒绝从缝合态猜恢复')
  let next=source;for(const [raw,safe]of pairs)next=replaceOnce(next,raw,safe)
  assertProtectedAuthor(next);return next
 }

@@ -3,7 +3,7 @@
 set -eu
 RELEASE_URL='__DSH_RELEASE_URL__'
 RELEASE_SHA256='__DSH_RELEASE_SHA256__'
-VERSION='0.1.8'
+VERSION='0.2.1'
 SCRIPT_DIR=''
 case "$0" in
   *install.sh) SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) ;;

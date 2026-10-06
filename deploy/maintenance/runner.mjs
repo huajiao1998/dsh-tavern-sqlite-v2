@@ -8,7 +8,7 @@ import { redactStartupLine } from './startup-log.mjs'
 import { maintenanceBudget } from './budget.mjs'
 import { options, runtimeFor, assertTargetAllowed, packagePolicyArgs } from './target.mjs'
 import { createDriver } from './driver.mjs'
-import { sourceAccess, assertPackageSource, assertSourceUninstalled, rehearseSource, finishSourceUninstall, STANDARD_RECORD } from './source.mjs'
+import { sourceAccess, assertPackageSource, assertSourceUninstalled, rehearseSource, finishSourceUninstall, finishRecoveredSourceUninstall, commitRecoveredPreimage, STANDARD_RECORD } from './source.mjs'
 import { findLegacyLeftovers, quarantineLeftovers, leftoverDecision, describeError } from './environment.mjs'
 export { options, packagePolicyArgs }
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -63,11 +63,17 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
     if (state.noop) {
       if (action === 'install' && !adapter.checkStandardSeams({ appDir: source.root }).ready) throw Error('现装接缝未ready')
       if (action === 'uninstall') assertSourceUninstalled(source)
-      validation = await step('幂等检查；保留原运行状态', () => driver.verify(action, adapter, { existing: true }))
-      return { changed: false, action, line: adapter.line, initialState: wasRunning ? 'running' : 'stopped', finalState: wasRunning ? 'running' : 'stopped', elapsedMs: Math.round(budget.elapsed()), verified: true, verificationScope: wasRunning ? 'source-assembly-basic-health' : 'source-assembly-stopped', originalPlayabilityVerified: false, ...validation, data: '保留，未访问/转换/删除' }
+      // 同版安装也必须证明可卸载，不能用ready把污染前像静默留给下一次卸载。
+      const removable = action === 'install' ? await step('幂等安装：验证卸载前像恢复链', () => rehearseSource('uninstall', source, adapter, evidenceDir, () => budget.remaining())) : null
+      let undo
+      try {
+        if (removable?.recovery) undo = commitRecoveredPreimage(source, removable)
+        validation = await step('幂等检查；保留原运行状态', () => driver.verify(action, adapter, { existing: true }))
+      } catch (error) { undo?.(); throw error }
+      return { changed: !!removable?.recovery, action, line: adapter.line, initialState: wasRunning ? 'running' : 'stopped', finalState: wasRunning ? 'running' : 'stopped', elapsedMs: Math.round(budget.elapsed()), verified: true, verificationScope: wasRunning ? 'source-assembly-basic-health' : 'source-assembly-stopped', originalPlayabilityVerified: false, ...validation, ...(removable?.recovery ? { preimageRecovery: removable.recovery.provenance, sourceMetadataRepaired: true } : {}), data: '保留，未访问/转换/删除' }
     }
     // 只预演有限程序源码接缝，不创建第二套profile/node_modules或业务树。
-    rehearsal = await step('有限源码接缝预检及恢复材料', () => rehearseSource(action, source, adapter, evidenceDir))
+    rehearsal = await step('有限源码接缝预检及恢复材料', () => rehearseSource(action, source, adapter, evidenceDir, () => budget.remaining()))
     baseline = rehearsal.before
     writeFileSync(path.join(evidenceDir, 'source-before.json'), JSON.stringify(baseline) + '\n', 'utf8')
     await step(wasRunning ? '重核目标并精确停止原实例' : '重核目标仍停止；不拉起', async () => {
@@ -81,7 +87,7 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
       await step('作者未加载时接入插件接缝', () => { source.protect(); adapter.applyStandardSeams({ appDir: source.root }); if (!adapter.checkStandardSeams({ appDir: source.root }).ready) throw Error('接缝未ready') })
     } else {
       const raw = baseline[STANDARD_RECORD], record = raw ? JSON.parse(Buffer.from(raw, 'base64').toString('utf8')) : null
-      await step('卸载自有接缝；保留原档和数据库', () => { result = finishSourceUninstall(source, adapter, record, path.join(evidenceDir, 'source-archives')) })
+      await step('卸载自有接缝；保留原档和数据库', () => { result = rehearsal.recovery ? finishRecoveredSourceUninstall(source, adapter, record, rehearsal, path.join(evidenceDir, 'source-archives')) : finishSourceUninstall(source, adapter, record, path.join(evidenceDir, 'source-archives')) })
       source.assertImage(rehearsal.expected)
       await step('目标profile官方离线卸包/回读', () => driver.manage('uninstall'))
     }
@@ -160,7 +166,8 @@ export function runCli(url, adapter) {
         if (op.check) {
           const state = await driver.preflight(op.action); assertPackageSource(source, adapter)
           if (state.noop && op.action === 'uninstall') assertSourceUninstalled(source)
-          result = { check: true, initialState: state.wasRunning ? 'running' : 'stopped', ...(state.noop ? { changed: false } : rehearseSource(op.action, source, adapter, evidence).result), leftovers: findLegacyLeftovers(source.root), elapsedMs: Math.round(budget.elapsed()) }
+          const inspection = state.noop && op.action === 'uninstall' ? null : rehearseSource(state.noop ? 'uninstall' : op.action, source, adapter, evidence, () => budget.remaining())
+          result = { check: true, changed: false, initialState: state.wasRunning ? 'running' : 'stopped', ...(inspection?.result || {}), ...(inspection?.recovery ? { repairAvailable: true, targetModified: false } : {}), leftovers: findLegacyLeftovers(source.root), elapsedMs: Math.round(budget.elapsed()) }
           budget.remaining()
         } else result = await executeMaintenance({ action: op.action, adapter, driver, source, evidenceDir: evidence, progress, budget, prepareEnv: !!op['prepare-env'] })
         writeFileSync(path.join(evidence, 'result.json'), JSON.stringify({ ok: true, network: 'offline', ...result }, null, 2) + '\n', 'utf8')
