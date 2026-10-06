@@ -4,7 +4,7 @@
 #   1) 安装插件        用本包（离线）
 #   2) 更新插件        先联网查官方最新版本：有新版就下载官方包安装；已是最新就用本包覆盖安装
 #   3) 卸载插件
-#   4) 只读预检        不改任何文件，可以开着酒馆跑
+#   4) 只读预检        不改酒馆源码/装配，仅写维护证据，可以开着酒馆跑
 #   0) 退出
 #
 # 也支持命令行直用（自动化/排错）：
@@ -126,13 +126,35 @@ function Find-NodeRuntime([hashtable]$tavern) {
 function Invoke-Maintenance([hashtable]$tavern, [hashtable]$node, [string]$entry, [string]$verb, [switch]$Check) {
   $argv = @($entry, $verb, '--home', $tavern.home)
   if ($Check) { $argv += '--check' }
+  # 仅在维护目录留本次输出，不扫描旧日志/存档；控制台明确给出位置。
+  $logDir = Join-Path $tavern.home 'maintenance\dsh-tavern-sqlite-v2'
+  New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+  $logFile = Join-Path $logDir ('installer-' + [guid]::NewGuid().ToString('N') + '.log')
+  $writer = [System.IO.StreamWriter]::new($logFile, $false, [System.Text.UTF8Encoding]::new($false))
+  $writer.NewLine = "`n"
+  $writer.AutoFlush = $true
+  Say ('维护日志：' + $logFile)
   $saved = $env:ELECTRON_RUN_AS_NODE
+  $savedErrorAction = $ErrorActionPreference
   if ($node.runAsNode) { $env:ELECTRON_RUN_AS_NODE = '1' }
   try {
-    # 子进程继承本窗口的控制台（维护入口在 Windows 前台不 detached），进度不会另开窗口。
-    & $node.exe @argv | Out-Host
-    return $LASTEXITCODE
+    # Windows PowerShell 5 把原生 stderr 转成 ErrorRecord；这里合流而非因 Stop 提前中断。
+    # 不代启酒馆、不另开窗口；仅维护子进程的输出同时显示并落盘。
+    $ErrorActionPreference = 'Continue'
+    & $node.exe @argv 2>&1 | ForEach-Object {
+      $line = [string]$_
+      # 与维护侧同款脱敏：登录链接/授权头不进安装日志，也不回显给排错分享。
+      $line = $line -replace '(?i)([?&#](?:token|password|secret|access_token)=)[^\s&)]+', '$1<redacted>'
+      $line = $line -replace '(?i)(Bearer\s+)[\w.\-]+', '$1<redacted>'
+      $writer.WriteLine($line)
+      Say $line
+    }
+    $code = $LASTEXITCODE
+    if ($code -ne 0) { Warn ('维护失败（exit ' + $code + '）；完整日志：' + $logFile) }
+    return $code
   } finally {
+    $writer.Dispose()
+    $ErrorActionPreference = $savedErrorAction
     if ($node.runAsNode) { if ($null -eq $saved) { Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue } else { $env:ELECTRON_RUN_AS_NODE = $saved } }
   }
 }
@@ -199,7 +221,7 @@ function Do-Uninstall([hashtable]$tavern, [hashtable]$node, [string]$entry) {
 }
 
 function Do-Check([hashtable]$tavern, [hashtable]$node, [string]$entry) {
-  Say '只读预检（不改任何文件，可开着酒馆）…'
+  Say '只读预检（不改酒馆源码/装配，仅写维护日志与证据，可开着酒馆）…'
   $code = Invoke-Maintenance $tavern $node $entry 'install' -Check
   if ($code -ne 0) { Fail ('预检未通过（exit ' + $code + '）') }
   Ok '预检通过。'

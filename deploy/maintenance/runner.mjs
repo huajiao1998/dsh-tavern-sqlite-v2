@@ -43,7 +43,7 @@ export function copyPackage(from, to) {
 }
 export async function executeMaintenance({ action, adapter, driver, source, evidenceDir, progress = () => {}, budget = maintenanceBudget(), prepareEnv = false }) {
   const step = async (name, fn) => { budget.remaining(); progress(name); const value = await fn(); budget.remaining(); return value }
-  let safeToRestore = false, baseline, rehearsal, newProcess, result, state, validation
+  let safeToRestore = false, stopAttempted = false, baseline, rehearsal, newProcess, result, state, validation
   try {
     // 显式--prepare-env：预检前补环境（systemd单元VM旗标），失败自动回滚并中止。
     if (prepareEnv) await step('环境预修：systemd单元VM旗标（显式--prepare-env，备份可回滚）', () => driver.prepareEnvironment(action))
@@ -87,7 +87,7 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
     writeFileSync(path.join(evidenceDir, 'source-before.json'), JSON.stringify(baseline) + '\n', 'utf8')
     await step(wasRunning ? '重核目标并精确停止原实例' : '重核目标仍停止；不拉起', async () => {
       source.assertImage(baseline); await driver.assertIdentity()
-      if (wasRunning) await driver.stop()
+      if (wasRunning) { stopAttempted = true; await driver.stop() }
       else await driver.assertStopped()
       safeToRestore = true
     })
@@ -112,8 +112,9 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
   } catch (error) {
     error.message = redactStartupLine(error.message)
     // 预算超时不放弃恢复；恢复不计入成功时间，也不作为成功返回。
-    driver.beginRecovery?.()
-    if (!safeToRestore) {
+    // 只有本次已走到停服/写入阶段才允许恢复；原本停止不等于被本次停掉。
+    if (safeToRestore || stopAttempted) driver.beginRecovery?.()
+    if (!safeToRestore && stopAttempted) {
       // 停止核验自身的失败不得顶掉初因（188实测：恢复路径秒抛把真正的stop超时完全藏掉）。
       try { if (await driver.stoppedAfterError?.()) safeToRestore = true }
       catch (verify) { throw new AggregateError([error, verify], '维护失败且停止核验未完成；初因：' + describeError(error) + '；核验原因：' + redactStartupLine(verify.message) + '；不盲目重试') }
@@ -143,6 +144,25 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
     }
     throw error
   }
+}
+// CLI 与回归共用同一只读检查分支：证据副本可写，目标源码/profile不写。
+export async function checkMaintenance({ action, adapter, driver, source, evidenceDir, budget = maintenanceBudget() }) {
+  const state = await driver.preflight(action); assertPackageSource(source, adapter)
+  if (state.noop && action === 'uninstall') assertSourceUninstalled(source)
+  const inspection = state.noop && action === 'uninstall' ? null
+    : state.withdrawnClean && action === 'uninstall' ? { result: { withdrawnClean: true, note: '宿主退出已撤缝：源码即作者原像，卸载仅移除装配' } }
+    : rehearseSource(state.noop ? 'uninstall' : action, source, adapter, evidenceDir, () => budget.remaining())
+  const result = { initialState: state.wasRunning ? 'running' : 'stopped', ...(inspection?.result || {}), ...(inspection?.recovery ? { repairAvailable: true, targetModified: false } : {}), leftovers: findLegacyLeftovers(source.root), elapsedMs: Math.round(budget.elapsed()), check: true, changed: false }
+  budget.remaining()
+  return result
+}
+// 失败也必须在前台 stdout 明确给出脱敏初因及结果路径，不能只留 stderr/恢复进度。
+export function reportMaintenanceFailure(error, evidence, elapsedMs, output = console.log) {
+  const message = redactStartupLine(describeError(error)), resultFile = path.join(evidence, 'result.json')
+  writeFileSync(resultFile, JSON.stringify({ ok: false, elapsedMs, message }, null, 2) + '\n', 'utf8')
+  output('维护失败：' + message)
+  output('失败结果：' + resultFile)
+  error.maintenanceReported = true
 }
 export function runCli(url, adapter) {
   if (!process.argv[1] || path.resolve(process.argv[1]) !== fileURLToPath(url)) return
@@ -195,23 +215,16 @@ export function runCli(url, adapter) {
       const progress = text => console.log(Math.round(budget.elapsed()) + 'ms ' + text)
       try {
         let result
-        if (op.check) {
-          const state = await driver.preflight(op.action); assertPackageSource(source, adapter)
-          if (state.noop && op.action === 'uninstall') assertSourceUninstalled(source)
-          const inspection = state.noop && op.action === 'uninstall' ? null
-            : state.withdrawnClean && op.action === 'uninstall' ? { result: { withdrawnClean: true, note: '宿主退出已撤缝：源码即作者原像，卸载仅移除装配' } }
-            : rehearseSource(state.noop ? 'uninstall' : op.action, source, adapter, evidence, () => budget.remaining())
-          result = { check: true, changed: false, initialState: state.wasRunning ? 'running' : 'stopped', ...(inspection?.result || {}), ...(inspection?.recovery ? { repairAvailable: true, targetModified: false } : {}), leftovers: findLegacyLeftovers(source.root), elapsedMs: Math.round(budget.elapsed()) }
-          budget.remaining()
-        } else result = await executeMaintenance({ action: op.action, adapter, driver, source, evidenceDir: evidence, progress, budget, prepareEnv: !!op['prepare-env'] })
+        if (op.check) result = await checkMaintenance({ action: op.action, adapter, driver, source, evidenceDir: evidence, budget })
+        else result = await executeMaintenance({ action: op.action, adapter, driver, source, evidenceDir: evidence, progress, budget, prepareEnv: !!op['prepare-env'] })
         writeFileSync(path.join(evidence, 'result.json'), JSON.stringify({ ok: true, network: 'offline', ...result }, null, 2) + '\n', 'utf8')
         console.log(JSON.stringify({ ok: true, network: 'offline', ...result }))
         console.log('结果：' + path.join(evidence, 'result.json'))
       } catch (error) {
-        writeFileSync(path.join(evidence, 'result.json'), JSON.stringify({ ok: false, elapsedMs: Math.round(budget.elapsed()), message: redactStartupLine(describeError(error)) }, null, 2) + '\n', 'utf8')
+        reportMaintenanceFailure(error, evidence, Math.round(budget.elapsed()))
         throw error
       }
     }, { waitMs: 0 })
   }
-  main().catch(error => { console.error('维护失败：' + redactStartupLine(error.message)); process.exitCode = 1 })
+  main().catch(error => { if (!error.maintenanceReported) console.log('维护失败：' + redactStartupLine(describeError(error))); process.exitCode = 1 })
 }

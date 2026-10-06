@@ -299,7 +299,7 @@ export function createDesktopDriver(op, adapter, packageRoot, evidence, budget, 
         const { copyPackage, samePackage } = await import('./runner.mjs')
         driver.recoveryPackage = samePackage(packageRoot, realpathSync(installed)) ? packageRoot : path.join(evidence, 'original-package')
         if (driver.recoveryPackage !== packageRoot) copyPackage(realpathSync(installed), driver.recoveryPackage)
-        if (action === 'install' && driver.recoveryPackage !== packageRoot) throw Error('现装不同代；先用本地所属代卸载，不自动升级')
+        if (action === 'install' && driver.recoveryPackage !== packageRoot) throw Error('现装不同代：现装插件 ' + json(path.join(installed, 'package.json')).version + '，待装插件 ' + pkg.version + '（包字节不一致，非酒馆版本不匹配）；先用本地所属代卸载，不自动升级；现装插件目录：' + realpathSync(installed))
         // 宿主正常退出由标准host disposer撤缝并删记录（装配保留）：该态install按首装重建，
         // uninstall仅卸装配；非该态仍要求记录在场，缺记录即拒绝（不猜）。
         if (!existsSync(path.join(op.app, STANDARD_RECORD))) {
@@ -536,7 +536,7 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { proce
         const { copyPackage, samePackage } = await import('./runner.mjs')
         driver.recoveryPackage = samePackage(packageRoot, realpathSync(installed)) ? packageRoot : path.join(evidence, 'original-package')
         if (driver.recoveryPackage !== packageRoot) copyPackage(realpathSync(installed), driver.recoveryPackage)
-        if (action === 'install' && driver.recoveryPackage !== packageRoot) throw Error('现装不同代；先用本地所属代卸载，不自动升级')
+        if (action === 'install' && driver.recoveryPackage !== packageRoot) throw Error('现装不同代：现装插件 ' + json(path.join(installed, 'package.json')).version + '，待装插件 ' + pkg.version + '（包字节不一致，非酒馆版本不匹配）；先用本地所属代卸载，不自动升级；现装插件目录：' + realpathSync(installed))
         // 与桌面版同款"退出撤缝态"：宿主正常退出后disposer已撤缝删记录，源码即作者原像。
         if (!existsSync(path.join(op.app, STANDARD_RECORD))) {
           const { sourceAccess, withdrawnCleanState } = await import('./source.mjs')

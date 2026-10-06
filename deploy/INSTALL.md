@@ -4,7 +4,7 @@
 
 ## 支持范围
 
-- macOS、Linux、WSL2 CLI；已有作者 2.5.0（含 v2.5 重发布后的最新提交，实测至 `9e9b26d`）、DSH / boot 0.1.5-rc.2、Node.js 22.19+、pnpm。未知作者源码布局、Desktop 或未知管理器明确拒绝，不猜测覆盖。
+- macOS、Linux、WSL2 CLI；已有作者 2.5.0（接缝与维护检查复核至 `8480f7de`）、DSH / boot 0.1.5-rc.2、Node.js 22.19+、pnpm。未知作者源码布局或未知管理器明确拒绝，不猜测覆盖。
 - Windows 10 1803+：桌面版（Electron）与 Windows CLI 均用 `install.ps1`（见下节）；桌面版卡脚本 VM 在 Worker 线程执行，Linux/CLI 走原进程内路径，能力驱动自动分叉。
 - 四个解析依赖 json5、jsonrepair、lodash、yaml 必须在已有离线材料中可用。下载本插件包不等于联网安装第三方依赖；官方包管理固定 `--offline --ignore-scripts --config.auto-install-peers=false`。
 - V2 启动需要 `--experimental-vm-modules`。已有 systemd 单元可在 install 后加 `--prepare-env`，授权安装器备份并补上旗标、隔离旧维护备份，失败恢复；不加该选项时不改启动配置，缺旗标会在停服前拒绝。
@@ -46,6 +46,8 @@ curl -fsSL https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest/d
 - `update` 仅下载官方 GitHub Release 资产并用 SHA256SUMS 核对，不索取任何凭据。
 - Windows CLI 版需自行安装 Node.js 22+，并保证酒馆启动带 `--experimental-vm-modules`。
 - 找不到酒馆时可用 `-TavernHome <目录>` 显式指定。
+- 0.2.5起，同窗口显示全部维护输出，开始时明确打印UTF-8日志位置；失败显示原始原因和本次结果文件路径。日志在该酒馆的 `maintenance/dsh-tavern-sqlite-v2/installer-<唯一编号>.log`，不读取存档。
+- “现装不同代”指插件包差异，不是酒馆版本不匹配；错误会显示现装/待装插件版本。仍按先卸旧、再装新处理，不强行覆盖源码漂移。
 
 升级已有旧版：先执行上述 uninstall，再执行 install。获取器仅在本地包版本与发行版一致时复用本地包，否则下载固定发行附件作为执行器；可用新执行器卸载同一版本线的旧版。坏包拒绝，不猜测跨 V1/V2 迁移。未安装时 uninstall 幂等返回。
 
