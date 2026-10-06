@@ -25,13 +25,39 @@ $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding } catch {}
 $root = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 $repo = 'huajiao1998/dsh-tavern-sqlite-v2'
+# 安装器自己的日志（不是酒馆维护证据）：脚本同目录固定 install.log，每次覆盖；
+# 用户报错只找手边这一个文件。$script:installLogWriter 供 Say/Ok/Warn 同步落盘。
+$script:installLogPath = Join-Path $root 'install.log'
+$script:installLogWriter = $null
 
-function Say([string]$text) { Write-Host $text }
-function Ok([string]$text) { Write-Host ('√ ' + $text) -ForegroundColor Green }
-function Warn([string]$text) { Write-Host ('! ' + $text) -ForegroundColor Yellow }
+function Say([string]$text) { Write-Host $text; try { if ($script:installLogWriter) { $script:installLogWriter.WriteLine($text) } } catch {} }
+function Ok([string]$text) { $line = '√ ' + $text; Write-Host $line -ForegroundColor Green; try { if ($script:installLogWriter) { $script:installLogWriter.WriteLine($line) } } catch {} }
+function Warn([string]$text) { $line = '! ' + $text; Write-Host $line -ForegroundColor Yellow; try { if ($script:installLogWriter) { $script:installLogWriter.WriteLine($line) } } catch {} }
 # 双击运行时保留窗口等用户看一眼；输入被重定向（自动化/管道）或显式 -Yes 时不等待，避免挂住。
+# 只有用户主动点窗口叉关闭或输入 0 退出才是正常结束；其他任何异常退出前都必须停住等用户看。
 function Wait-Exit { if ($Yes) { return }; if ($Host.Name -eq 'ConsoleHost' -and -not [Console]::IsInputRedirected) { Read-Host '按回车退出' | Out-Null } }
-function Fail([string]$text) { Write-Host ''; Write-Host ('× ' + $text) -ForegroundColor Red; Wait-Exit; exit 1 }
+function Fail([string]$text) { Write-Host ''; $line = '× ' + $text; Write-Host $line -ForegroundColor Red; try { if ($script:installLogWriter) { $script:installLogWriter.WriteLine(''); $script:installLogWriter.WriteLine($line) } } catch {}; Wait-Exit; exit 1 }
+
+# 全脚本异常兜底：任何未捕获异常（联网失败/解压失败/维护崩溃…）都先写日志再停住等用户，
+# 不允许闪退。只有点叉或输入 0 退出才不经过这里。
+trap {
+  $msg = '× 安装器异常退出：' + $_.Exception.Message
+  try {
+    if (-not $script:installLogWriter) {
+      $script:installLogWriter = [System.IO.StreamWriter]::new($script:installLogPath, $false, [System.Text.UTF8Encoding]::new($false))
+      $script:installLogWriter.NewLine = "`n"
+      $script:installLogWriter.AutoFlush = $true
+    }
+    $script:installLogWriter.WriteLine($msg)
+    $script:installLogWriter.WriteLine('  完整日志：' + $script:installLogPath)
+  } catch {}
+  Write-Host ''; Write-Host $msg -ForegroundColor Red
+  Write-Host ('  完整日志：' + $script:installLogPath) -ForegroundColor Yellow
+  try { $script:installLogWriter.Dispose() } catch {}
+  $script:installLogWriter = $null
+  Wait-Exit
+  exit 1
+}
 
 if ($Help) {
   Say '用法：.\install.ps1 [install|update|uninstall|check] [-TavernHome <酒馆目录>] [-Yes]'
@@ -123,17 +149,19 @@ function Find-NodeRuntime([hashtable]$tavern) {
 }
 
 # ——— 3. 跑维护（同一窗口内显示全部进度）———
-function Invoke-Maintenance([hashtable]$tavern, [hashtable]$node, [string]$entry, [string]$verb, [switch]$Check) {
+function Invoke-Maintenance([hashtable]$tavern, [hashtable]$node, [string]$entry, [string]$verb, [switch]$Check, [string]$LogFile = '') {
   $argv = @($entry, $verb, '--home', $tavern.home)
   if ($Check) { $argv += '--check' }
-  # 仅在维护目录留本次输出，不扫描旧日志/存档；控制台明确给出位置。
-  $logDir = Join-Path $tavern.home 'maintenance\dsh-tavern-sqlite-v2'
-  New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-  $logFile = Join-Path $logDir ('installer-' + [guid]::NewGuid().ToString('N') + '.log')
-  $writer = [System.IO.StreamWriter]::new($logFile, $false, [System.Text.UTF8Encoding]::new($false))
-  $writer.NewLine = "`n"
-  $writer.AutoFlush = $true
-  Say ('维护日志：' + $logFile)
+  # 安装器自己的日志（不是酒馆维护证据）：正式运行永远是脚本同目录固定 install.log，
+  # $LogFile 仅供自动化测试指定隔离位置。
+  if (-not $LogFile) { $LogFile = $script:installLogPath }
+  $logFile = $LogFile
+  if ($script:installLogWriter) { try { $script:installLogWriter.Dispose() } catch {} }
+  $script:installLogWriter = [System.IO.StreamWriter]::new($logFile, $false, [System.Text.UTF8Encoding]::new($false))
+  $script:installLogWriter.NewLine = "`n"
+  $script:installLogWriter.AutoFlush = $true
+  $writer = $script:installLogWriter
+  Say ('安装日志：' + $logFile)
   $saved = $env:ELECTRON_RUN_AS_NODE
   $savedErrorAction = $ErrorActionPreference
   if ($node.runAsNode) { $env:ELECTRON_RUN_AS_NODE = '1' }
@@ -147,13 +175,14 @@ function Invoke-Maintenance([hashtable]$tavern, [hashtable]$node, [string]$entry
       $line = $line -replace '(?i)([?&#](?:token|password|secret|access_token)=)[^\s&)]+', '$1<redacted>'
       $line = $line -replace '(?i)(Bearer\s+)[\w.\-]+', '$1<redacted>'
       $writer.WriteLine($line)
-      Say $line
+      Write-Host $line
     }
     $code = $LASTEXITCODE
     if ($code -ne 0) { Warn ('维护失败（exit ' + $code + '）；完整日志：' + $logFile) }
     return $code
   } finally {
-    $writer.Dispose()
+    if ($writer -eq $script:installLogWriter) { $script:installLogWriter = $null }
+    try { $writer.Dispose() } catch {}
     $ErrorActionPreference = $savedErrorAction
     if ($node.runAsNode) { if ($null -eq $saved) { Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue } else { $env:ELECTRON_RUN_AS_NODE = $saved } }
   }

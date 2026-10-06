@@ -46,7 +46,7 @@ curl -fsSL https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest/d
 - `update` 仅下载官方 GitHub Release 资产并用 SHA256SUMS 核对，不索取任何凭据。
 - Windows CLI 版需自行安装 Node.js 22+，并保证酒馆启动带 `--experimental-vm-modules`。
 - 找不到酒馆时可用 `-TavernHome <目录>` 显式指定。
-- 0.2.5起，同窗口显示全部维护输出，开始时明确打印UTF-8日志位置；失败显示原始原因和本次结果文件路径。日志在该酒馆的 `maintenance/dsh-tavern-sqlite-v2/installer-<唯一编号>.log`，不读取存档。
+- 0.2.6起，同窗口显示全部维护输出（更新/下载分支输出同步进日志），开始时明确打印UTF-8日志位置；失败显示原始原因和本次结果文件路径。安装器日志固定在 `install.ps1` 同目录 `install.log`（每次覆盖），不是酒馆维护证据，不读取存档。未捕获异常也会先写日志再停住等用户查看，除用户点窗口叉或输入0外不闪退。
 - “现装不同代”指插件包差异，不是酒馆版本不匹配；错误会显示现装/待装插件版本。仍按先卸旧、再装新处理，不强行覆盖源码漂移。
 
 升级已有旧版：先执行上述 uninstall，再执行 install。获取器仅在本地包版本与发行版一致时复用本地包，否则下载固定发行附件作为执行器；可用新执行器卸载同一版本线的旧版。坏包拒绝，不猜测跨 V1/V2 迁移。未安装时 uninstall 幂等返回。

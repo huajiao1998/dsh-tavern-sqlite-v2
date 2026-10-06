@@ -17,7 +17,9 @@ if (!/^[A-Za-z0-9_.-]+$/.test(tag)) throw Error('tag不合法')
 fs.mkdirSync(out, { recursive: true })
 const packRoot = path.join(out, 'package'); fs.mkdirSync(packRoot)
 const { packageFiles } = await import('../deploy/maintenance/runner.mjs')
-for (const rel of packageFiles(root).filter(rel => rel !== 'README.md' && !rel.startsWith('test' + path.sep))) {
+// 排除 install.log：开发者在源码树 deploy/ 下运行过 install.ps1 会留下该运行日志，
+// 它属于运行产物而非包文件，绝不能进发行包（deploy/** 在打包白名单内）。
+for (const rel of packageFiles(root).filter(rel => rel !== 'README.md' && rel !== 'install.log' && !rel.endsWith(path.sep + 'install.log') && !rel.startsWith('test' + path.sep))) {
   const target = path.join(packRoot, rel); fs.mkdirSync(path.dirname(target), { recursive: true }); fs.copyFileSync(path.join(root, rel), target)
 }
 fs.writeFileSync(path.join(packRoot, 'package.json'), JSON.stringify({ ...pkg, files: pkg.files.filter(rel => rel !== 'test/**') }, null, 2) + '\n', 'utf8')
