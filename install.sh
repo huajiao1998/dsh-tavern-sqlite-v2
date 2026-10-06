@@ -2,7 +2,7 @@
 # 本地优先；发布构建填入固定地址和摘要，再内嵌零依赖Node获取器。
 set -eu
 RELEASE_URL='https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/download/v0.2.3/dsh-tavern-sqlite-v2-0.2.3.tgz'
-RELEASE_SHA256='711b804acde02990720dcd2d12942a63d1977d97ec3c47392cbd9b8ead4ec94d'
+RELEASE_SHA256='967e7d35f1226c7bca6266b8032d92098d661b4b3a342de522b8e69b1ad07b76'
 VERSION='0.2.3'
 SCRIPT_DIR=''
 case "$0" in
@@ -170,7 +170,7 @@ export async function bootstrap(args = process.argv.slice(2), { env = process.en
   const entry = path.join(root, 'deploy', 'maintenance.mjs'), argv = [entry, op.action, ...op.pass, '--elapsed', String(performance.now() - started)]
   console.log('使用本地完整包；开始离线维护，成功预算60秒。')
   if (invoke) return await invoke(process.execPath, argv)
-  const child = spawn(process.execPath, argv, { stdio: 'inherit', detached: process.platform !== 'win32' })
+  const child = spawn(process.execPath, argv, { stdio: 'inherit', detached: process.platform !== 'win32', windowsHide: true })
   const detach = () => { child.unref(); console.error('终端中断，已启动维护作业继续。'); process.exit(130) }
   process.once('SIGINT', detach); process.once('SIGTERM', detach)
   const code = await new Promise((resolve, reject) => { child.once('exit', resolve); child.once('error', reject) })
