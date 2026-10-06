@@ -36,11 +36,12 @@ function New-LogWriter([string]$path) {
   return $w
 }
 $script:installLogPath = Join-Path $root 'install.log'
+$script:installLogDir = $root
 $script:installLogWriter = $null
 try { $script:installLogWriter = New-LogWriter $script:installLogPath }
 catch {
   $alt = Join-Path $env:TEMP 'dsh-tavern-install.log'
-  try { $script:installLogWriter = New-LogWriter $alt; $script:installLogPath = $alt } catch { $script:installLogWriter = $null }
+  try { $script:installLogWriter = New-LogWriter $alt; $script:installLogPath = $alt; $script:installLogDir = $env:TEMP } catch { $script:installLogWriter = $null }
 }
 
 function Say([string]$text) { Write-Host $text; try { if ($script:installLogWriter) { $script:installLogWriter.WriteLine($text) } } catch {} }
@@ -168,6 +169,10 @@ function Find-NodeRuntime([hashtable]$tavern) {
 function Invoke-Maintenance([hashtable]$tavern, [hashtable]$node, [string]$entry, [string]$verb, [switch]$Check, [string]$LogFile = '') {
   $argv = @($entry, $verb, '--home', $tavern.home)
   if ($Check) { $argv += '--check' }
+  # 安装阶段的所有用户可见产物都必须落在**插件包目录**（install.ps1 旁边）：
+  # install.log 在这里，维护写出的 result.json 也要求写到这里，用户报错不必去翻酒馆维护目录。
+  # 酒馆维护目录只保留维护证据材料（预演副本/单元备份），那是安装期内部产物、不需要用户翻。
+  $argv += @('--report-dir', $script:installLogDir)
   # 日志已在脚本开头打开并全程复用；$LogFile 仅供自动化测试指定隔离位置。
   if ($LogFile -and $LogFile -ne $script:installLogPath) {
     if ($script:installLogWriter) { try { $script:installLogWriter.Dispose() } catch {} }

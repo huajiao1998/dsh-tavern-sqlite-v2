@@ -157,8 +157,10 @@ export async function checkMaintenance({ action, adapter, driver, source, eviden
   return result
 }
 // 失败也必须在前台 stdout 明确给出脱敏初因及结果路径，不能只留 stderr/恢复进度。
-export function reportMaintenanceFailure(error, evidence, elapsedMs, output = console.log) {
-  const message = redactStartupLine(describeError(error)), resultFile = path.join(evidence, 'result.json')
+// reportDir：安装阶段由 install.ps1 指定为「插件包目录」，让用户就在 install.ps1/install.log 旁边
+// 拿到 result.json；不给时沿用维护证据目录（手工直跑维护入口的旧行为不变）。
+export function reportMaintenanceFailure(error, evidence, elapsedMs, output = console.log, reportDir = '') {
+  const message = redactStartupLine(describeError(error)), resultFile = path.join(reportDir || evidence, 'result.json')
   writeFileSync(resultFile, JSON.stringify({ ok: false, elapsedMs, message }, null, 2) + '\n', 'utf8')
   output('维护失败：' + message)
   output('失败结果：' + resultFile)
@@ -188,23 +190,31 @@ export function runCli(url, adapter) {
     for (let p = evidence; p !== path.dirname(op.home); p = path.dirname(p)) if (existsSync(p) && lstatSync(p).isSymbolicLink()) throw Error('维护输出不允许符号链接')
     if(!op.internal && existsSync(evidence))throw Error('维护输出目录须为本次新目录，不覆盖已有证据/执行器')
     mkdirSync(evidence, { recursive: true, mode: 0o700 })
+    // 用户可见的结果 JSON 落点：安装阶段＝插件包目录（install.ps1 旁边），便于“报错就发手边那个文件”。
+    // 维护证据（预演副本/单元备份等）仍留在 evidence，两者职责不同不混放。
+    let reportDir = evidence
+    if (op['report-dir']) {
+      reportDir = path.resolve(op['report-dir'])
+      if (!existsSync(reportDir) || !lstatSync(reportDir).isDirectory() || lstatSync(reportDir).isSymbolicLink()) throw Error('结果目录须为已存在的真实目录（不接受符号链接）：' + reportDir)
+    }
+    const reportFile = () => path.join(reportDir, 'result.json')
     if (!op.internal) {
       const staged = path.join(evidence, 'executor-package'); copyPackage(root, staged)
       budget.remaining()
-      const args = [path.join(staged, 'deploy', 'maintenance.mjs'), op.action, '--home', op.home, '--app', op.app, '--profile', op.profile, op.check ? '--check' : '--apply', '--internal', '--evidence', evidence, '--elapsed', String(budget.elapsed()), ...(op.port ? ['--port', op.port] : []), ...(op['systemd-unit'] ? ['--systemd-unit', op['systemd-unit']] : []), ...(op['prepare-env'] ? ['--prepare-env'] : [])]
+      const args = [path.join(staged, 'deploy', 'maintenance.mjs'), op.action, '--home', op.home, '--app', op.app, '--profile', op.profile, op.check ? '--check' : '--apply', '--internal', '--evidence', evidence, '--elapsed', String(budget.elapsed()), ...(op.port ? ['--port', op.port] : []), ...(op['systemd-unit'] ? ['--systemd-unit', op['systemd-unit']] : []), ...(op['prepare-env'] ? ['--prepare-env'] : []), ...(op['report-dir'] ? ['--report-dir', reportDir] : [])]
       if (op.background) {
         // Windows 上 detached:true 的语义是"新控制台窗口"（POSIX 才是脱离会话）——必须显式隐藏，
         // 否则用户会看到一连串弹出的命令行窗口。后台模式仍需 detached 以在父进程退出后继续。
         const fd = openSync(path.join(evidence, 'job.log'), 'wx', 0o600), child = spawn(process.execPath, args, { cwd: op.app, detached: true, windowsHide: true, stdio: ['ignore', fd, fd] }); closeSync(fd)
         await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject) }); child.unref()
-        console.log('维护已后台启动；PID=' + child.pid + '；结果=' + path.join(evidence, 'result.json')); return
+        console.log('维护已后台启动；PID=' + child.pid + '；结果=' + reportFile()); return
       }
       // 默认等待同一独立作业结果；Ctrl-C或终端断开不会中断恢复，且用户能看到进度。
       // **Windows 上保持 detached + windowsHide**：detached 让子进程有自己的（隐藏）控制台，
       // 父终端的 Ctrl-C 不会传给它（恢复不中断——这是本路径的既有承诺）；windowsHide 隐藏
       // 新控制台（否则就是用户实测的"不停弹命令行窗口"）；输出经 stdio:inherit 仍显示在本窗口。
       const child = spawn(process.execPath, args, { cwd: op.app, detached: true, windowsHide: true, stdio: 'inherit' })
-      const detach = () => { child.unref(); console.error('终端中断；维护/恢复继续。结果：' + path.join(evidence, 'result.json')); process.exit(130) }
+      const detach = () => { child.unref(); console.error('终端中断；维护/恢复继续。结果：' + reportFile()); process.exit(130) }
       process.once('SIGINT', detach); process.once('SIGTERM', detach)
       const code = await new Promise((resolve, reject) => { child.once('exit', resolve); child.once('error', reject) })
       process.removeListener('SIGINT', detach); process.removeListener('SIGTERM', detach); process.exitCode = code ?? 1; return
@@ -217,11 +227,11 @@ export function runCli(url, adapter) {
         let result
         if (op.check) result = await checkMaintenance({ action: op.action, adapter, driver, source, evidenceDir: evidence, budget })
         else result = await executeMaintenance({ action: op.action, adapter, driver, source, evidenceDir: evidence, progress, budget, prepareEnv: !!op['prepare-env'] })
-        writeFileSync(path.join(evidence, 'result.json'), JSON.stringify({ ok: true, network: 'offline', ...result }, null, 2) + '\n', 'utf8')
+        writeFileSync(reportFile(), JSON.stringify({ ok: true, network: 'offline', ...result }, null, 2) + '\n', 'utf8')
         console.log(JSON.stringify({ ok: true, network: 'offline', ...result }))
-        console.log('结果：' + path.join(evidence, 'result.json'))
+        console.log('结果：' + reportFile())
       } catch (error) {
-        reportMaintenanceFailure(error, evidence, Math.round(budget.elapsed()))
+        reportMaintenanceFailure(error, evidence, Math.round(budget.elapsed()), console.log, reportDir)
         throw error
       }
     }, { waitMs: 0 })

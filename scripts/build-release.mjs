@@ -17,12 +17,22 @@ if (!/^[A-Za-z0-9_.-]+$/.test(tag)) throw Error('tag不合法')
 fs.mkdirSync(out, { recursive: true })
 const packRoot = path.join(out, 'package'); fs.mkdirSync(packRoot)
 const { packageFiles } = await import('../deploy/maintenance/runner.mjs')
-// 排除 install.log：开发者在源码树 deploy/ 下运行过 install.ps1 会留下该运行日志，
-// 它属于运行产物而非包文件，绝不能进发行包（deploy/** 在打包白名单内）。
-for (const rel of packageFiles(root).filter(rel => rel !== 'README.md' && rel !== 'install.log' && !rel.endsWith(path.sep + 'install.log') && !rel.startsWith('test' + path.sep))) {
+const { assertPackageDependencies } = await import('../deploy/maintenance/driver.mjs')
+const packFilter = rel => rel !== 'README.md' && rel !== 'install.log' && !rel.endsWith(path.sep + 'install.log') && !rel.startsWith('test' + path.sep)
+for (const rel of packageFiles(root).filter(packFilter)) {
   const target = path.join(packRoot, rel); fs.mkdirSync(path.dirname(target), { recursive: true }); fs.copyFileSync(path.join(root, rel), target)
 }
 fs.writeFileSync(path.join(packRoot, 'package.json'), JSON.stringify({ ...pkg, files: pkg.files.filter(rel => rel !== 'test/**') }, null, 2) + '\n', 'utf8')
+// —— 包完整性门禁（0.2.8 起，教训见 docs/workstreams/plugin/INSTALLER-BLOCKERS-2026-10-07.md）——
+// 0.2.5–0.2.7 三个发行包因公开仓 .gitignore 的 `dist/` 吞掉 lib/vendor/yaml/dist/** 而缺 74 个文件，
+// 用户侧安装被维护入口的 vendor 台账护栏拒绝；而我只核了“附件齐全/摘要一致”，把三个装不上的包发了出去。
+// 现在：①逐文件比对源与打包结果；②跑维护入口同一道 vendor 台账校验。任一不符即构建失败，不允许出包。
+{
+  const expected = packageFiles(root).filter(packFilter), actual = packageFiles(packRoot)
+  const missing = expected.filter(rel => !actual.includes(rel))
+  if (missing.length) throw Error('发行包不完整：缺少 ' + missing.length + ' 个文件（例：' + missing.slice(0, 3).join('、') + '）；拒绝出包')
+  assertPackageDependencies(JSON.parse(fs.readFileSync(path.join(packRoot, 'package.json'), 'utf8')), packRoot)
+}
 // 公开包README独立，不把运维README及内部台账链接带进发行包。
 fs.writeFileSync(path.join(packRoot, 'README.md'), fs.readFileSync(path.join(root, 'deploy', 'INSTALL.md'), 'utf8'), 'utf8')
 const source = fs.readFileSync(path.join(root, 'deploy', 'bootstrap.mjs'), 'utf8')
@@ -56,6 +66,15 @@ if (zipTool.error || zipTool.status !== 0) {
   if (alt.error || alt.status !== 0) throw Error('Windows zip 打包失败：需要 bsdtar（Windows 自带 tar）或 zip 命令')
 }
 fs.rmSync(zipStageRoot, { recursive: true, force: true })
+// zip 层逐文件核：tgz 完整不等于 zip 完整，用户装的是 zip；缺文件同样会被维护入口拒绝。
+{
+  const listed = spawnSync('tar', ['-tf', path.join(out, zipName)], { encoding: 'utf8', timeout: 20000, windowsHide: true })
+  if (listed.error || listed.status !== 0) throw Error('无法列出 zip 内容做完整性核验，拒绝出包')
+  const inZip = new Set(listed.stdout.split(/\r?\n/).map(s => s.trim().replace(/^dsh-tavern-sqlite-v2\//, '')).filter(Boolean))
+  const missing = packageFiles(packRoot).filter(rel => !inZip.has(rel.split(path.sep).join('/')))
+  if (missing.length) throw Error('Windows zip 不完整：缺少 ' + missing.length + ' 个文件（例：' + missing.slice(0, 3).join('、') + '）；拒绝出包')
+  for (const must of ['install.ps1', 'run-install.cmd']) if (!inZip.has(must)) throw Error('Windows zip 缺少入口：' + must + '；拒绝出包')
+}
 const zipDigest = createHash('sha256').update(fs.readFileSync(path.join(out, zipName))).digest('hex')
 fs.writeFileSync(path.join(out, 'SHA256SUMS'), digest + '  ' + tarball + '\n' + zipDigest + '  ' + zipName + '\n', 'utf8')
 fs.writeFileSync(path.join(out, 'release.json'), JSON.stringify({ package: pkg.name, version: pkg.version, repository: values.repository || null, tag, asset: tarball, sha256: digest, assetZip: zipName, sha256Zip: zipDigest, published: false, command: values.repository ? `curl -fsSL https://raw.githubusercontent.com/${values.repository}/main/install.sh | sh` : null }, null, 2) + '\n', 'utf8')

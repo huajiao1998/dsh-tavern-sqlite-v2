@@ -1,7 +1,11 @@
 node_modules/
-dist/
+/dist/
 .env
 *.db
 *.db-wal
 *.db-shm
 *.log
+# vendor 目录里含名为 dist 的第三方构建产物（lib/vendor/yaml/dist/**），必须入库：
+# 裸目录模式 `dist/` 会匹配任意层级的 dist 目录，曾把 74 个 vendor 文件静默丢弃，
+# 导致 0.2.5–0.2.7 发行包缺少 yaml/dist 而被安装护栏拒绝（2026-10-07）。
+!lib/vendor/**/dist/

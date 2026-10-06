@@ -32,6 +32,29 @@ test('维护失败stdout包含完整脱敏初因和结果路径，JSON与前台�
   assert.ok(![...lines, result.message].join('\n').includes('fixture-bearer-value'))
 })
 
+// 安装阶段用户可见的结果必须落在插件包目录（install.ps1 旁边），不能只留酒馆维护目录：
+// 用户报错时应当只需发手边的 install.log 与 result.json，不必去翻深层路径。
+test('安装阶段result.json按report-dir落到插件包目录，证据目录不再出现在提示里', t => {
+  const root = temp(t), pkgDir = path.join(root, 'pkg'), evidence = path.join(root, 'tavern', 'maintenance', 'dsh-tavern-sqlite-v2', 'run-1')
+  spawnSync('cmd', ['/c', 'mkdir', pkgDir], { windowsHide: true })
+  spawnSync('cmd', ['/c', 'mkdir', evidence], { windowsHide: true })
+  const lines = [], error = new Error('合成安装失败')
+  reportMaintenanceFailure(error, evidence, 12, line => lines.push(line), pkgDir)
+  assert.equal(existsSync(path.join(pkgDir, 'result.json')), true, '结果必须落在插件包目录')
+  assert.equal(existsSync(path.join(evidence, 'result.json')), false, '安装阶段不再往维护目录写用户结果')
+  assert.deepEqual(lines, ['维护失败：合成安装失败', '失败结果：' + path.join(pkgDir, 'result.json')])
+})
+
+test('PS1把report-dir指向install.ps1同目录，维护入口接受该参数', () => {
+  assert.match(installer, /\$argv \+= @\('--report-dir', \$script:installLogDir\)/)
+  assert.match(installer, /\$script:installLogDir = \$root/)
+  const target = readFileSync(new URL('../deploy/maintenance/target.mjs', import.meta.url), 'utf8')
+  assert.match(target, /'--report-dir'\]/, '维护入口参数白名单必须接受--report-dir，否则安装直接被拒')
+  const runner = readFileSync(new URL('../deploy/maintenance/runner.mjs', import.meta.url), 'utf8')
+  assert.match(runner, /reportMaintenanceFailure\(error, evidence, Math\.round\(budget\.elapsed\(\)\), console\.log, reportDir\)/)
+  assert.match(runner, /writeFileSync\(reportFile\(\)/)
+})
+
 test('PS1双流日志与CLI失败报告连到真实调用位置，不依赖用户自行找stderr', () => {
   assert.match(installer, /& \$node\.exe @argv 2>&1/)
   assert.match(installer, /UTF8Encoding\]::new\(\$false\)/)
@@ -54,7 +77,7 @@ test('PS1双流日志与CLI失败报告连到真实调用位置，不依赖用�
   assert.match(launcher, /^\s*pause\s*$/m)
   assert.match(readFileSync(new URL('../scripts/build-release.mjs', import.meta.url), 'utf8'), /run-install\.cmd/, '发行包必须带上该入口')
   const runner = readFileSync(new URL('../deploy/maintenance/runner.mjs', import.meta.url), 'utf8')
-  assert.match(runner, /reportMaintenanceFailure\(error, evidence, Math\.round\(budget\.elapsed\(\)\)\)/)
+  assert.match(runner, /reportMaintenanceFailure\(error, evidence, Math\.round\(budget\.elapsed\(\)\), console\.log, reportDir\)/)
   assert.match(runner, /if \(!error\.maintenanceReported\) console\.log/)
 })
 
