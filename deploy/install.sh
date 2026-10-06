@@ -170,7 +170,7 @@ export async function bootstrap(args = process.argv.slice(2), { env = process.en
   const entry = path.join(root, 'deploy', 'maintenance.mjs'), argv = [entry, op.action, ...op.pass, '--elapsed', String(performance.now() - started)]
   console.log('使用本地完整包；开始离线维护，成功预算60秒。')
   if (invoke) return await invoke(process.execPath, argv)
-  const child = spawn(process.execPath, argv, { stdio: 'inherit', detached: process.platform !== 'win32' })
+  const child = spawn(process.execPath, argv, { stdio: 'inherit', detached: process.platform !== 'win32', windowsHide: true })
   const detach = () => { child.unref(); console.error('终端中断，已启动维护作业继续。'); process.exit(130) }
   process.once('SIGINT', detach); process.once('SIGTERM', detach)
   const code = await new Promise((resolve, reject) => { child.once('exit', resolve); child.once('error', reject) })

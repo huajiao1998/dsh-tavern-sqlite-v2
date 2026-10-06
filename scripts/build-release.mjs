@@ -30,7 +30,7 @@ const template = fs.readFileSync(path.join(root, 'deploy', 'install.template.sh'
 const embedded = template.replace('__DSH_RELEASE_VERSION__', () => pkg.version).replace('__DSH_BOOTSTRAP_SOURCE__', () => source)
 // 包内入口本地即用；联网地址由发行副本填入，避免tgz摘要自引用。
 fs.writeFileSync(path.join(packRoot, 'deploy', 'install.sh'), embedded, 'utf8')
-const tarball = pkg.name + '-' + pkg.version + '.tgz', result = spawnSync('tar', ['-czf', path.join(out, tarball), '-C', out, 'package'], { stdio: 'inherit', timeout: 10000 })
+const tarball = pkg.name + '-' + pkg.version + '.tgz', result = spawnSync('tar', ['-czf', path.join(out, tarball), '-C', out, 'package'], { stdio: 'inherit', timeout: 10000, windowsHide: true })
 if (result.error) throw result.error
 if (result.status !== 0) throw Error('打包失败')
 const digest = createHash('sha256').update(fs.readFileSync(path.join(out, tarball))).digest('hex')
@@ -44,9 +44,9 @@ const zipStageRoot = path.join(out, 'win-zip'), zipStage = path.join(zipStageRoo
 fs.mkdirSync(zipStage, { recursive: true })
 fs.cpSync(packRoot, zipStage, { recursive: true })
 fs.writeFileSync(path.join(zipStage, 'install.ps1'), Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), fs.readFileSync(path.join(root, 'deploy', 'install.ps1'))]))
-const zipTool = spawnSync('tar', ['-a', '-cf', path.join(out, zipName), '-C', zipStageRoot, 'dsh-tavern-sqlite-v2'], { stdio: 'inherit', timeout: 30000 })
+const zipTool = spawnSync('tar', ['-a', '-cf', path.join(out, zipName), '-C', zipStageRoot, 'dsh-tavern-sqlite-v2'], { stdio: 'inherit', timeout: 30000, windowsHide: true })
 if (zipTool.error || zipTool.status !== 0) {
-  const alt = spawnSync('zip', ['-r', '-q', path.join(out, zipName), 'dsh-tavern-sqlite-v2'], { cwd: zipStageRoot, timeout: 30000 })
+  const alt = spawnSync('zip', ['-r', '-q', path.join(out, zipName), 'dsh-tavern-sqlite-v2'], { cwd: zipStageRoot, timeout: 30000, windowsHide: true })
   if (alt.error || alt.status !== 0) throw Error('Windows zip 打包失败：需要 bsdtar（Windows 自带 tar）或 zip 命令')
 }
 fs.rmSync(zipStageRoot, { recursive: true, force: true })

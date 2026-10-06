@@ -107,7 +107,7 @@ function configure(appDir) {
 const stamp = () => new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-')
 
 function checkSyntax(file) {
-  const result = spawnSync(process.execPath, ['--check', file], { stdio: 'inherit' })
+  const result = spawnSync(process.execPath, ['--check', file], { stdio: 'inherit', windowsHide: true })
   return result.status === 0 ? '' : String(result.error?.message || 'node --check 退出码 ' + result.status)
 }
 function legacySeams(options = {}) {

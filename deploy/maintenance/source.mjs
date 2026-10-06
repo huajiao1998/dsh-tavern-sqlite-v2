@@ -40,7 +40,7 @@ export function sourceAccess(appDir,targets){
  }
  function assertImage(image,{installation=false}={}){for(const [rel,body]of Object.entries(image)){const target=file(rel);if(installation&&backup.test(rel))continue;if(body==null){if(existsSync(target))throw new Error('源码应不存在：'+rel)}else if(installation&&[...records,STANDARD_RECORD].includes(rel)){if(!existsSync(target))throw new Error('安装记录缺失：'+rel)}else if(!existsSync(target)||!readFileSync(target).equals(Buffer.from(body,'base64')))throw new Error('源码前像不匹配：'+rel)}}
  function protect(){const rel='tavern-plugin/lib/index.js',target=file(rel),raw=readFileSync(target,'utf8'),safe=protectAuthorStartup(raw);if(raw!==safe)writeFileSync(target,safe,'utf8')}
- function syntax(){const result=spawnSync(process.execPath,['--check',file('tavern-plugin/lib/index.js')],{stdio:'inherit',timeout:8000});if(result.error||result.status!==0)throw new Error('作者保护主入口语法/有界检查拒绝')}
+ function syntax(){const result=spawnSync(process.execPath,['--check',file('tavern-plugin/lib/index.js')],{stdio:'inherit',timeout:8000,windowsHide:true});if(result.error||result.status!==0)throw new Error('作者保护主入口语法/有界检查拒绝')}
  return {root,file,capture,restore,assertImage,protect,syntax}
 }
 export function assertPackageSource(access,adapter){

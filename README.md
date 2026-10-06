@@ -44,7 +44,11 @@ curl -fsSL https://raw.githubusercontent.com/huajiao1998/dsh-tavern-sqlite-v2/ma
 
 详细参数、本地离线安装、预检与失败恢复见[安装说明](<deploy/INSTALL.md>)。
 
-**Windows（桌面版 / CLI）**：从 [Releases](https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest) 下载 `-win.zip`，解压到酒馆目录内任意一层，右键 `install.ps1` →「使用 PowerShell 运行」进入菜单（安装 / 更新 / 卸载 / 只读预检）；自动定位酒馆，未装 Node 时可复用桌面版自带运行时，更新时按官方 SHA256SUMS 校验下载包。
+**Windows（桌面版 / CLI）**：从 [Releases](https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest) 下载 `-win.zip`，先与同页 `SHA256SUMS` 对照校验（PowerShell：`(Get-FileHash .\dsh-tavern-sqlite-v2-0.2.3-win.zip -Algorithm SHA256).Hash` 应与同名行一致），再按以下步骤安装：
+
+1. 把 zip 解压到酒馆目录内任意一层（例如 `D:\Program Files (x86)\DSH-Tavern\`），会得到 `…\DSH-Tavern\dsh-tavern-sqlite-v2\`；
+2. 右键其中的 `install.ps1` →「使用 PowerShell 运行」进入菜单（安装 / 更新 / 卸载 / 只读预检）；也支持命令行：`.\install.ps1 install|update|uninstall|check`；
+3. 桌面版安装/卸载前请从托盘**完全退出**酒馆，完成后重新启动生效；本机未装 Node 时安装器可复用桌面版自带运行时；`update` 仅下载官方资产并校验后先卸旧再装新。
 
 **0.2.3 Windows 支持与重结算修复**：卡脚本 VM/ESM 在 Windows 桌面版经 Worker 线程执行（Linux/CLI 仍走原进程内路径，能力驱动分叉）；修复候选任务推进剧情版本后重结算永久「变量结算中…」的问题——新结算只绑定同版本正文轮次，跨版本重试走作者独立结算路径，提交护栏与身份校验不放宽。维护入口支持「退出撤缝态」：酒馆正常退出后再执行一键更新/装卸不再报缺恢复记录。
 
@@ -72,7 +76,7 @@ curl -fsSL https://raw.githubusercontent.com/huajiao1998/dsh-tavern-sqlite-v2/ma
 
 ## 兼容与使用须知
 
-- 当前适配**作者DSH Tavern 2.5.0（v2.5 首发与重发布树均实测，最新至 `9e9b26d`）、DSH／boot 0.1.5-rc.2**，需要既有Node22.19+、pnpm与CLI tavern profile；安装器面向Linux、macOS、WSL2的受支持布局，**暂不支持Desktop**。
+- 当前适配**作者DSH Tavern 2.5.0（v2.5 首发与重发布树均实测，最新至 `9e9b26d`）、DSH／boot 0.1.5-rc.2**，需要既有Node22.19+、pnpm与CLI tavern profile；安装器面向Linux、macOS、WSL2与Windows（桌面版/CLI）。
 - **无需手工预配`--experimental-vm-modules`**：安装命令加`--prepare-env`，安装器自动把它补进systemd单元（备份原配置、按原方式重启复验、失败自动回滚），**安装完成后服务启动自带该参数**。不加该开关则要求该参数已存在（默认不改动你的启动配置，缺失时停服前明确拒绝）。
 - **与V1互斥**：同一实例不能同时安装V1与V2；已装V1时先用V1安装器完整卸载，再安装V2。V1卸载可能留下旧维护备份文件——安装时同样加`--prepare-env`即可自动隔离（只移动到维护证据目录，不删除；不带该开关则列清单明确拒绝）。
 - 装卸走目标profile的官方离线包管理入口，不执行生命周期脚本、不联网补依赖；json5、jsonrepair、lodash、yaml须在既有离线依赖材料中可用。
@@ -86,7 +90,7 @@ node scripts/build-release.mjs --out ./dist --repository huajiao1998/dsh-tavern-
 node --test test/*.test.mjs
 ```
 
-构建生成正式安装器、完整插件tgz和SHA256SUMS；不自动上传或操作服务。公开测试使用原创临时数据，不连接真实Host、模型或业务会话。
+构建生成正式安装器（含 install.ps1 启动入口）、完整插件tgz、Windows zip 与 SHA256SUMS（tgz＋zip 双资产）；不自动上传或操作服务。公开测试使用原创临时数据，不连接真实Host、模型或业务会话。
 
 ## 来源与许可证
 

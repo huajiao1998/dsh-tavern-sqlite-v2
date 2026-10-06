@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { pause } from './budget.mjs'
 export function command(executable, args, { cwd, env, timeout = 5000, allowAbsent = false } = {}) {
-  const result = spawnSync(executable, args, { cwd, env, timeout, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  const result = spawnSync(executable, args, { cwd, env, timeout, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
   if (result.error) throw result.error
   if(allowAbsent && result.status===1 && !result.stdout.trim() && !result.stderr.trim())return ''
   if (result.status !== 0) throw new Error('只读/管理命令失败：' + path.basename(executable))

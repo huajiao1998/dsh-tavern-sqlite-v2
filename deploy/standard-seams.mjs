@@ -221,7 +221,7 @@ export function applyStandardSeams({ appDir, authorVersion } = {}) {
       mkdirSync(path.dirname(target), { recursive: true }); writeFileSync(target, body, 'utf8')
     }
     for (const rel of core.keys()) {
-      const result = spawnSync(process.execPath, ['--check', inside(appDir, rel)], { stdio: 'inherit' })
+      const result = spawnSync(process.execPath, ['--check', inside(appDir, rel)], { stdio: 'inherit', windowsHide: true })
       if (result.status !== 0) throw new Error('核心接缝语法拒绝：' + rel)
     }
     const after = Object.fromEntries(artifacts(appDir).filter(rel => existsSync(inside(appDir, rel))).map(rel => [rel, hash(readFileSync(inside(appDir, rel)))]))

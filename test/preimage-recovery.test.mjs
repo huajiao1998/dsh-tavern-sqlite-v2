@@ -10,6 +10,7 @@ import {spawnSync} from 'node:child_process'
 import {applyAllSeams} from '../deploy/apply-seams.mjs'
 import {maintenanceAdapter as adapter} from '../deploy/maintenance.mjs'
 import {sourceAccess,rehearseSource,STANDARD_RECORD} from '../deploy/maintenance/source.mjs'
+import {maintenanceBudget} from '../deploy/maintenance/budget.mjs'
 import {executeMaintenance} from '../deploy/maintenance/runner.mjs'
 
 const workspace=fileURLToPath(new URL('../../../',import.meta.url))
@@ -38,7 +39,7 @@ function fixture(t){
  const evidence=()=>{const dir=path.join(history,new Date(1791240000000+serial++*1000).toISOString().replace(/[:.]/g,'-')+'-'+randomUUID());fs.mkdirSync(dir,{recursive:true});return dir}
  const events=[]
  const driver={noop:false,preflight:async action=>{const {withdrawnCleanState}=await import('../deploy/maintenance/source.mjs');const clean=withdrawnCleanState(access);return {wasRunning:false,noop:driver.noop&&!clean,withdrawnClean:clean}},assertIdentity:async()=>events.push('identity'),assertStopped:async()=>events.push('stopped'),stop:async()=>events.push('stop'),start:async()=>{throw Error('停止态不得启动')},manage:async action=>events.push('manage:'+action),verify:async()=>({basicHealthVerified:true}),beginRecovery(){},stoppedAfterError:async()=>false,restorePackage:async()=>events.push('restorePackage')}
- const run=(action,dir=evidence())=>executeMaintenance({action,adapter,driver,source:access,evidenceDir:dir})
+ const run=(action,dir=evidence())=>executeMaintenance({action,adapter,driver,source:access,evidenceDir:dir,budget:maintenanceBudget({milliseconds:240000})})
  return {root,app,access,original,history,evidence,driver,events,run}
 }
 function pollute(f){
