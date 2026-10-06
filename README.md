@@ -44,6 +44,8 @@ curl -fsSL https://raw.githubusercontent.com/huajiao1998/dsh-tavern-sqlite-v2/ma
 
 详细参数、本地离线安装、预检与失败恢复见[安装说明](<deploy/INSTALL.md>)。
 
+**0.2.2 上游适配**：适配作者 v2.5 晚间重发布树（实测至 `9e9b26d`，含压缩重写、台账手动化、卡片工作台、MVU `$meta` 修复等 50+ 提交）。全部标准接缝锚点在新树上逐一验证通过，v2.5 首发线旧树继续兼容。升级酒馆后请按「卸载与更新」一节先卸载旧代、再安装本版。
+
 **0.2.1 装卸修复**：不再从当前缝合态重建作者前像。旧记录损坏时，一键维护器自动验证自身留下的洁净安装证据，副本重放必须与全部当前活动源码逐字节一致，才允许恢复；不修改 after 哈希放过真实漂移。同版 install 可只修复元数据，uninstall 可直接完成恢复后卸载。`uninstall --check` 仅诊断、不改目标。没有可靠材料则保留现场并明确拒绝，存档与数据库不动。
 
 ## 原档怎么继续使用？
@@ -66,7 +68,7 @@ curl -fsSL https://raw.githubusercontent.com/huajiao1998/dsh-tavern-sqlite-v2/ma
 
 ## 兼容与使用须知
 
-- 当前适配**作者DSH Tavern 2.5.0（适配源码基准d5b2e6c4）、DSH／boot 0.1.5-rc.2**，需要既有Node22.19+、pnpm与CLI tavern profile；安装器面向Linux、macOS、WSL2的受支持布局，**暂不支持Desktop**。
+- 当前适配**作者DSH Tavern 2.5.0（v2.5 首发与重发布树均实测，最新至 `9e9b26d`）、DSH／boot 0.1.5-rc.2**，需要既有Node22.19+、pnpm与CLI tavern profile；安装器面向Linux、macOS、WSL2的受支持布局，**暂不支持Desktop**。
 - **无需手工预配`--experimental-vm-modules`**：安装命令加`--prepare-env`，安装器自动把它补进systemd单元（备份原配置、按原方式重启复验、失败自动回滚），**安装完成后服务启动自带该参数**。不加该开关则要求该参数已存在（默认不改动你的启动配置，缺失时停服前明确拒绝）。
 - **与V1互斥**：同一实例不能同时安装V1与V2；已装V1时先用V1安装器完整卸载，再安装V2。V1卸载可能留下旧维护备份文件——安装时同样加`--prepare-env`即可自动隔离（只移动到维护证据目录，不删除；不带该开关则列清单明确拒绝）。
 - 装卸走目标profile的官方离线包管理入口，不执行生命周期脚本、不联网补依赖；json5、jsonrepair、lodash、yaml须在既有离线依赖材料中可用。

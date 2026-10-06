@@ -4,7 +4,7 @@
 
 ## 支持范围
 
-- macOS、Linux、WSL2 CLI；已有作者 2.5.0、DSH / boot 0.1.5-rc.2、Node.js 22.19+、pnpm。未知作者源码布局、Desktop 或未知管理器明确拒绝，不猜测覆盖。
+- macOS、Linux、WSL2 CLI；已有作者 2.5.0（含 v2.5 重发布后的最新提交，实测至 `9e9b26d`）、DSH / boot 0.1.5-rc.2、Node.js 22.19+、pnpm。未知作者源码布局、Desktop 或未知管理器明确拒绝，不猜测覆盖。
 - 四个解析依赖 json5、jsonrepair、lodash、yaml 必须在已有离线材料中可用。下载本插件包不等于联网安装第三方依赖；官方包管理固定 `--offline --ignore-scripts --config.auto-install-peers=false`。
 - V2 启动需要 `--experimental-vm-modules`。已有 systemd 单元可在 install 后加 `--prepare-env`，授权安装器备份并补上旗标、隔离旧维护备份，失败恢复；不加该选项时不改启动配置，缺旗标会在停服前拒绝。
 
@@ -50,7 +50,7 @@ sh deploy/install.sh install --home /绝对路径/已有酒馆安装目录
 sh deploy/install.sh uninstall --home /绝对路径/已有酒馆安装目录
 ```
 
-也可给正式 SH 指定本地包：`--package ./dsh-tavern-sqlite-v2-0.2.1.tgz`。源码 SH 不含发行摘要，不能单独用于联网下载；正式 SH 由构建器生成。
+也可给正式 SH 指定本地包：`--package ./dsh-tavern-sqlite-v2-0.2.2.tgz`。源码 SH 不含发行摘要，不能单独用于联网下载；正式 SH 由构建器生成。
 
 自动识别仅看 `DSH_TAVERN_CLI_HOME`、`DSH_HOME`、当前目录及 `~/.dsh-tavern`；多个目录或找不到时要求 `--home`，不扫描磁盘。`--port` 核对端口，`--systemd-unit` 指定已有单元。
 
