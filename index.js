@@ -58,6 +58,10 @@ const persistMod = requireFrom("dsh-session-persistence/lib/index.js")
 const { SessionPersistenceNotFoundError, SessionPersistenceRevision } = persistMod
 
 import { SqliteSessionStore } from "./store.js"
+import { restoreDatabase } from './lib/db-save-codec.js'
+import { DatabaseSync } from 'node:sqlite'
+import { rmSync, mkdirSync } from 'node:fs'
+const dbSaveTargets = new Map()
 const originalOpen = JsonlSessionPersistence.prototype.open
 const originalCreate = JsonlSessionPersistence.prototype.create
 
@@ -68,7 +72,8 @@ const TAKEOVER_KEYS = [
 	"acquireLease", "acquireWriteLease",
 	"findLog", "requireStoredLog", "resolveCurrentLog", "readStoredLog",
 	"stat", "list", "locate",
-	"ensureMigrated", "readStored", "truncateEvents", "loadRollbackSession", "bindRollbackArchive", "setRollbackPending", "guardTurnStart", "assertWritable", "create", "open", "ensureRootEncoding"
+	"ensureMigrated", "readStored", "truncateEvents", "loadRollbackSession", "bindRollbackArchive", "setRollbackPending", "guardTurnStart", "assertWritable", "create", "open", "ensureRootEncoding",
+	"dbSaveSessionPath", "dbSaveDrain", "dbSaveValidate", "dbSaveInstall", "dbSaveRemove", "dbSaveFinish", "dbSaveDeleteFootprint", "drainOpenHandles"
 ]
 
 export default class TavernSessionPersistence extends JsonlSessionPersistence {
@@ -375,6 +380,90 @@ export default class TavernSessionPersistence extends JsonlSessionPersistence {
 		const meta = session.truncateFrom(boundarySeq, identity)
 		this.rewindOpenHandles(header.id, meta?.eventCount ?? 0)
 		return meta
+	}
+
+	/** DB交换仅允许本后端的新SQL会话；原件优先检查，不能取得同ID影子路径。 */
+	dbSaveSessionPath(id) {
+		if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,160}$/.test(id)) throw Error('DB交换Session ID无效')
+		this.assertWritable(id)
+		const file = this.store.pathOf(id)
+		if (!this.store.exists(id)) throw new SessionPersistenceNotFoundError(id)
+		return file
+	}
+	async dbSaveDrain(id) {
+		this.dbSaveSessionPath(id)
+		await this.drainOpenHandles(id)
+	}
+	dbSaveValidate(stored) {
+		const patch = this[Symbol.for('dsh-tavern.host-session-patch.v1')]
+		if (patch?.serverReady !== true || typeof patch.restoreStoredSession !== 'function') throw Error('DB交换缺少同代原生事件严格解码接线')
+		const session = patch.restoreStoredSession(stored)
+		if (session?.id !== stored.header.id) throw Error('DB交换原生解码身份不一致')
+		return true
+	}
+	dbSaveInstall(id, tables, archive) {
+		if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,160}$/.test(id)) throw Error('DB导入Session ID无效')
+		this.assertWritable(id)
+		if (this.store.exists(id) || tables.sessions?.length !== 1 || tables.sessions[0].id !== id) throw Error('DB导入拒绝覆盖或身份不一致')
+		const file = this.store.pathOf(id)
+		const key = file
+		if (dbSaveTargets.has(key)) throw Error('DB新目标已在创建')
+		mkdirSync(path.dirname(file), { recursive: true })
+		restoreDatabase(file, 'native', tables)
+		dbSaveTargets.set(key, id)
+		try {
+			const session = this.store.openExisting(id)
+			session.bindRollbackArchive(archive)
+			this.dbSaveValidate(session.readAll())
+		} catch (error) {
+			try { this.dbSaveRemove(id) } catch (cleanup) { throw new AggregateError([error, cleanup], 'DB原生目标创建失败，精确清理失败') }
+			throw error
+		}
+	}
+	/**
+	 * 删局前的原生 SQLite 扁平足迹预检（同步、只读校验，不执行删除）：只对本后端拥有的 SQL 目标
+	 * 产出 {category:'subsession',kind:'file'} 项（db/-wal/-shm），交给作者既有 footprint live 过滤/
+	 * defer/rm；无 SQL 的原件跳过，不干扰原 jsonl 目录。全部校验通过后才关缓存，避免半 prepare。
+	 */
+	dbSaveDeleteFootprint(chatId, ids, archive) {
+		if (typeof chatId !== 'string' || !/^[a-zA-Z0-9_-]{1,160}$/.test(chatId)) throw Error('DB删局Chat身份无效')
+		if (typeof archive !== 'string' || path.basename(archive) !== 'archive.db' || path.basename(path.dirname(archive)) !== chatId) throw Error('DB删局archive绑定无效')
+		if (!Array.isArray(ids) || !ids.length || ids.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,160}$/.test(id))) throw Error('DB删局Session身份集合无效')
+		const targets = [...new Set(ids)]
+		const foregroundId = targets[0], prepared = []
+		for (const id of targets) {
+			if (!this.store.exists(id)) continue
+			this.assertWritable(id)
+			const cached = this.store.dbs.get(id), file = this.store.pathOf(id)
+			const read = cached?.db ?? new DatabaseSync(file, { readOnly: true, allowExtension: false })
+			let binding, sessionId
+			try {
+				binding = read.prepare("SELECT value FROM meta WHERE key='rollback_archive'").get()?.value
+				sessionId = read.prepare('SELECT id FROM sessions').get()?.id
+			} finally { if (!cached) read.close() }
+			if (binding !== archive) throw Error('DB删局目标归属不符：' + id)
+			if (sessionId !== id) throw Error('DB删局目标身份不符：' + id)
+			prepared.push({ id, file })
+		}
+		for (const { id } of prepared) if ([...(this.tracker?.openHandles || [])].some(handle => handle.id === id)) throw Error('DB删局目标仍有活动句柄，拒绝删除：' + id)
+		for (const { id } of prepared) { this.store.dbs.get(id)?.close(); this.store.dbs.delete(id) }
+		return prepared.flatMap(({ id, file }) => [file, file + '-wal', file + '-shm'].map(target => ({ category: 'subsession', kind: 'file', path: target, sessionId: id, foreground: id === foregroundId })))
+	}
+	dbSaveRemove(id) {
+		this.assertWritable(id)
+		const file = this.store.pathOf(id)
+		if (dbSaveTargets.get(file) !== id) throw Error('仅可回收本次未发布的DB新目标')
+		if ([...(this.tracker?.openHandles || [])].some(handle => handle.id === id)) throw Error('DB新目标仍有活动句柄，拒绝删除')
+		this.store.dbs.get(id)?.close(); this.store.dbs.delete(id)
+		for (const suffix of ['', '-wal', '-shm']) rmSync(file + suffix, { force: true })
+		dbSaveTargets.delete(file)
+	}
+	dbSaveFinish(ids) {
+		if (!Array.isArray(ids) || ids.length === 0 || new Set(ids).size !== ids.length) throw Error('DB发布目标集合无效')
+		const targets = ids.map(id => ({ id, file: this.store.pathOf(id) }))
+		// 全量预检后才统一解除归属；不能逐项finish后在中途失败，导致补偿无法删除前项。
+		for (const { id, file } of targets) if (dbSaveTargets.get(file) !== id) throw Error('DB目标未归属本次导入')
+		for (const { file } of targets) dbSaveTargets.delete(file)
 	}
 
 	/** 冷Session只读构造用于回退，不resume Agent、不附着、不追加恢复标记或任务。 */

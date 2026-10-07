@@ -5,9 +5,9 @@
 ## 支持范围
 
 - macOS、Linux、WSL2 CLI；已有作者 2.5.0（接缝与维护检查复核至 `8480f7de`）、DSH / boot 0.1.5-rc.2、Node.js 22.19+、pnpm。未知作者源码布局或未知管理器明确拒绝，不猜测覆盖。
-- Windows 10 1803+：支持桌面版（Electron）的 `install.ps1`；原生 Windows CLI 的服务生命周期尚未接线，不冒称支持。桌面版卡脚本 VM 在 Worker 线程执行，Linux/CLI 走原进程内路径，能力驱动自动分叉。
-- 四个解析器 json5、jsonrepair、lodash、yaml 已vendor到包内，零运行时npm依赖，不要求桌面宿主的离线元数据缓存另有四包。安装包管理仍固定 `--offline --ignore-scripts --config.auto-install-peers=false`；兜底卸载不依赖旧包解析器/包管理。
-- V2 启动需要 `--experimental-vm-modules`。已有 systemd 单元可在 install 后加 `--prepare-env`，授权安装器备份并补上旗标、隔离旧维护备份，失败恢复；不加该选项时不改启动配置，缺旗标会在停服前拒绝。
+- Windows 10 1803+：公开 0.3.0 支持桌面版（Electron）；本地源码新增原生 Windows CLI 停态装卸，尚未发布，见下节。卡脚本按 VM 能力分叉：主进程具备 VM 时原进程执行，否则用已有带实验旗标的 Worker，不按系统名称硬判。
+- 四个解析器 json5、jsonrepair、lodash、yaml 已vendor到包内，零运行时npm依赖。POSIX 官方包管理固定 `--offline --ignore-scripts --config.auto-install-peers=false`；Windows 复用本包复制、profile link/junction 与宿主 peer 同实例链接，不重装其它依赖、不联网补 SDK。兜底卸载不依赖旧包解析器/包管理。
+- POSIX 维护路径保留 `--experimental-vm-modules` 启动资格检查。已有 systemd 单元可加 `--prepare-env` 授权备份并补旗标、失败恢复；不加不改启动配置。新 Windows CLI 路径通过既有 Worker 取得 VM 能力，不要求修改后台启动旗标，拒绝 `--prepare-env`/systemd 接管。
 
 ## 公开一键命令
 
@@ -49,7 +49,7 @@ curl -fsSL https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest/d
 
 - 桌面版安装/卸载前请从托盘**完全退出**酒馆；完成后重新启动生效。未装 Node.js 时，安装器可复用桌面版自带运行时（Electron RUN_AS_NODE）。
 - `update` 仅下载官方 GitHub Release 资产并用 SHA256SUMS 核对，不索取任何凭据。
-- Windows CLI 版需自行安装 Node.js 22+，并保证酒馆启动带 `--experimental-vm-modules`。
+- 本地 Windows CLI 适配需 PATH Node.js 22.19+（建议 24；维护会核 SQLite/zstd/Worker 能力），不借 Electron、不改官方启动脚本。正式 Release 尚不包含此适配。
 - 找不到酒馆时可用 `-TavernHome <目录>` 显式指定。
 - **Windows 推荐双击 `run-install.cmd`**（0.2.7 起随包提供）：它绕过执行策略、把菜单与进度实时显示在窗口里（不会把输出藏进日志让你盲输序号），结束时总是暂停，双击不会闪退。日志由 `install.ps1` 自己写到同目录 `install.log`；万一 PowerShell 在执行脚本前就失败（无 BOM 被按 ANSI 解码、执行策略拦截），`run-install.cmd` 会捕获并显示启动错误，尝试追加到同一日志；独立的临时错误日志路径也会显示。**脚本始终只执行一次**，不会因日志转到临时目录而重跑安装。也可继续右键 `install.ps1` 运行。
 - 0.2.7起，安装器日志**进入脚本就立即打开**（不再等跑到维护步骤）：没找到酒馆/Node、参数不合法这类早期失败同样会留下日志。日志固定为脚本同目录 `install.log`（每次覆盖），不是酒馆维护证据，不读取存档；脚本目录不可写时改放 `%TEMP%\dsh-tavern-install.log` 并在窗口里告知。等待条件不再依赖宿主类型：只要还连着控制台，除 `-Yes` 外一律停住等你看（点窗口叉或输入0才是正常退出）。
@@ -57,6 +57,28 @@ curl -fsSL https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest/d
 - “现装不同代”指插件包差异，不是酒馆版本不匹配；安装仍不盲目覆盖不同代。新卸载实现会处理可证明的升级覆盖/半装残留，0.2.9新增兜底能力见下节。
 
 升级已有旧版：先卸旧，再安装新包。获取器只在本地完整包与发行版同代时复用，否则下载固定新发行附件。坏现装包不可当执行器，但不再据此拒绝残留卸载；使用完整新包。没有装配且源码已确认卸净才是幂等，不以“没看到包”早退。不跨V1/V2认领。
+
+## Windows CLI（本地适配，未随正式 Release 发布）
+
+- **未发布**：Windows CLI 形态的适配只在本地源码与隔离夹具核对过，**不在正式 Release 支持范围内**，也不冒称实机装卸、页面或玩法验收；正式包仍按上节只支持桌面版。
+- 入口与桌面版完全相同：同一个菜单、同一个 `run-install.cmd`，也可直用 `.\install.ps1 install|uninstall|check`。CLI 需要 PATH 上的 Node.js 22+；**不借 Electron 宿主进程当 Node**（`-DesktopApp` 只属于桌面形态，拿它认领 CLI 会被拒绝）。
+- 菜单前先做一次**只读**目标识别（跑维护侧同一份 `deploy/maintenance/target.mjs` 的 `options`/`runtimeFor`，只认 CLI 形态）：识别不过就停住、不进入维护，也不写酒馆目录。
+- **装卸前请你自己执行 `dsh-tavern stop` 把后台停稳**（关浏览器或关终端都不等于停止）；装/卸完成后由你自己 `dsh-tavern start`。安装器只提示，**不代停、不代启**，也不替你设 `NODE_OPTIONS` 或改启动环境。
+- `check` 是只读预检（不改装配、不碰存档），**可以开着酒馆跑，不要求先 stop**。
+- 本地 WinCLI 请用 `install` / `uninstall` / `check`；`update` 拉的是官方最新 Release 包，在适配正式发布前不保证含本形态。
+- 官方 CLI 默认后台主进程无实验 VM 旗标时，已有能力选择会走带旗标的 Worker；隔离验证已跑真实 ESM 和宿主读写，不因此新增主旗标或改作者启动器。作者程序在 `home/apps/dsh-tavern`、profile 在 `home/profiles/tavern`，私有 SDK 在 `home/runtime/node_modules`；这里只认该实例的真实 JS bin，不借全局 DSH，也不把 CMD 包装器当 JS。
+
+自选目录可显式指定（本地适配包，非当前正式下载包）：
+
+```powershell
+# 先由你自己停止官方后台服务；关闭浏览器/终端不算停止
+& "$env:USERPROFILE\.dsh-tavern\bin\dsh-tavern.cmd" stop
+.\run-install.cmd install -TavernHome "$env:USERPROFILE\.dsh-tavern"
+# 卸载用同一入口的 uninstall；只读预检用 check，check无需先stop
+& "$env:USERPROFILE\.dsh-tavern\bin\dsh-tavern.cmd" start
+```
+
+运行中、CIM查询失败、入口相对/身份模糊、跨实例或父目录链接越界会拒绝维护，不自动结束任何进程。卸载保留存档/数据库，不把SQLite分叉转换回原版文件档；页面与卸后玩法仍需用户验收。
 
 ## 借助 DSH Desktop 安装的酒馆（0.3.0，待实机验收）
 

@@ -1,9 +1,12 @@
 // 安装目录/profile识别；只观察配置和程序，不扫描业务目录。
 // 宿主判定（2026-10-06 增）：桌面版应用树根有 `.dsh-tavern-local.json`（作者写：{host,dshHome}）；
 // 没有该文件即 CLI 版（Linux/macOS/Windows CLI 都是这一形态）。
+// Windows CLI（2026-10-07 增）：官方 WinCLI 是私有 home/runtime（node_modules 在 runtime 根下，
+// 启动器 runtime/dsh.cmd，真实入口 runtime/node_modules/@deepseek-ai/dsh/lib/bin.js）——与 POSIX
+// 的 home/runtime/lib/node_modules 布局不同，故单独一支；POSIX 分支一行未改。
 import { existsSync, readdirSync, readFileSync, realpathSync, lstatSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
 import os from 'node:os'
 const json = file => JSON.parse(readFileSync(file, 'utf8'))
@@ -155,8 +158,100 @@ function embeddedDesktopRuntimeFor(op) {
     desktop: { exe, appDir, bootstrap, electronVersion, peerRoot, root } }
 }
 
-export function runtimeFor(op) {
+/**
+ * 官方 Windows CLI 运行时（私有 home/runtime；独占新增，不接管桌面版也不动 POSIX 分支）：
+ *   root=appDir=home/runtime，peerRoot=home/runtime/node_modules，cli=**真实 JS 入口**（不是 dsh.cmd）。
+ * 返回 `cli` 为真实 JS 入口：维护驱动用 `node <cli> plugin …` 启动，cmd 包装器不能被当 JS 执行。
+ * 安装核 SDK/boot 与导入 peer 的版本，并要求解析到的 entry 就是**本地 physical 副本**（允许正规
+ * pnpm 链接，拒绝经祖先 node_modules 补缺）；uninstall 只要求私有 SDK bin 与同一把原子锁（不核 peer）。
+ * 注意：官方 WinCLI **没有私有 runtime/node.exe**，它用 system PATH 的 node 启动（见 process.mjs 存在性判定）。
+ */
+export function windowsCliRuntimeFor(op) {
+  const home = existsSync(op.home) ? realpathSync(op.home) : path.resolve(String(op.home))
+  // CLI 私有 SDK 与作者树必须属于同一个 home；不能用 A 的运行检查去改 B 的作者程序。
+  if (op.app) {
+    const app = realpathSync(op.app)
+    if (!app.startsWith(home + path.sep)) throw Error('Windows CLI 作者程序不属于当前 home，拒绝跨实例维护')
+    const marker = path.join(app, '.dsh-tavern-local.json')
+    if (existsSync(marker)) {
+      const local = json(marker)
+      if (local.host !== 'cli' || typeof local.dshHome !== 'string' || !path.isAbsolute(local.dshHome) || path.resolve(local.dshHome) !== home) {
+        throw Error('Windows CLI 作者标记与当前 home 不一致，拒绝跨实例维护')
+      }
+    }
+  }
+  const root = path.join(home, 'runtime'), peerRoot = path.join(root, 'node_modules')
+  if (!existsSync(peerRoot) || !lstatSync(peerRoot).isDirectory()) throw Error('Windows CLI 缺少私有 runtime/node_modules，拒绝认领')
+  // runtime 与 node_modules 必须是 home 内的**真实目录**：符号链接会把判据引到 home 之外的任意副本。
+  for (const [dir, label] of [[root, 'runtime'], [peerRoot, 'runtime/node_modules']]) {
+    if (lstatSync(dir).isSymbolicLink() || realpathSync(dir) !== dir || !dir.startsWith(home + path.sep)) {
+      throw Error('Windows CLI 私有 ' + label + ' 须为 home 内真实目录（不得符号链接越出）：' + dir)
+    }
+  }
+  const anchor = path.join(peerRoot, '@deepseek-ai', 'dsh', 'package.json')
+  if (!existsSync(anchor)) throw Error('Windows CLI 缺少 runtime 内 dsh 包，拒绝认领')
+  const require = createRequire(anchor)
+  // 真实入口：只认 dsh 包自己声明的 bin，且必须落在包根内（拒 ../ 越界与包外文件）。
+  const manifest = json(anchor), bin = typeof manifest.bin === 'string' ? manifest.bin : manifest.bin?.dsh
+  if (typeof bin !== 'string' || !bin.trim()) throw Error('Windows CLI 的 dsh 包未声明 bin 入口，拒绝猜测')
+  const pkgDir = path.join(peerRoot, '@deepseek-ai', 'dsh')
+  if (!existsSync(pkgDir)) throw Error('Windows CLI 缺少 runtime 内 dsh 包目录，拒绝认领')
+  const physicalRoot = realpathSync(peerRoot), physicalPkg = realpathSync(pkgDir)
+  // dsh 包的 physical 副本必须来自**私有 peerRoot**（pnpm 的 .pnpm 内部链接允许，越出即拒绝）。
+  if (!physicalPkg.startsWith(physicalRoot + path.sep)) throw Error('Windows CLI 的 dsh 包解析到私有 runtime 之外的副本，拒绝认领')
+  // pnpm 链接下 argv 里出现的是**词法别名**（peerRoot 内的链接路径），进程身份核的是 physical 副本：
+  // 两个都留。别名与 physical 不是同一个字符串，去重不能把别名丢掉（真机曾因只留 physical 而假阴性）。
+  const lexical = path.resolve(pkgDir, bin), entry = path.resolve(physicalPkg, bin)
+  if (!entry.startsWith(physicalPkg + path.sep)) throw Error('Windows CLI 的 dsh bin 越出包根，拒绝认领：' + bin)
+  if (!/\.(?:mjs|cjs|js)$/i.test(bin)) throw Error('Windows CLI 入口不是 JS 文件，拒绝认领：' + bin)
+  for (const file of new Set([lexical, entry])) {
+    if (!existsSync(file) || !lstatSync(file).isFile()) throw Error('Windows CLI 入口不是真实 JS 文件，拒绝认领：' + file)
+  }
+  // 别名必须真的指向同一个 physical 入口（Win 上路径大小写不敏感，按平台语义比对）。
+  const aliasReal = realpathSync(lexical), sameEntry = process.platform === 'win32' ? aliasReal.toLowerCase() === entry.toLowerCase() : aliasReal === entry
+  if (!sameEntry) throw Error('Windows CLI 入口别名与 physical 副本不一致，拒绝认领：' + bin)
+  const cliEntries = [...new Set([lexical, entry])]
+  // 导入 peer：安装核存在/身份/入口/版本；卸载不核 peer——卸载只需要能跑 SDK bin 与同一把原子锁。
+  const imported = ['dsh-app-boot', 'dsh-session-persistence', 'dsh-session-persistence-jsonl', 'dsh-session-query']
+  if (op.action !== 'uninstall') for (const name of imported) {
+    const peer = '@deepseek-ai/' + name, dir = path.join(peerRoot, ...peer.split('/')), file = path.join(dir, 'package.json')
+    if (!existsSync(file)) throw Error('Windows CLI 缺少宿主 peer：' + peer)
+    const data = json(file)
+    if (data.name !== peer) throw Error('Windows CLI 宿主 peer 身份不符：' + peer)
+    if (data.version !== '0.1.5-rc.2') throw Error('既有宿主peer缺失/未适配：' + peer + '；不自动安装第二份宿主')
+    let resolved
+    try { resolved = realpathSync(require.resolve(peer)) } catch { throw Error('Windows CLI 宿主 peer 入口不可解析：' + peer) }
+    const local = realpathSync(dir)
+    if (!resolved.startsWith(local + path.sep) || !local.startsWith(physicalRoot + path.sep)) {
+      throw Error('Windows CLI 宿主 peer 解析到另一副本（借祖先 node_modules 补缺）：' + peer)
+    }
+  }
+  const sdk = json(anchor)
+  if (sdk.name !== '@deepseek-ai/dsh') throw Error('Windows CLI 的 dsh 包身份不符，拒绝认领')
+  if (op.action !== 'uninstall' && sdk.version !== '0.1.5-rc.2') throw Error('只支持已适配DSH/boot 0.1.5-rc.2，不自动改宿主版本')
+  // 原子锁仍取**同一份本地副本**（uninstall 也要求），保证与安装同一把维护锁：
+  // 必须来自 peerRoot 内 @deepseek-ai/dsh-atomic-write 的 physical 副本，且解析出的入口是该副本内的**真实文件**
+  // （否则任意其它包的入口都能冒充这把锁）。
+  const atomicDir = path.join(peerRoot, '@deepseek-ai', 'dsh-atomic-write'), atomicManifest = path.join(atomicDir, 'package.json')
+  if (!existsSync(atomicManifest)) throw Error('Windows CLI 缺少原子锁模块 @deepseek-ai/dsh-atomic-write')
+  const atomicPkg = json(atomicManifest)
+  if (atomicPkg.name !== '@deepseek-ai/dsh-atomic-write') throw Error('Windows CLI 原子锁包身份不符：' + String(atomicPkg.name))
+  if (op.action !== 'uninstall' && atomicPkg.version !== '0.1.5-rc.2') throw Error('既有宿主peer缺失/未适配：@deepseek-ai/dsh-atomic-write；不自动安装第二份宿主')
+  let atomicUrl
+  try { atomicUrl = pathToFileURL(require.resolve('@deepseek-ai/dsh-atomic-write')).href } catch { throw Error('Windows CLI 缺少原子锁模块 @deepseek-ai/dsh-atomic-write') }
+  const atomic = fileURLToPath(atomicUrl), physicalAtomic = realpathSync(atomicDir)
+  if (!physicalAtomic.startsWith(physicalRoot + path.sep)) throw Error('Windows CLI 原子锁解析到另一副本，拒绝认领')
+  if (!existsSync(atomic) || !lstatSync(atomic).isFile() || !realpathSync(atomic).startsWith(physicalAtomic + path.sep)) {
+    throw Error('Windows CLI 原子锁入口不是本副本内的真实文件，拒绝认领：' + atomic)
+  }
+  return { cli: entry, cliEntries, atomicUrl, host: 'cli',
+    windowsCli: { root, appDir: root, peerRoot, cliEntry: entry, cliEntries, binRelative: bin } }
+}
+
+/** `platform` 只为纯夹具 Win 测试可注入；非 Win 原分支一行未改。 */
+export function runtimeFor(op, { platform = process.platform } = {}) {
   if (op.host === 'desktop') return desktopRuntimeFor(op)
+  if (platform === 'win32') return windowsCliRuntimeFor(op)
   const root = path.join(op.home, 'runtime', 'lib', 'node_modules', '@deepseek-ai'), cli = path.join(op.home, 'runtime', 'bin', 'dsh')
   const pkg = json(path.join(root, 'dsh', 'package.json')), boot = json(path.join(root, 'dsh-app-boot', 'package.json'))
   if (op.action !== 'uninstall' && (pkg.version !== '0.1.5-rc.2' || boot.version !== '0.1.5-rc.2')) throw Error('只支持已适配DSH/boot 0.1.5-rc.2，不自动改宿主版本')

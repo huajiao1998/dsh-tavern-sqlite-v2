@@ -178,6 +178,23 @@ export function createChatSqliteStore(options = {}) {
     return path.join(chatsRoot, safeChatId(chatId), 'archive.db')
   }
 
+  function dbSaveArchivePath(chatId) {
+    assertActive()
+    // 原件存在时即拒绝，不为导出打开同ID的SQL影子。
+    assertWritableChat(chatId)
+    const file = dbFile(chatId)
+    if (!existsSync(file)) throw Error('首版DB-only：本局没有权威SQL存档')
+    return file
+  }
+
+  function dbSaveNewArchivePath(chatId) {
+    assertActive()
+    const id = safeChatId(chatId)
+    // UUID碰撞概率再低也不能覆盖或用SQL影子遮住原件；任何同ID实物均在资源创建前拒绝。
+    if (hasLegacyArtifact(id) || existsSync(path.join(chatsRoot, id))) throw Error('DB导入Chat新身份已存在，拒绝覆盖')
+    return dbFile(id)
+  }
+
   function hasLegacyArtifact(chatId) {
     const id = safeChatId(chatId)
     return existsSync(path.join(chatsRoot, id + '.json')) || existsSync(path.join(chatsRoot, id, 'head.json'))
@@ -1426,5 +1443,5 @@ export function createChatSqliteStore(options = {}) {
     variables.dispose()
   }
 
-  return Object.freeze({ rollbackArchivePath: dbFile, detachedUpdate: true, readCurrentRollbackWorldbookRef, readRollbackWorldbook, readCurrentVariableSnapshot, read, readWindow, readHelperContext, readSessionState, readSceneImageState, readSettlementCheckpoint, readBackgroundConfig, readDisplayRuntimeState, readSlice, readSettlementBase, readChangedSlice, readChangedIndices, readViewDelta, patch, readRevision, update, version, remove, variables: variablesApi, dispose })
+  return Object.freeze({ dbSaveArchivePath, dbSaveNewArchivePath, rollbackArchivePath: dbFile, detachedUpdate: true, readCurrentRollbackWorldbookRef, readRollbackWorldbook, readCurrentVariableSnapshot, read, readWindow, readHelperContext, readSessionState, readSceneImageState, readSettlementCheckpoint, readBackgroundConfig, readDisplayRuntimeState, readSlice, readSettlementBase, readChangedSlice, readChangedIndices, readViewDelta, patch, readRevision, update, version, remove, variables: variablesApi, dispose })
 }

@@ -1,6 +1,6 @@
 {
   "name": "dsh-tavern-sqlite-v2",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "description": "V2 完整功能版本线：SQLite权威存储与干净回退，保留当前服务端MVU、卡脚本执行和分类能力；原档只读、用户手动新ID分叉",
@@ -20,6 +20,7 @@
     "./rollback-character-variables": "./lib/rollback-character-variables.js",
     "./rollback-worldbook-resources": "./lib/rollback-worldbook-resources.js",
     "./rollback-worldbook-bindings": "./lib/rollback-worldbook-bindings.js",
+    "./db-save-exchange": "./lib/db-save-exchange.js",
     "./chat-store": "./chat-sqlite-store.js",
     "./variable-store": "./variable-sqlite-store.js",
     "./sandbox-policy": "./lib/sandbox-policy.js",

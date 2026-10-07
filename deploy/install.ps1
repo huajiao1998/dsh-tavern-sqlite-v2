@@ -10,6 +10,10 @@
 # 也支持命令行直用（自动化/排错）：
 #   .\install.ps1 install|update|uninstall|check [-TavernHome <目录>] [-DesktopApp <宿主安装目录>] [-Yes]
 #
+# Windows CLI（本地未公开适配，说明见 deploy/INSTALL.md）：home 是 %USERPROFILE%\.dsh-tavern 或自选目录，
+# 自选目录用 -TavernHome 指定；装卸前请你自己执行 dsh-tavern stop，装/卸完成后自己 dsh-tavern start。
+# 本脚本只提示、不代停/代启（关浏览器或终端不等于停止），CLI 全程用 Node，不借 Electron 宿主进程。
+#
 # 约定：把压缩包解压到**酒馆目录内任意一层**（例如 D:\Program Files (x86)\DSH-Tavern\），
 # 脚本会从自身位置**向上扫描**找酒馆；找不到时再扫常见默认位置，仍找不到则报错并提示 -TavernHome。
 # 本脚本只下载官方 GitHub Release 资产，不索取任何凭据。
@@ -179,6 +183,66 @@ function Find-NodeRuntime([hashtable]$tavern) {
 }
 
 # 与实际维护共用目标/运行时判据；仅导入只读识别模块，不执行维护或启动profile。
+# 桌面形态走 Assert-DesktopTarget、Windows CLI 走 Assert-CliTarget：两套只读判据互不认领，都在菜单前调用。
+# 这里不抽公共桥接函数：桌面那条路径已有过闸断言按原文本抽取，保持一字不动，CLI 自己写一份自足桥。
+
+# Windows CLI 的服务生命周期不归安装器（stop-only）：只提示用户自己 dsh-tavern stop/start，不代跑、不 taskkill。
+# -ReadOnly 用于只读预检：预检不改装配、不碰存档，可以开着酒馆跑，不把 stop 说成必要步骤。
+function Show-CliServiceNotice([hashtable]$tavern, [switch]$After, [switch]$ReadOnly) {
+  if ($tavern.kind -ne 'cli') { return }
+  if ($ReadOnly) {
+    if ($After) { Say '  CLI 版：预检只写日志与证据，未停/未启酒馆，可继续开着跑。' }
+    else { Say '  CLI 版：只读预检不改装配、不碰存档，可以开着酒馆跑（不必先停）。' }
+    return
+  }
+  if ($After) { Say '  CLI 版：请你自己执行 dsh-tavern start 启动酒馆后再验证（安装器不代启）。' }
+  else { Warn 'CLI 版：装卸前请你自己执行 dsh-tavern stop 停稳酒馆；关浏览器或终端不等于停止，安装器不代停/代启。' }
+}
+# 失败提示里带上 CLI 的停止前提；桌面形态返回空串，原提示一字不变。
+function Get-CliStopHint([hashtable]$tavern) {
+  if ($tavern.kind -ne 'cli') { return '' }
+  return '；Windows CLI 请确认已自己执行 dsh-tavern stop 停稳（关浏览器或终端不等于停止），本安装器不代停/代启'
+}
+
+# Windows CLI 目标识别：只读跑 target 的 options/runtimeFor（与实际维护同一判据），识别不过绝不进入维护。
+# SDK/JS 入口由 target 从宿主自己的 runtime/dsh 包 bin 解析——PS1 不猜 bin、不改其它 profile、不写目标。
+function Assert-CliTarget([hashtable]$tavern, [hashtable]$node) {
+  if ($tavern.kind -eq 'desktop') { return }
+  # CLI 全程 Node：Electron 宿主进程不能当维护 Node（桌面形态才允许 RUN_AS_NODE）。
+  if ($node.runAsNode) { Fail 'CLI 版维护必须用 Node.js 运行，不能借 Electron 宿主进程当 Node；-DesktopApp 只属于桌面形态' }
+  $target = Join-Path $root 'deploy\maintenance\target.mjs'
+  $probe = @'
+import { pathToFileURL } from 'node:url';
+const { options, runtimeFor } = await import(pathToFileURL(process.argv[1]).href);
+const request = JSON.parse(Buffer.from(process.argv[2], 'base64').toString('utf8'));
+const op = options([request.action, '--home', request.home]);
+if (op.host !== 'cli') throw Error('该目录实际是桌面版宿主，不能按 CLI 认领；桌面形态请带 -DesktopApp');
+const runtime = runtimeFor(op);
+console.log(JSON.stringify({ host: op.host, cli: runtime.cli }));
+'@
+  # 与桌面同一动作映射：install/check 按 install 判资格；uninstall/update（先卸旧）按 uninstall 判资格。
+  $verb = if ($Action -eq 'install' -or $Action -eq 'check') { 'install' } else { 'uninstall' }
+  $request = @{ action = $verb; home = $tavern.home } | ConvertTo-Json -Compress
+  $encoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($request))
+  $saved = $env:ELECTRON_RUN_AS_NODE
+  $savedErrorAction = $ErrorActionPreference
+  try {
+    # 桥接不继承 Electron 的 RUN_AS_NODE；用完原样恢复，不持久改用户环境。
+    Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+    $ErrorActionPreference = 'Continue'
+    $lines = @(& $node.exe --input-type=module -e $probe $target $encoded 2>&1 | ForEach-Object { [string]$_ })
+    $code = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $savedErrorAction
+    if ($null -eq $saved) { Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue } else { $env:ELECTRON_RUN_AS_NODE = $saved }
+  }
+  if ($code -ne 0) { Fail ('CLI 目标识别未通过：' + ($lines -join "`n")) }
+  $checked = ($lines -join "`n") | ConvertFrom-Json
+  if ($checked.host -ne 'cli') { Fail ('CLI 目标识别未通过：target 判定为 ' + $checked.host) }
+  # 只记录 target 解析出的真实 JS 入口供显示；维护命令仍只走 maintenance.mjs，不由 PS1 拼运行时。
+  $tavern.sdkEntry = [string]$checked.cli
+}
+
 function Assert-DesktopTarget([hashtable]$tavern, [hashtable]$node) {
   if ($tavern.kind -ne 'desktop') {
     if ($DesktopApp) { Fail '-DesktopApp 只适用于桌面宿主，不能用它认领 CLI 酒馆' }
@@ -308,31 +372,40 @@ function Save-ReleasePackage([hashtable]$release) {
 }
 
 # ——— 5. 动作实现 ———
-function Do-Install([hashtable]$tavern, [hashtable]$node, [string]$entry) {
+function Do-Install([hashtable]$tavern, [hashtable]$node, [string]$entry, [switch]$QuietNotice) {
   Say '开始安装（离线，使用本地包）…'
+  # 更新流程自己已经念过前后 notice，这里不重复念第二遍。
+  if (-not $QuietNotice) { Show-CliServiceNotice $tavern }
   $code = Invoke-Maintenance $tavern $node $entry 'install'
-  if ($code -ne 0) { Fail ('安装失败（exit ' + $code + '）：请把上面的输出发给维护者') }
+  if ($code -ne 0) { Fail ('安装失败（exit ' + $code + '）：请把上面的输出发给维护者' + (Get-CliStopHint $tavern)) }
   Ok '安装完成。'
   if ($tavern.kind -eq 'desktop') { Say '  桌面版：请从托盘**完全退出**酒馆后重新启动，再从 Profile 菜单进入 tavern。' }
-  else { Say '  CLI 版：请按你原来的方式重启酒馆服务后验证页面。' }
+  if (-not $QuietNotice) { Show-CliServiceNotice $tavern -After }
 }
 
 function Do-Uninstall([hashtable]$tavern, [hashtable]$node, [string]$entry) {
   Say '开始卸载（离线；含安装中断/酒馆升级覆盖后的残留兜底，不碰存档和数据库）…'
+  Show-CliServiceNotice $tavern
   $code = Invoke-Maintenance $tavern $node $entry 'uninstall'
-  if ($code -ne 0) { Fail ('卸载失败（exit ' + $code + '）：请把上面的输出发给维护者') }
+  if ($code -ne 0) { Fail ('卸载失败（exit ' + $code + '）：请把上面的输出发给维护者' + (Get-CliStopHint $tavern)) }
   Ok '已卸载。若酒馆桌面版曾经运行，请重开一次使其回到原状。'
+  Show-CliServiceNotice $tavern -After
 }
 
 function Do-Check([hashtable]$tavern, [hashtable]$node, [string]$entry) {
   Say '只读预检（不改酒馆源码/装配，仅写维护日志与证据，可开着酒馆）…'
+  # 只读预检不要求先停：CLI 用 -ReadOnly 提示，不把 stop 说成必要步骤。
+  Show-CliServiceNotice $tavern -ReadOnly
   $code = Invoke-Maintenance $tavern $node $entry 'install' -Check
   if ($code -ne 0) { Fail ('预检未通过（exit ' + $code + '）') }
   Ok '预检通过。'
+  Show-CliServiceNotice $tavern -ReadOnly -After
 }
 
 function Do-Update([hashtable]$tavern, [hashtable]$node) {
   Say ('本机包版本：' + $localVersion)
+  # 更新=先卸旧再装新（两次维护），和安装/卸载同一条 CLI 生命周期：这里提示一次，不代停/代启。
+  Show-CliServiceNotice $tavern
   Say '联网查询官方最新版本…'
   $release = Get-LatestRelease
   if ($release) {
@@ -350,6 +423,7 @@ function Do-Update([hashtable]$tavern, [hashtable]$node) {
         if ($code -ne 0) { Fail ('安装新版本失败（exit ' + $code + '）：请把上面的输出发给维护者') }
         Ok ('已更新到 ' + $latest + '。')
         if ($tavern.kind -eq 'desktop') { Say '  桌面版：请从托盘**完全退出**酒馆后重新启动，再从 Profile 菜单进入 tavern。' }
+        Show-CliServiceNotice $tavern -After
         return
       }
       Warn '新版本资产不完整，改用本包覆盖安装'
@@ -363,7 +437,8 @@ function Do-Update([hashtable]$tavern, [hashtable]$node) {
   }
   $code = Invoke-Maintenance $tavern $node $localEntry 'uninstall'
   if ($code -ne 0) { Fail ('卸载旧代失败（exit ' + $code + '）：已停止，未安装') }
-  Do-Install $tavern $node $localEntry
+  Do-Install $tavern $node $localEntry -QuietNotice
+  Show-CliServiceNotice $tavern -After
 }
 
 # ——— 6. 菜单 / 直用 ———
@@ -379,8 +454,10 @@ if ($DesktopApp) { $DesktopApp = [System.IO.Path]::GetFullPath($DesktopApp) }
 $node = Find-NodeRuntime $tavern
 if (-not $node) { Fail '没找到可用的 Node 运行时：请安装 Node.js 22+，或使用带独立 Node 的酒馆桌面版。' }
 Assert-DesktopTarget $tavern $node
+Assert-CliTarget $tavern $node
 Say ('酒馆目录：' + $tavern.home + '（' + $tavern.kind + '）')
 Say ('使用运行时：' + $node.exe + $(if ($node.runAsNode) { '（Electron RUN_AS_NODE）' } else { '' }))
+if ($tavern.kind -eq 'cli' -and $tavern.sdkEntry) { Say ('  CLI 维护入口（target 解析）：' + $tavern.sdkEntry) }
 Say ''
 
 if (-not $Action) {

@@ -1,10 +1,10 @@
 // 目标profile原地离线装卸；保留原运行状态，无认证、无依赖树副本。
-import { existsSync, readFileSync, writeFileSync, realpathSync, mkdirSync, symlinkSync, rmSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, writeFileSync, realpathSync, mkdirSync, symlinkSync, rmSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import net from 'node:net'
-import { command, findProcess, readProcess, sameProcess, stripSecrets, waitExit, processAlive, desktopTavernProcesses } from './process.mjs'
+import { command, findProcess, readProcess, sameProcess, stripSecrets, waitExit, processAlive, desktopTavernProcesses, windowsCliTavernProcesses } from './process.mjs'
 import { pause, maintenanceBudget } from './budget.mjs'
 import { runtimeFor, packagePolicyArgs, assertTargetAllowed } from './target.mjs'
 import { parseSystemdProperties, systemdOwner, assertSystemdTarget, assertSystemdUnchanged } from './systemd.mjs'
@@ -71,15 +71,6 @@ export function assertLaunchMode(action, adapter, argv) {
   if (!argv.includes('--experimental-vm-modules')) throw Error('V2需要既有Node --experimental-vm-modules；默认不静默改启动命令（显式加 --prepare-env 可授权自动补旗标并留备份）')
   return { required: true }
 }
-/**
- * 桌面版（Electron）驱动：**不接管停/启**（桌面版没有可由安装器管理的服务），
- * 装包走桌面版自己的 CLI 入口（`<exe> --expose-internals <app>/lib/desktop-cli.js plugin …`），
- * 能力探针改为「维护进程 Node 能力 ＋ Worker 内 vm 能力」两项。
- *
- * 与 CLI/POSIX 路径的分工是**整体替换**，不是修补：POSIX 的进程身份（/proc argv/cwd/代次）
- * 与 systemd 所有权在 Windows 没有等价物，自造一套弱化版会削弱"认领前必须确证同一对象"的护栏。
- * 桌面版因此只做**存在性判定**：目标在跑就拒绝安装并提示用户从托盘退出，绝不杀进程。
- */
 /**
  * 读取 profile 已有 node_modules 使用的 pnpm store 目录。
  * 桌面版（Desktop 2.0.13 自带 pnpm 11.8.0）把 store 放在 `<tavernRoot>/data/cache/pnpm/v11`，
@@ -188,17 +179,19 @@ export function removeProfileLink(profileDir, packageName) {
  * （`tavern-plugin/package.json` 把 dsh-tools/dsh-agent 等列为 dependencies），走**普通 Node 上溯**
  * 就能命中，完全不经过覆盖层那条规则。
  *
- * 这里照同样的形状：把包里声明的宿主 peer 逐个 junction 到**桌面应用自己的副本**
- * （`resources/app/node_modules/@deepseek-ai/<name>`）——realpath 与 harness 加载的是同一份，
- * 保证模块实例一致（宿主补丁必须打在同一个实例上）。整包目录在卸载时一并删除，无需另记清单。
+ * 这里照同样的形状：把包里声明的宿主 peer 逐个 junction 到**宿主运行时自己的副本**
+ * （桌面版 `resources/app/node_modules/@deepseek-ai/<name>`；WinCLI `home/runtime/node_modules/...`）
+ * ——realpath 与 harness 加载的是同一份，保证模块实例一致（宿主补丁必须打在同一个实例上）。
+ * 整包目录在卸载时一并删除，无需另记清单。
+ * `label` 只用于错误文案（默认桌面版；WinCLI 传中性描述，不冒称桌面宿主）。
  */
-export function linkHostPeersIntoPackage(pkg, desktop, installDir) {
+export function linkHostPeersIntoPackage(pkg, desktop, installDir, label = '桌面版') {
   const names = Object.keys(pkg.peerDependencies || {}).filter(name => name.startsWith('@deepseek-ai/'))
   if (names.length === 0) return []
   const linked = []
   for (const name of names) {
     const source = path.join(desktop.appDir, 'node_modules', ...name.split('/'))
-    if (!existsSync(path.join(source, 'package.json'))) throw Error('桌面版运行时缺少宿主 peer：' + name + '（' + source + '）；拒绝安装一个加载不起来的插件')
+    if (!existsSync(path.join(source, 'package.json'))) throw Error(label + '运行时缺少宿主 peer：' + name + '（' + source + '）；拒绝安装一个加载不起来的插件')
     const link = path.join(installDir, 'node_modules', ...name.split('/'))
     mkdirSync(path.dirname(link), { recursive: true })
     rmSync(link, { recursive: true, force: true })
@@ -208,32 +201,93 @@ export function linkHostPeersIntoPackage(pkg, desktop, installDir) {
   return linked
 }
 
-export function createDesktopDriver(op, adapter, packageRoot, evidence, budget, { runtime, runPackage = packageCommand, presence = desktopTavernProcesses, activeBudget = budget, logger = console } = {}) {
-  const desktop = runtime.desktop, installed = path.join(op.profileDir, 'node_modules', adapter.packageName)
+/**
+ * 停止态驱动（桌面版 Electron 与原生 Windows CLI 共用；2026-10-07 由旧 createDesktopDriver 原样提取）。
+ *
+ * 共同点：**不接管停/启**——桌面版没有可由安装器管理的服务（托盘启停），WinCLI 由用户自己的
+ * `dsh-tavern stop/start` 负责；装包一律按作者 `link:` 形状（copyPackage + profile link + junction
+ * + 宿主 peer 同实例投影），**不走官方 pnpm shell**：避免离线重装其它 dep 与 store/路径坑，
+ * 本包已零 runtimeDependencies、解析器依赖 vendor 进包内。
+ *
+ * 差异只在 `mode`：
+ *   · 'desktop'     —— Electron 桌面版；子进程环境对齐桌面自家装包环境（Electron 头/离线）；
+ *                      宿主 peer 物理源=应用树 `resources/app/node_modules`；`host:'desktop'`。
+ *   · 'windows-cli' —— 原生 WinCLI 私有 runtime；子进程环境**只给 Node**（不带 ELECTRON_RUN_AS_NODE、
+ *                      不带 npm/pnpm 的 Electron 目标旗标）；宿主 peer 物理源=`home/runtime/node_modules`；
+ *                      `host:'cli'`（绝不冒认桌面宿主）。
+ *
+ * 与 CLI/POSIX 路径的分工是**整体替换**，不是修补：POSIX 的进程身份（/proc argv/cwd/代次）与
+ * systemd 所有权在 Windows 没有等价物，自造一套弱化版会削弱"认领前必须确证同一对象"的护栏。
+ * 因此两者都只做**存在性判定**：目标在跑就拒绝写入并提示用户先完整停止，**绝不杀进程、绝不代启**。
+ */
+const STOPPED_HOSTS = {
+  desktop: {
+    host: 'desktop', label: '桌面版', tag: 'desktop-driver',
+    // 桌面版由托盘退出/重开：提示语与提取前逐字一致。
+    stoppedHint: '桌面版没有可由安装器停/启的服务，请先从托盘退出酒馆后再安装',
+    startHint: '从托盘手动启动',
+    restart: '请从托盘退出并重新启动酒馆桌面版，再从 Profile 菜单进入 tavern 由用户确认页面与玩法',
+    web: '桌面版不做 HTTP/页面自动验收；插件加载与页面由用户重启后确认',
+  },
+  'windows-cli': {
+    host: 'cli', label: 'Windows CLI', tag: 'windows-cli-driver',
+    // WinCLI 由用户按原方式停/启：不改作者 start/NODE_OPTIONS，不代启、不代停。
+    stoppedHint: 'Windows CLI 由用户自行停/启，请先按原方式完整停止酒馆后再安装',
+    startHint: '按原方式手动启动',
+    restart: '请按原方式重新启动酒馆 CLI，再从已登录页面进入 tavern 由用户确认页面与玩法',
+    web: 'Windows CLI 不做 HTTP/页面自动验收；插件加载与页面由用户启动后确认',
+  },
+}
+function nodeOnlyEnv(env) {
+  const blocked = new Set(['electron_run_as_node', 'npm_config_runtime', 'npm_config_target', 'npm_config_disturl'])
+  return Object.fromEntries(Object.entries(env).filter(([key]) => !blocked.has(key.toLowerCase())))
+}
+function createStoppedDriver(op, adapter, packageRoot, evidence, budget, { mode, runtime, runPackage = packageCommand, presence = null, activeBudget = budget, logger = console } = {}) {
+  const spec = STOPPED_HOSTS[mode]
+  if (!spec) throw Error('未知的停止态宿主模式：' + mode)
+  const windowsCli = mode === 'windows-cli'
+  const layout = windowsCli ? runtime?.windowsCli : runtime?.desktop
+  if (!layout?.appDir || !layout?.peerRoot) throw Error(spec.label + '运行时描述缺失，拒绝认领目标')
+  const { host, label, tag } = spec
+  // presence 只收一个 context：WinCLI 要 {...op,...runtime}（home/profile/windowsCli 描述符），
+  // 桌面版沿用既有 { root, runtimeDir } 形状；查询失败一律上抛（fail closed），不当停止态。
+  const context = windowsCli ? { ...op, ...runtime } : { root: op.tavernRoot, runtimeDir: layout.root }
+  const findRunning = presence || (windowsCli ? windowsCliTavernProcesses : desktopTavernProcesses)
+  const installed = path.join(op.profileDir, 'node_modules', adapter.packageName)
   let prior = null, originalDependencyBytes = {}, residual = null
-  const driver = { runtime, recoveryPackage: null, wasRunning: false, host: 'desktop' }
-  const storeDir = pnpmStoreDir(op.profileDir)
-  const env = {
-    ...stripSecrets(process.env),
-    ELECTRON_RUN_AS_NODE: '1', DSH_HOME: op.home, DSH_TAVERN_CLI_HOME: op.home,
-    npm_config_runtime: 'electron', npm_config_target: desktop.electronVersion,
-    // 与桌面版自己的装包环境对齐（desktop-package-manager.mjs 同款）：disturl 指向 Electron 头，
-    // CI 抑制交互提示。缺这两项时 pnpm 在离线模式下的行为与桌面自家通路不一致。
-    npm_config_disturl: 'https://electronjs.org/headers', CI: 'true',
-    pnpm_config_update_notifier: 'false', npm_config_offline: 'true', pnpm_config_offline: 'true',
-  }
-  // pnpm 11 的 store-dir **只认 CLI flag**（桌面版 dshmarket 的 issue #244 明确记录：
-  // 项目 .npmrc / 用户 .npmrc / pnpm-workspace.yaml 一律无效，环境变量也不行），
-  // 而 store 与既有 node_modules 不一致时 pnpm 会 ERR_PNPM_UNEXPECTED_STORE 拒绝一切 add/remove。
-  // 因此把 `.modules.yaml` 记录的**既有 store** 作为显式 flag 传给这次装包（不换 store、只沿用）。
-  // **必须给值加内嵌双引号**：dsh CLI 会把参数拼成字符串再交给 pnpm，而该路径含空格；
-  // 实测四种写法只有 `--store-dir="…"` 能通过 store 校验（无引号会被截成 "D:\Program"）。
+  const driver = { runtime, recoveryPackage: null, wasRunning: false, host }
+  // pnpm store 探路只为桌面版历史通路保留（WinCLI 不读 pnpm 产物，装包只 copy+link）：
+  // pnpm 11 的 store-dir 只认 CLI flag（.npmrc/环境变量无效），与既有 node_modules 不一致会
+  // ERR_PNPM_UNEXPECTED_STORE，故沿用 `.modules.yaml` 记录的既有 store 并给值加内嵌双引号。
+  const storeDir = windowsCli ? null : pnpmStoreDir(op.profileDir)
   const storeArgs = storeDir ? ['--store-dir="' + storeDir + '"'] : []
-  const running = () => presence({ root: op.tavernRoot, runtimeDir: desktop.root })
+  // 子进程环境：桌面版对齐桌面自家装包环境；WinCLI 只给 Node（按大小写无关删掉父环境里的
+  // ELECTRON_RUN_AS_NODE 与 npm_config_runtime/target/disturl，不改父 env）。
+  const env = windowsCli
+    ? { ...nodeOnlyEnv(stripSecrets(process.env)), DSH_HOME: op.home, DSH_TAVERN_CLI_HOME: op.home }
+    : {
+      ...stripSecrets(process.env),
+      ELECTRON_RUN_AS_NODE: '1', DSH_HOME: op.home, DSH_TAVERN_CLI_HOME: op.home,
+      npm_config_runtime: 'electron', npm_config_target: layout.electronVersion,
+      // 与桌面版自己的装包环境对齐（desktop-package-manager.mjs 同款）：disturl 指向 Electron 头，
+      // CI 抑制交互提示。缺这两项时 pnpm 在离线模式下的行为与桌面自家通路不一致。
+      npm_config_disturl: 'https://electronjs.org/headers', CI: 'true',
+      pnpm_config_update_notifier: 'false', npm_config_offline: 'true', pnpm_config_offline: 'true',
+    }
+  const running = () => findRunning(context)
   const assertStopped = async () => {
+    if (windowsCli) {
+      // 只操作 home 内的真实父目录；最终本包 junction 允许，父 junction 不能带写入越界。
+      for (const leaf of [op.profileDir, path.dirname(installed), path.join(op.home, 'plugins')]) {
+        if (!leaf.startsWith(op.home + path.sep)) throw Error('Windows CLI 装配父目录越出 home，拒绝维护')
+        for (let dir = leaf; dir !== op.home; dir = path.dirname(dir)) {
+          if (existsSync(dir) && lstatSync(dir).isSymbolicLink()) throw Error('Windows CLI 装配父目录为链接，拒绝越界写入：' + dir)
+        }
+      }
+    }
     const list = running()
     if (list.length) {
-      throw Error('酒馆桌面版正在运行（PID ' + list.map(item => item.pid).join(',') + '）：桌面版没有可由安装器停/启的服务，请先从托盘退出酒馆后再安装（不杀进程、不修改运行中的程序）')
+      throw Error('酒馆' + label + '正在运行（PID ' + list.map(item => item.pid).join(',') + '）：' + spec.stoppedHint + '（不杀进程、不修改运行中的程序）')
     }
   }
   const assertAssembly = action => {
@@ -249,27 +303,34 @@ export function createDesktopDriver(op, adapter, packageRoot, evidence, budget, 
   // runner 的失败恢复**总会**调 stopFailedStart()（runner.mjs:111），抛错会让恢复在
   // `source.restore(baseline)` **之前**中断，留下"改了源码没恢复"的半装状态（真机实测踩到过）。
   // 语义：不杀任何进程、不代启；若目标在跑只响亮告警，恢复照常继续。
-  const noStop = async label => {
-    const list = running()
-    if (list.length) logger?.warn?.('[desktop-driver] ' + label + '：目标酒馆正在运行（PID ' + list.map(item => item.pid).join(',') + '），不杀进程；源码/装配恢复继续，重启后生效')
-    return { changed: false, host: 'desktop', running: list.length > 0 }
+  const noStop = async reason => {
+    let list
+    try { list = running() } catch (error) {
+      if (!windowsCli) throw error
+      logger?.warn?.('[' + tag + '] ' + reason + '：进程查询失败，不杀进程；后续写入仍须证明停止：' + error.message)
+      return { changed: false, host, running: 'unknown' }
+    }
+    if (list.length) logger?.warn?.('[' + tag + '] ' + reason + '：目标酒馆正在运行（PID ' + list.map(item => item.pid).join(',') + '），不杀进程；源码/装配恢复继续，重启后生效')
+    return { changed: false, host, running: list.length > 0 }
   }
   return Object.assign(driver, {
     async prepareEnvironment() {
+      if (windowsCli) throw Error('Windows CLI 不自动修改启动配置；请自行 dsh-tavern stop 后维护')
       // 桌面版没有 systemd 单元可改，也**不需要** --experimental-vm-modules：
       // 缺 vm 时插件自己走 Worker 路径（execArgv 带旗标），故此处不做事、不假装成功。
-      return { changed: false, host: 'desktop', reason: '桌面版经 Worker 取得 vm 能力，无需环境预修' }
+      return { changed: false, host, reason: '桌面版经 Worker 取得 vm 能力，无需环境预修' }
     },
     async preflight(action, { residual: cleanResidual = false } = {}) {
+      if (windowsCli && !op.check) await assertStopped()
       const pkg = json(path.join(packageRoot, 'package.json'))
       if (pkg.name !== adapter.packageName) throw Error('维护入口与本地包身份不一致')
       if (!cleanResidual) assertPackageDependencies(pkg, packageRoot)
       for (const peer of cleanResidual ? [] : Object.keys(pkg.peerDependencies || {})) {
-        const manifest = path.join(desktop.peerRoot, ...peer.split('/'), 'package.json')
+        const manifest = path.join(layout.peerRoot, ...peer.split('/'), 'package.json')
         if (!existsSync(manifest) || json(manifest).version !== '0.1.5-rc.2') throw Error('桌面版既有宿主peer缺失/未适配：' + peer + '；不自动安装第二份宿主')
         // 宿主 peer 还必须在**桌面应用自己**的 node_modules 里存在——投影（见 ensureHostPeerLinks）
         // 就是指向那一份，保证与 harness 加载的是同一模块实例。
-        const hostCopy = path.join(desktop.appDir, 'node_modules', ...peer.split('/'), 'package.json')
+        const hostCopy = path.join(layout.appDir, 'node_modules', ...peer.split('/'), 'package.json')
         if (!existsSync(hostCopy)) throw Error('桌面版应用侧缺少宿主 peer 同实例副本：' + peer + '（' + hostCopy + '）')
       }
       prior = profileState(op.profileDir)
@@ -286,7 +347,8 @@ export function createDesktopDriver(op, adapter, packageRoot, evidence, budget, 
         if (action !== 'uninstall') throw Error('兜底残留路径仅用于卸载')
         residual = residualAssembly({ home: op.home, profileDir: op.profileDir, packageName: adapter.packageName, evidence })
         driver.wasRunning = false
-        return { noop: false, wasRunning: false, host: 'desktop', runningNow: running().length > 0, assemblyPresent: residual.present }
+        const runningNow = running().length > 0
+        return { noop: false, wasRunning: windowsCli && !!op.check && runningNow, host, runningNow, assemblyPresent: residual.present }
       }
       // `--check` 是只读预检，允许酒馆开着；真正写前的停止态断言在 assertIdentity/manage 里
       //（runner 在装包前还会再调一次 assertStopped）。这里只记录当前是否在跑，便于如实报告。
@@ -296,8 +358,9 @@ export function createDesktopDriver(op, adapter, packageRoot, evidence, budget, 
       await runPackage(process.execPath, ['--input-type=module', '-e', probe], { cwd: op.app, env, timeout: activeBudget.remaining(2500) })
       // 能力探针②：**Worker 内**必须有 vm.SourceTextModule（这是桌面版跑服务端 ESM 卡脚本的唯一通路）。
       // 注意 clearTimeout：不清理的话定时器会把探针进程多吊住 8 秒（每次安装白等）。
-      const workerProbe = "import {Worker} from 'node:worker_threads';const code=\"const vm=require('node:vm');const {parentPort}=require('node:worker_threads');parentPort.postMessage(typeof vm.SourceTextModule)\";const worker=new Worker(code,{eval:true,execArgv:['--experimental-vm-modules']});const seen=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Worker 探针超时')),8000);worker.once('message',message=>{clearTimeout(timer);resolve(message);worker.terminate()});worker.once('error',error=>{clearTimeout(timer);reject(error)})});if(seen!=='function')throw Error('Worker 内缺少 vm.SourceTextModule')"
-      await runPackage(process.execPath, ['--input-type=module', '-e', workerProbe], { cwd: op.app, env, timeout: activeBudget.remaining(9000) })
+      const desktopWorkerProbe = "import {Worker} from 'node:worker_threads';const code=\"const vm=require('node:vm');const {parentPort}=require('node:worker_threads');parentPort.postMessage(typeof vm.SourceTextModule)\";const worker=new Worker(code,{eval:true,execArgv:['--experimental-vm-modules']});const seen=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Worker 探针超时')),8000);worker.once('message',message=>{clearTimeout(timer);resolve(message);worker.terminate()});worker.once('error',error=>{clearTimeout(timer);reject(error)})});if(seen!=='function')throw Error('Worker 内缺少 vm.SourceTextModule')"
+      const workerProbe = windowsCli ? "import {Worker} from 'node:worker_threads';const code=\"const vm=require('node:vm');const {parentPort}=require('node:worker_threads');(async()=>{const m=new vm.SourceTextModule('export default 42');await m.link(()=>{});await m.evaluate();if(typeof vm.SyntheticModule!=='function')throw Error('缺少SyntheticModule');parentPort.postMessage(m.namespace.default)})().catch(e=>{throw e})\";const worker=new Worker(code,{eval:true,execArgv:['--experimental-vm-modules']});let timer;try{const seen=await new Promise((resolve,reject)=>{timer=setTimeout(()=>reject(Error('Worker探针超时')),4000);worker.once('message',resolve);worker.once('error',reject)});if(seen!==42)throw Error('Worker ESM核验失败')}finally{clearTimeout(timer);await worker.terminate()}" : desktopWorkerProbe
+      await runPackage(process.execPath, ['--input-type=module', '-e', workerProbe], { cwd: op.app, env, timeout: activeBudget.remaining(windowsCli ? 5000 : 9000) })
       const present = !!prior.deps[adapter.packageName]
       if (present !== prior.bundles.includes(adapter.packageName) || present !== existsSync(installed)) throw Error('目标装配不完整，拒绝猜测')
       let withdrawnClean = false
@@ -316,7 +379,7 @@ export function createDesktopDriver(op, adapter, packageRoot, evidence, budget, 
         }
       } else if (existsSync(path.join(op.app, STANDARD_RECORD))) throw Error('包不在但接缝在，拒绝认领')
       driver.wasRunning = false
-      return { noop: (action === 'install' ? present : !present) && !withdrawnClean, wasRunning: false, host: 'desktop', runningNow, ...(withdrawnClean ? { withdrawnClean: true } : {}) }
+      return { noop: (action === 'install' ? present : !present) && !withdrawnClean, wasRunning: windowsCli && !!op.check && runningNow, host, runningNow, ...(withdrawnClean ? { withdrawnClean: true } : {}) }
     },
     async manageResidual(action) {
       await assertStopped()
@@ -332,16 +395,26 @@ export function createDesktopDriver(op, adapter, packageRoot, evidence, budget, 
     stop: () => noStop('停止请求'),
     stopIfAlive: () => noStop('停止请求'),
     stopFailedStart: () => noStop('失败启动清理'),
-    async start() { logger?.warn?.('[desktop-driver] 桌面版不代启动酒馆：请用户从托盘手动启动'); return null },
+    async start() { logger?.warn?.('[' + tag + '] 不代启动酒馆：请用户' + spec.startHint); return null },
     async stoppedAfterError() { return (await running()).length === 0 },
     beginRecovery() {},
     async restorePackage() {
       // 与 POSIX 驱动同语义：把 **profile 装配**恢复到操作前状态——本来就装着 ⇒ 用恢复包重装；
       // 本来没装 ⇒ 卸掉；两态都没有 ⇒ 断言确实未装。**绝不往包源（packageRoot）写**。
-      if (prior?.deps?.[adapter.packageName]) await driver.manage('install', driver.recoveryPackage || packageRoot)
+      if (prior?.deps?.[adapter.packageName]) {
+        await driver.manage('install', driver.recoveryPackage || packageRoot)
+        if (windowsCli) {
+          // 旧代恢复只还原本插件的原依赖说明；其他字段沿用当前值，不把旧profile整档盖回。
+          await assertStopped()
+          const file = path.join(op.profileDir, 'package.json'), current = json(file)
+          current.dependencies[adapter.packageName] = prior.deps[adapter.packageName]
+          writeFileSync(file, JSON.stringify(current, null, 2) + '\n', 'utf8')
+          assertAssembly('install')
+        }
+      }
       else if (profileState(op.profileDir).deps[adapter.packageName] || existsSync(installed)) await driver.manage('uninstall')
       else assertAssembly('uninstall')
-      return { changed: true, host: 'desktop' }
+      return { changed: true, host }
     },
     async manage(action, root = packageRoot) {
       await assertStopped()
@@ -359,7 +432,7 @@ export function createDesktopDriver(op, adapter, packageRoot, evidence, budget, 
         rmSync(installDir, { recursive: true, force: true })
         mkdirSync(path.dirname(installDir), { recursive: true })
         copyPackage(root, installDir)
-        linkHostPeersIntoPackage(json(path.join(root, 'package.json')), desktop, installDir)
+        linkHostPeersIntoPackage(json(path.join(root, 'package.json')), layout, installDir)
         writeProfileLink(op.profileDir, adapter.packageName, installDir)
         rmSync(linkPath, { recursive: true, force: true })
         mkdirSync(path.dirname(linkPath), { recursive: true })
@@ -374,26 +447,38 @@ export function createDesktopDriver(op, adapter, packageRoot, evidence, budget, 
       }
     },
     async verify(action, _adapter, _opts = {}) {
+      if (windowsCli) await assertStopped()
       // `existing:true` 是 runner **幂等路径**（已处于目标状态时的复核）的语义，
       // 不是"对运行中实例复验"——这里绝不能抛，否则桌面端重装/幂等检查直接失败。
       // 桌面版不做进程/HTTP 验收：酒馆由用户退出/重开，页面由用户确认。
       assertAssembly(action)
       if (action === 'install' && !adapter.checkStandardSeams({ appDir: op.app }).ready) throw Error('完整源码接缝未ready')
       return {
-        runtimeVerified: false, state: 'stopped', host: 'desktop',
-        requiresRestart: '请从托盘退出并重新启动酒馆桌面版，再从 Profile 菜单进入 tavern 由用户确认页面与玩法',
-        webVerification: '桌面版不做 HTTP/页面自动验收；插件加载与页面由用户重启后确认',
+        runtimeVerified: false, state: 'stopped', host,
+        requiresRestart: spec.restart,
+        webVerification: spec.web,
       }
     },
     async verifyRecovery() { return driver.verify('install', adapter, {}) },
   })
 }
 
-export function createDriver(op, adapter, packageRoot, evidence, budget, { processFinder = findProcess, processReader = readProcess, runPackage = packageCommand, request = fetch, runtimeResolver = runtimeFor, runCommand = command, portOpen = tcpOpen, alive = processAlive } = {}) {
-  const runtime = runtimeResolver(op), context = { ...op, ...runtime }, installed = path.join(op.profileDir, 'node_modules', adapter.packageName)
+export function createDesktopDriver(op, adapter, root, evidence, budget, options = {}) {
+  return createStoppedDriver(op, adapter, root, evidence, budget, { ...options, mode: 'desktop' })
+}
+export function createWindowsCliDriver(op, adapter, root, evidence, budget, options = {}) {
+  if (op['systemd-unit'] || op['prepare-env']) throw Error('Windows CLI 不接管 systemd 或启动配置')
+  return createStoppedDriver(op, adapter, root, evidence, budget, { ...options, mode: 'windows-cli' })
+}
+
+export function createDriver(op, adapter, packageRoot, evidence, budget, { platform = process.platform, processFinder = findProcess, processReader = readProcess, runPackage = packageCommand, request = fetch, runtimeResolver = runtimeFor, runCommand = command, portOpen = tcpOpen, alive = processAlive } = {}) {
+  const runtime = runtimeResolver(op, { platform }), context = { ...op, ...runtime }, installed = path.join(op.profileDir, 'node_modules', adapter.packageName)
   // 桌面版（Electron）走整体替换的独立驱动：POSIX 的进程身份与 systemd 所有权在 Windows 无等价物，
   // 不做"半套身份校验"，只做存在性判定＋桌面版自己的装包入口。CLI/POSIX 路径一行未改。
   if (op.host === 'desktop') return createDesktopDriver(op, adapter, packageRoot, evidence, budget, { runtime, runPackage })
+  // 路由按**目标平台**（可注入；默认 ambient）而非硬读 process.platform：POSIX 意图的合成夹具显式传
+  // platform:'linux' 后仍走原 CLI 路径，Windows 真实宿主不传即为 win32，护栏不放宽。
+  if (platform === 'win32' && op.host === 'cli') return createWindowsCliDriver(op, adapter, packageRoot, evidence, budget, { runtime, runPackage })
   let original, prior, unit, latest, stopSignalled = false, launch = 0, recovery = false, activeBudget = budget, residual = null
   let originalDependencyBytes
   const env = { ...stripSecrets(process.env), DSH_HOME: op.home, DSH_TAVERN_CLI_HOME: op.home, pnpm_config_update_notifier: 'false', npm_config_offline: 'true', pnpm_config_offline: 'true' }

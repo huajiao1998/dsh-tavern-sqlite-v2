@@ -129,6 +129,90 @@ export function windowsProcessList() {
   })).filter(item => Number.isInteger(item.pid) && item.pid > 0)
 }
 
+/** 命令行分词：只在引号外按空白切；引号内的中文/空格路径不被截断（`\"` 视作字面引号）。 */
+function windowsCliArgvTokens(text) {
+  const tokens = []
+  let current = '', quoted = false
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (ch === '\\' && text[i + 1] === '"') { current += '"'; i++; continue }
+    if (ch === '"') { quoted = !quoted; continue }
+    if (!quoted && /\s/.test(ch)) { if (current) { tokens.push(current); current = '' } continue }
+    current += ch
+  }
+  if (current) tokens.push(current)
+  return tokens
+}
+
+/** 绝对路径判定（含 Windows 盘符/UNC，跨平台一致；POSIX 上 `C:\…` 也算绝对）。 */
+function isAbsolutePath(value) {
+  return path.isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value) || /^\\\\/.test(value)
+}
+
+/**
+ * Windows CLI 专用只读进程清单：**只列 `Name='node.exe'`**，只取 pid/exe/CommandLine。
+ * 与 `windowsProcessList`（列全部进程）分开，避免为一次存在性判定拖回整机进程表。
+ * UTF-8 输出、5 秒超时（`command` 默认 timeout=5000、encoding='utf8'）：中文/空格路径若按 GBK
+ * 解出乱码，路径匹配会**假阴性**（把运行中的酒馆判成停止），所以命令内先钉死 UTF-8。
+ * 查询失败、输出不可解析、任意 node 候选缺关键身份（exe/CommandLine）→ 抛错 fail closed。
+ * `run` 只作纯夹具注入点（默认仍走同一条 `command` 只读通道）。
+ */
+export function windowsCliProcessList({ run = command } = {}) {
+  const script = "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress"
+  const text = run('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 5000 })
+  let raw
+  try { raw = JSON.parse(String(text).replace(/^\uFEFF/, '').trim() || '[]') } catch (error) { throw Error('Windows CLI 进程清单输出不可解析：' + (error && error.message)) }
+  const rows = (Array.isArray(raw) ? raw : [raw]).map(item => ({
+    pid: Number(item?.ProcessId),
+    exe: item?.ExecutablePath == null ? '' : String(item.ExecutablePath).trim(),
+    argv: item?.CommandLine == null ? '' : String(item.CommandLine).trim(),
+  }))
+  // 损坏行**不得被 filter 掉**：滤空之后的空清单会被上层读成"酒馆已停止"（假阴性），一律 fail closed。
+  if (rows.some(item => !Number.isInteger(item.pid) || item.pid <= 0)) throw Error('Windows CLI 进程清单含无 PID 的行，拒绝认作停止态')
+  if (rows.some(item => !item.exe || !item.argv)) throw Error('Windows node 候选缺少关键身份（exe/CommandLine），拒绝认作停止态')
+  return rows
+}
+
+/**
+ * Windows CLI 酒馆是否在运行（**只存在性，不认领**）：Windows 拿不到目标进程的 cwd/环境，
+ * 故不 claim cwd/env、不杀不启。官方 WinCLI **没有私有 runtime/node.exe**，它由 system PATH 的
+ * `node`（如 `D:\Program Files (x86)\nodejs\node.exe`）启动，所以**不按 exe 路径限制**，只要求启动器
+ * 是 node.exe，身份由命令行里的**完整绝对 SDK JS 入口参数**决定（按 token 词边界比对，不按路径包含）。
+ *   · 目标 CLI 在跑（任一份入口：pnpm 词法别名或 physical）→ 返回（`{ pid, exe, argv }`）；
+ *   · 候选 exe/命令行不完整 → 抛错；相对 SDK 入口（`node lib/bin.js --profile tavern`）无法归属 → 抛错；
+ *   · 明确无关的 node 脚本（别的绝对 JS 脚本、不含该入口）→ 跳过，不误判成酒馆。
+ */
+export function windowsCliTavernProcesses(context, { list = windowsCliProcessList } = {}) {
+  const home = context?.home, windowsCli = context?.windowsCli
+  const entries = (windowsCli?.cliEntries?.length ? windowsCli.cliEntries : [windowsCli?.cliEntry]).filter(value => typeof value === 'string' && path.isAbsolute(value))
+  if (!home || entries.length === 0) throw Error('Windows CLI 目标缺少私有 home/入口，拒绝认领')
+  const normalize = value => String(value).replace(/[\\/]+$/, '').replace(/\//g, '\\').toLowerCase()
+  const wanted = new Set(entries.map(normalize))
+  const binRelative = normalize(windowsCli?.binRelative || path.basename(entries[0])).replace(/^\\+/, '')
+  const profile = String(context?.profile || 'tavern')
+  const found = [], problems = [], ambiguous = []
+  for (const item of list()) {
+    if (!item || !Number.isInteger(item.pid) || item.pid <= 0) { problems.push('进程清单含无 PID 的 node 候选'); continue }
+    const exe = String(item.exe || '').trim(), argv = String(item.argv || '').trim()
+    if (!exe || !argv) { problems.push('PID ' + item.pid + ' 的 node 候选缺少 exe/命令行'); continue }
+    if (normalize(exe).split('\\').pop() !== 'node.exe') continue
+    const tokens = windowsCliArgvTokens(argv)
+    // 词边界：整 token 等于入口才算命中（`<entry>fake.js`、别处同名 bin.js 都不算）。
+    if (tokens.some(token => wanted.has(normalize(token)))) { found.push({ pid: item.pid, exe, argv }); continue }
+    // 相对入口无法归属：可能是同一套私有 SDK 的另一条启动路径，绝不能当"不误命中"的停止态。
+    const shaped = tokens.some((token, i) => token === '--profile' && tokens[i + 1] === profile)
+    const relative = tokens.find(token => {
+      if (isAbsolutePath(token) || token.startsWith('-') || !/\.(?:mjs|cjs|js)$/i.test(token)) return false
+      const value = normalize(token)
+      return shaped || value === binRelative || value.endsWith('\\' + binRelative)
+    })
+    if (relative) ambiguous.push('PID ' + item.pid + ' → ' + relative)
+  }
+  if (ambiguous.length) throw Error('Windows CLI 候选的相对入口无法归属私有 runtime，拒绝认作停止态：' + ambiguous.join('；'))
+  if (problems.length) throw Error('Windows CLI 进程身份不可确证，拒绝认作停止态：' + problems.join('；'))
+  return found
+}
+
 /**
  * 桌面版酒馆是否在运行：匹配**启动器**与**该运行时目录下的可执行文件**。
  * 必须按完整路径比较——用户机器上可能同时装着独立版 `DSH Desktop`（同名进程）。

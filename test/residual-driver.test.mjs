@@ -35,7 +35,7 @@ function fixture(t, host) {
   const op = { home, app, profile: 'tavern', profileDir, host, action: 'uninstall' }
   const makeDriver = ev => host === 'desktop'
     ? createDesktopDriver(op, adapter, product, ev, maintenanceBudget(), { runtime, presence: () => [], runPackage: async () => { throw Error('卸载不能依赖探针/包管理') }, logger: { warn() {} } })
-    : createDriver(op, adapter, product, ev, maintenanceBudget(), { runtimeResolver: () => runtime, processFinder: () => null, runPackage: async () => { throw Error('卸载不能依赖探针/包管理') }, runCommand: () => { throw Error('停止态不能启动服务') } })
+    : createDriver(op, adapter, product, ev, maintenanceBudget(), { runtimeResolver: () => runtime, platform: 'linux', processFinder: () => null, runPackage: async () => { throw Error('卸载不能依赖探针/包管理') }, runCommand: () => { throw Error('停止态不能启动服务') } })
   const run = (ev = evidence) => executeMaintenance({ action: 'uninstall', adapter, driver: makeDriver(ev), source, evidenceDir: ev, progress: text => events.push(text), budget: maintenanceBudget() })
   return { root, home, app, profileDir, evidence, source, events, installed, sentinel, makeDriver, run }
 }

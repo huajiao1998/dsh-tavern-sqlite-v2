@@ -15,7 +15,7 @@ const decode = (body, rel) => {
   if (typeof body !== 'string' || Buffer.from(body, 'base64').toString('base64') !== body) throw Error('残留前像编码不合法：' + rel)
   return Buffer.from(body, 'base64')
 }
-export const AUTHOR_IMAGES_SHA256 = '1863074b7fab72e81fe0d107641db515073000090605dd26299d191c84c4095d'
+export const AUTHOR_IMAGES_SHA256 = '8ad4f84f5066b73b3c0cbc91ddb48e20c8357b7ed91aa4764cf30fb779293f72'
 export function loadAuthorCleanImages(file = new URL('./author-clean-images.json.gz', import.meta.url)) {
   const bytes = readFileSync(file)
   if (hash(bytes) !== AUTHOR_IMAGES_SHA256) throw Error('有限官方恢复资产缺失或摘要不符，不能用损坏恢复材料卸载')
@@ -196,7 +196,11 @@ export async function executeResidualUninstall({ adapter, driver, source, eviden
     // disposer 正常退出可能已撤净：停止后重新规划，不把停前已装态强加到干净态。
     const stoppedPlan = planResidualUninstall({ source, adapter, catalog })
     changed = true
-    await step('撤残留/归档有限源码前像', () => { applied = applyResidualPlan(source, stoppedPlan, evidenceDir); return applied })
+    await step('撤残留/归档有限源码前像', async () => {
+      if (driver.runtime?.windowsCli) await driver.assertStopped()
+      applied = applyResidualPlan(source, stoppedPlan, evidenceDir)
+      return applied
+    })
     await step('移除本插件装配；不依赖pnpm/损坏旧包，不改其他插件', () => driver.manageResidual('uninstall'))
     applied.verify()
     if (state.wasRunning) process = await step('按原方式恢复本实例', () => driver.start())

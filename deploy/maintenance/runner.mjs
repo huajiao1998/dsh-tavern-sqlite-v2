@@ -70,7 +70,11 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
       const removable = action === 'install' ? await step('幂等安装：验证卸载前像恢复链', () => rehearseSource('uninstall', source, adapter, evidenceDir, () => budget.remaining())) : null
       let undo
       try {
-        if (removable?.recovery) undo = commitRecoveredPreimage(source, removable)
+        if (removable?.recovery) {
+          // Windows CLI 不接管服务；即使幂等路径只修恢复元数据，也必须在写前重核停止。
+          if (driver.runtime?.windowsCli) await driver.assertStopped()
+          undo = commitRecoveredPreimage(source, removable)
+        }
         validation = await step('幂等检查；保留原运行状态', () => driver.verify(action, adapter, { existing: true }))
       } catch (error) { undo?.(); throw error }
       return { changed: !!removable?.recovery, action, line: adapter.line, initialState: wasRunning ? 'running' : 'stopped', finalState: wasRunning ? 'running' : 'stopped', elapsedMs: Math.round(budget.elapsed()), verified: true, verificationScope: wasRunning ? 'source-assembly-basic-health' : 'source-assembly-stopped', originalPlayabilityVerified: false, ...validation, ...(removable?.recovery ? { preimageRecovery: removable.recovery.provenance, sourceMetadataRepaired: true } : {}), data: '保留，未访问/转换/删除' }
@@ -96,7 +100,11 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
     })
     if (action === 'install') {
       await step('目标profile官方离线装包/回读', () => driver.manage('install'))
-      await step('作者未加载时接入插件接缝', () => { source.protect(); adapter.applyStandardSeams({ appDir: source.root }); if (!adapter.checkStandardSeams({ appDir: source.root }).ready) throw Error('接缝未ready') })
+      await step('作者未加载时接入插件接缝', async () => {
+        if (driver.runtime?.windowsCli) await driver.assertStopped()
+        source.protect(); adapter.applyStandardSeams({ appDir: source.root })
+        if (!adapter.checkStandardSeams({ appDir: source.root }).ready) throw Error('接缝未ready')
+      })
     } else if (state.withdrawnClean) {
       // 退出撤缝态：源码已是作者原像（disposer撤净），无接缝可卸，仅移除装配；原档与数据库不动。
       await step('卸载装配（源码已为作者原像，无接缝可卸）；保留原档和数据库', () => { assertSourceUninstalled(source) })
@@ -129,6 +137,7 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
         else await driver.stopFailedStart?.()
         if (baseline) {
           await driver.restorePackage()
+          if (driver.runtime?.windowsCli) await driver.assertStopped()
           source.restore(baseline)
           if (!baseline[STANDARD_RECORD]) source.protect()
           source.syntax()
@@ -184,16 +193,15 @@ export function runCli(url, adapter) {
   if (!process.argv[1] || path.resolve(process.argv[1]) !== fileURLToPath(url)) return
   const main = async () => {
     if (process.argv.includes('--help')) {
-      console.log(`${adapter.packageName} 离线装卸（macOS/Linux/WSL2 CLI；作者2.5.0/DSH rc.2）\nnode deploy/maintenance.mjs install|uninstall [--home <已有安装目录>] [--desktop-app <嵌入式DSH Desktop安装根>] [--port <核对端口>] [--systemd-unit <既有单元>] [--prepare-env] [--check] [--background]\n默认apply；本地完整包不联网、不索取网页凭证、不复制依赖/存档。运行中停止后按原方式恢复；原本停止则保持停止。包就绪后60秒成功预算；异常恢复独立处理。网页/真实玩法由用户确认。\nV2运行中目标须已带--experimental-vm-modules；默认不改启动配置。--prepare-env（仅install）显式授权两件环境预修：①systemd单元ExecStart补VM旗标（备份原unit、失败自动回滚）；②旧代维护残留备份隔离到证据目录（只移动不删除）。四个解析依赖须离线可用，不补装宿主peer、不联网补依赖。`)
+      console.log(`${adapter.packageName} 离线装卸（Windows/macOS/Linux/WSL2 CLI；作者2.5.0/DSH rc.2）\nnode deploy/maintenance.mjs install|uninstall [--home <已有安装目录>] [--desktop-app <嵌入式DSH Desktop安装根>] [--port <核对端口>] [--systemd-unit <既有单元>] [--prepare-env] [--check] [--background]\n默认apply；本地完整包不联网、不索取网页凭证、不复制依赖/存档。Linux/macOS运行中停止后按原方式恢复，原本停止则保持停止。Windows CLI/桌面不自动停启：请自行完整停止再安装/卸载，成功后自行启动；运行/身份不明拒绝写入。包就绪后60秒成功预算；异常恢复独立处理。网页/真实玩法由用户确认。\nV2运行中目标须已带--experimental-vm-modules；默认不改启动配置。--prepare-env（仅install）显式授权两件环境预修：①systemd单元ExecStart补VM旗标（备份原unit、失败自动回滚）；②旧代维护残留备份隔离到证据目录（只移动不删除）。四个解析依赖须离线可用，不补装宿主peer、不联网补依赖。`)
       return
     }
     if (!['linux', 'darwin', 'win32'].includes(process.platform)) throw Error('不支持的平台：' + process.platform)
     const op = options(process.argv.slice(2)); assertTargetAllowed(op)
-    // 原生 Windows 目前只放行**桌面版**（Electron，宿主标记 .dsh-tavern-local.json）：
-    // 它的停/启不由安装器接管（只做存在性判定＋提示用户从托盘退出），装包走桌面版自己的 CLI。
-    // Windows **CLI 版**需要把服务停/启交还作者的生命周期命令，该通路尚未接线——明确拒绝，不猜测。
-    if (process.platform === 'win32' && op.host !== 'desktop') {
-      throw Error('原生 Windows 仅支持独立酒馆桌面包或借助 DSH Desktop 的桌面形态；Windows CLI 版安装通路尚未接线，拒绝猜测')
+    // 原生 Windows 桌面与 CLI 都只维护停止态：各自验证实际宿主，绝不认领 POSIX 启停身份。
+    // CLI 运行时由 runtimeFor 绑定私有 SDK 的真实 JS 入口；不是删掉拒绝后旁路到 POSIX driver。
+    if (process.platform === 'win32' && op.host === 'cli' && (op['systemd-unit'] || op['prepare-env'])) {
+      throw Error('Windows CLI 不接管 systemd 或启动配置；请自行 dsh-tavern stop 后维护，不使用 --prepare-env')
     }
     // 每次Node交接的启动/import/目录识别也算入共享时间，不在worker入口重新从零计时。
     const budget = maintenanceBudget({ milliseconds: successBudgetMs(op.host), elapsed: Number(op.elapsed || 0) + performance.now() }), root = path.dirname(path.dirname(fileURLToPath(url))), runtime = runtimeFor(op)

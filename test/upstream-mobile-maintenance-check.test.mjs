@@ -63,7 +63,7 @@ function fixture(t, host) {
       runPackage, presence: () => [], logger: { warn() {} },
     })
     : createDriver(op, adapter, product, evidence, budget, {
-      processFinder: () => null, runtimeResolver: () => ({ cli, cliEntries: [cli] }),
+      platform: 'linux', processFinder: () => null, runtimeResolver: () => ({ cli, cliEntries: [cli] }),
       runPackage, runCommand: () => '', portOpen: async () => false,
     })
   const source = sourceAccess(app, adapter.targets)
