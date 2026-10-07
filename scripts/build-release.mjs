@@ -19,7 +19,7 @@ const packRoot = path.join(out, 'package'); fs.mkdirSync(packRoot)
 const { packageFiles } = await import('../deploy/maintenance/runner.mjs')
 const { assertPackageDependencies } = await import('../deploy/maintenance/driver.mjs')
 const { loadAuthorCleanImages } = await import('../deploy/maintenance/residual-uninstall.mjs')
-const packFilter = rel => rel !== 'README.md' && rel !== 'install.log' && !rel.endsWith(path.sep + 'install.log') && !rel.startsWith('test' + path.sep)
+const packFilter = rel => rel !== 'README.md' && rel !== 'INSTALL.zh-CN.md' && rel !== '安装指南.md' && rel !== 'install.log' && !rel.endsWith(path.sep + 'install.log') && !rel.startsWith('test' + path.sep)
 for (const rel of packageFiles(root).filter(packFilter)) {
   const target = path.join(packRoot, rel); fs.mkdirSync(path.dirname(target), { recursive: true }); fs.copyFileSync(path.join(root, rel), target)
 }
@@ -38,8 +38,10 @@ fs.writeFileSync(path.join(packRoot, 'package.json'), JSON.stringify({ ...pkg, f
     if (!fs.existsSync(path.join(packRoot, required))) throw Error('发行包缺兜底卸载模块：' + required)
   }
 }
-// 公开包README独立，不把运维README及内部台账链接带进发行包。
-fs.writeFileSync(path.join(packRoot, 'README.md'), fs.readFileSync(path.join(root, 'deploy', 'INSTALL.md'), 'utf8'), 'utf8')
+// 发行包不带包根 README.md：包根 README 是仓库门面，曾被安装说明覆盖。
+// 包内中文文件名跨平台解码不可靠（Windows tar 默认按系统代码页写条目，曾把中文名写成乱码），
+// 中文安装指南改用 ASCII 文件名，用户入口一律用它，构建门禁同时拒绝 README 回流。
+fs.writeFileSync(path.join(packRoot, 'INSTALL.zh-CN.md'), fs.readFileSync(path.join(root, 'deploy', 'INSTALL.md'), 'utf8'), 'utf8')
 const source = fs.readFileSync(path.join(root, 'deploy', 'bootstrap.mjs'), 'utf8')
 const template = fs.readFileSync(path.join(root, 'deploy', 'install.template.sh'), 'utf8')
 // 替换一律用函数形式：replacement 字符串里的 $&/$` 等会被当替换模式展开

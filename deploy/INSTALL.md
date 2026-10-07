@@ -11,23 +11,25 @@
 
 ## 公开一键命令
 
-安装到已有酒馆目录：
+安装到已有酒馆（默认自动识别目录，无需手填路径）：
 
 ```sh
-curl -fsSL https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest/download/install.sh | sh -s -- install --home /绝对路径/已有酒馆安装目录
+curl -fsSL https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest/download/install.sh | sh -s -- install
 ```
 
 卸载（保留原档和所有数据库）：
 
 ```sh
-curl -fsSL https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest/download/install.sh | sh -s -- uninstall --home /绝对路径/已有酒馆安装目录
+curl -fsSL https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest/download/install.sh | sh -s -- uninstall
 ```
 
 检查恢复材料，但不改源码、装配或服务状态：
 
 ```sh
-curl -fsSL https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest/download/install.sh | sh -s -- uninstall --check --home /绝对路径/已有酒馆安装目录
+curl -fsSL https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest/download/install.sh | sh -s -- uninstall --check
 ```
+
+**目录默认自动识别**：检查 `DSH_TAVERN_CLI_HOME`、`DSH_HOME`、当前工作目录和 `~/.dsh-tavern` 下的已有 tavern profile。找到唯一目标就直接继续；只有未找到或多个实例时才提示用 `--home` 指定目标，不把手填路径作为正常安装步骤，也不扫描全盘猜目录。自定义位置若不在这些候选中，需从酒馆 home 工作目录执行或按提示选择。
 
 仓库根 `install.sh` 也会完整获取 latest 正式 Release SH 再执行；失败或空文件不执行。正式 SH 固定同代 tgz 地址、版本与 SHA256。
 
@@ -81,8 +83,8 @@ Windows 的 `install.ps1 uninstall` / 菜单 3 和 Linux 一键命令的 `uninst
 完整解压包中执行：
 
 ```sh
-sh deploy/install.sh install --home /绝对路径/已有酒馆安装目录
-sh deploy/install.sh uninstall --home /绝对路径/已有酒馆安装目录
+sh deploy/install.sh install
+sh deploy/install.sh uninstall
 ```
 
 也可给正式 SH 指定本地包：`--package ./dsh-tavern-sqlite-v2-0.2.3.tgz`。源码 SH 不含发行摘要，不能单独用于联网下载；正式 SH 由构建器生成。

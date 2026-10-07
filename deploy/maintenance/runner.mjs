@@ -16,7 +16,8 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 export function packageFiles(root) {
   const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'))
   if (!Array.isArray(pkg.files)) throw Error('插件包未声明files')
-  const allowed = new Set(['package.json', ...(existsSync(path.join(root, 'README.md')) ? ['README.md'] : []), ...pkg.files.map(s => s.replace(/\/\*.*$/, ''))]), out = []
+  // 发行包内禁止 README.md（根 README 是仓库门面，曾被安装说明覆盖）：包文件只认中文安装指南，不认 README。
+  const allowed = new Set(['package.json', ...(existsSync(path.join(root, 'INSTALL.zh-CN.md')) ? ['INSTALL.zh-CN.md'] : []), ...pkg.files.map(s => s.replace(/\/\*.*$/, ''))]), out = []
   function walk(rel) {
     const file = path.resolve(root, rel)
     if (!file.startsWith(path.resolve(root) + path.sep) || rel.includes('..') || rel.split(path.sep).includes('node_modules')) throw Error('包文件路径越界')

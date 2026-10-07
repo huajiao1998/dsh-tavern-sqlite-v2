@@ -2,7 +2,7 @@
 # 本地优先；发布构建填入固定地址和摘要，再内嵌零依赖Node获取器。
 set -eu
 RELEASE_URL='https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/download/v0.2.9/dsh-tavern-sqlite-v2-0.2.9.tgz'
-RELEASE_SHA256='79044c1b920058ebd46a135ed27e50d40caba89f97a49eb9c7028a9d978b3572'
+RELEASE_SHA256='630d2b1b577f3630bab933dd380b41d3de666ab9f46d3484272ca4412e2d96ef'
 VERSION='0.2.9'
 SCRIPT_DIR=''
 case "$0" in
