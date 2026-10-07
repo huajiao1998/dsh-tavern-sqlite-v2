@@ -1,9 +1,9 @@
 #!/bin/sh
 # 本地优先；发布构建填入固定地址和摘要，再内嵌零依赖Node获取器。
 set -eu
-RELEASE_URL='https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/download/v0.2.9/dsh-tavern-sqlite-v2-0.2.9.tgz'
-RELEASE_SHA256='630d2b1b577f3630bab933dd380b41d3de666ab9f46d3484272ca4412e2d96ef'
-VERSION='0.2.9'
+RELEASE_URL='https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/download/v0.3.0/dsh-tavern-sqlite-v2-0.3.0.tgz'
+RELEASE_SHA256='364cc2f06acbf5a94c58a5c6befcf9a49d847be87c05362bb6800205d4c81006'
+VERSION='0.3.0'
 SCRIPT_DIR=''
 case "$0" in
   *install.sh) SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) ;;
@@ -35,7 +35,7 @@ export function bootstrapOptions(args) {
   if (!['install', 'uninstall'].includes(action)) throw Error('动作须为install或uninstall')
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--package') { local = args[++i]; if (!local || local.startsWith('--')) throw Error('--package缺值') }
-    else if (['--home', '--app', '--profile', '--port', '--systemd-unit', '--evidence'].includes(args[i])) { const value = args[i + 1]; if (!value || value.startsWith('--')) throw Error('参数缺值'); pass.push(args[i], value); i++ }
+    else if (['--home', '--app', '--desktop-app', '--profile', '--port', '--systemd-unit', '--evidence'].includes(args[i])) { const value = args[i + 1]; if (!value || value.startsWith('--')) throw Error('参数缺值'); pass.push(args[i], value); i++ }
     else if (['--check', '--apply', '--background', '--prepare-env'].includes(args[i])) pass.push(args[i])
     else throw Error('未知参数：' + args[i])
   }

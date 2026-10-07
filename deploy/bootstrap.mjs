@@ -19,7 +19,7 @@ export function bootstrapOptions(args) {
   if (!['install', 'uninstall'].includes(action)) throw Error('动作须为install或uninstall')
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--package') { local = args[++i]; if (!local || local.startsWith('--')) throw Error('--package缺值') }
-    else if (['--home', '--app', '--profile', '--port', '--systemd-unit', '--evidence'].includes(args[i])) { const value = args[i + 1]; if (!value || value.startsWith('--')) throw Error('参数缺值'); pass.push(args[i], value); i++ }
+    else if (['--home', '--app', '--desktop-app', '--profile', '--port', '--systemd-unit', '--evidence'].includes(args[i])) { const value = args[i + 1]; if (!value || value.startsWith('--')) throw Error('参数缺值'); pass.push(args[i], value); i++ }
     else if (['--check', '--apply', '--background', '--prepare-env'].includes(args[i])) pass.push(args[i])
     else throw Error('未知参数：' + args[i])
   }

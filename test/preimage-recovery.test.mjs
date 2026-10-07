@@ -38,7 +38,7 @@ function fixture(t){
  let serial=0
  const evidence=()=>{const dir=path.join(history,new Date(1791240000000+serial++*1000).toISOString().replace(/[:.]/g,'-')+'-'+randomUUID());fs.mkdirSync(dir,{recursive:true});return dir}
  const events=[]
- const driver={noop:false,preflight:async action=>{const {withdrawnCleanState}=await import('../deploy/maintenance/source.mjs');const clean=withdrawnCleanState(access);return {wasRunning:false,noop:driver.noop&&!clean,withdrawnClean:clean}},assertIdentity:async()=>events.push('identity'),assertStopped:async()=>events.push('stopped'),stop:async()=>events.push('stop'),start:async()=>{throw Error('停止态不得启动')},manage:async action=>events.push('manage:'+action),verify:async()=>({basicHealthVerified:true}),beginRecovery(){},stoppedAfterError:async()=>false,restorePackage:async()=>events.push('restorePackage')}
+ const driver={noop:false,preflight:async action=>{const {withdrawnCleanState}=await import('../deploy/maintenance/source.mjs');const clean=withdrawnCleanState(access);return {wasRunning:false,assemblyPresent:true,noop:driver.noop&&!clean,withdrawnClean:clean}},assertIdentity:async()=>events.push('identity'),assertStopped:async()=>events.push('stopped'),stop:async()=>events.push('stop'),start:async()=>{throw Error('停止态不得启动')},manage:async action=>events.push('manage:'+action),manageResidual:async action=>events.push('manageResidual:'+action),verify:async()=>({basicHealthVerified:true}),beginRecovery(){},stoppedAfterError:async()=>false,restorePackage:async()=>events.push('restorePackage')}
  const run=(action,dir=evidence())=>executeMaintenance({action,adapter,driver,source:access,evidenceDir:dir,budget:maintenanceBudget({milliseconds:240000})})
  return {root,app,access,original,history,evidence,driver,events,run}
 }
@@ -105,15 +105,16 @@ test('受管备份污染：不能删除旧备份再复制当前缝合态重建',
 test('一键uninstall直接恢复旧坏记录，无需用户先手工改记录或哈希',async t=>{
  const f=fixture(t);await f.run('install');const record=pollute(f)
  const unrelated=index+'.pre-seams-unrelated.bak';fs.writeFileSync(f.access.file(unrelated),'另一项维护的材料','utf8')
- const removed=await f.run('uninstall')
+ const dir=f.evidence(),removed=await f.run('uninstall',dir)
  assert.equal(fs.readFileSync(f.access.file(unrelated),'utf8'),'另一项维护的材料','自动恢复不删除未认领材料')
- assert.equal(removed.preimageRecovery.afterUnchanged,true)
- assert.ok(removed.preimageRecovery.source.endsWith('/source-before.json'))
+ assert.equal(removed.fallback,true)
+ const journal=JSON.parse(fs.readFileSync(path.join(dir,'residual-source-before.json'),'utf8'))
+ assert.deepEqual(JSON.parse(Buffer.from(journal[STANDARD_RECORD],'base64').toString('utf8')).after,record.after,'有限归档保留原after，不改哈希冒充一致')
  f.access.assertImage(f.original)
  assert.ok(Object.keys(record.after).length>30)
 })
 
-test('无可靠材料、不同作者候选及真实源码漂移均停前拒绝，不能靠修after放行',async t=>{
+test('缺本地旧前像可用官方材料兜底；未知新版/错误候选/不可证明漂移停前拒绝，不修after',async t=>{
  const f=fixture(t),installedEvidence=f.evidence();await f.run('install',installedEvidence)
  pollute(f);const baseline=f.access.capture(),file=path.join(installedEvidence,'source-before.json'),originalEvidence=fs.readFileSync(file)
  const recordPath=f.access.file(STANDARD_RECORD),recordBytes=fs.readFileSync(recordPath),missing=JSON.parse(recordBytes.toString('utf8'))
@@ -124,16 +125,24 @@ test('无可靠材料、不同作者候选及真实源码漂移均停前拒绝�
  assert.deepEqual(fs.readFileSync(recordPath),Buffer.from(JSON.stringify(missing),'utf8'),'null入口拒绝不改记录，不由拒绝路径重写前像')
  fs.writeFileSync(recordPath,recordBytes)
  fs.unlinkSync(file);f.events.length=0
- await assert.rejects(f.run('uninstall'),/前像.*不可(?:恢复|验证)|没有.*洁净安装前像/)
- assert.deepEqual(f.access.capture(),baseline);assert.ok(!f.events.some(value=>/^(?:stop|manage:)/.test(value)))
- const wrong=JSON.parse(originalEvidence.toString('utf8'));wrong[index]=Buffer.from(Buffer.from(wrong[index],'base64').toString('utf8')+'\n// 不同作者代的额外代码\n').toString('base64')
- fs.writeFileSync(file,JSON.stringify(wrong),'utf8')
- await assert.rejects(f.run('uninstall'),/前像.*不可(?:恢复|验证)|没有.*洁净安装前像/)
- assert.deepEqual(f.access.capture(),baseline)
- fs.writeFileSync(file,originalEvidence)
- fs.appendFileSync(f.access.file(index),'\n// 真实活动源码漂移\n','utf8');const drifted=f.access.capture()
- await assert.rejects(f.run('uninstall'),/漂移/)
- assert.deepEqual(f.access.capture(),drifted,'真实漂移不得修改目标或after')
+ const rescued=await f.run('uninstall')
+ assert.equal(rescued.fallback,true,'无本地历史前像时，可信官方材料仍可兜底，不形成装卸死锁')
+ f.access.assertImage(f.original);assert.ok(!f.events.includes('stop'))
+ // 拒绝条件必须是真正缺准确官方材料，而非缺可替代的本地旧证据。
+ const unknown=fixture(t),unknownDir=unknown.evidence();await unknown.run('install',unknownDir);pollute(unknown)
+ fs.writeFileSync(path.join(unknown.app,'.dsh-tavern-release.json'),JSON.stringify({commit:'f'.repeat(40)}),'utf8')
+ const unknownFile=path.join(unknownDir,'source-before.json'),saved=fs.readFileSync(unknownFile),unproved=unknown.access.capture()
+ fs.unlinkSync(unknownFile);unknown.events.length=0
+ await assert.rejects(unknown.run('uninstall'),/需要当前酒馆准确官方源码/)
+ assert.deepEqual(unknown.access.capture(),unproved);assert.ok(!unknown.events.some(value=>/^(?:stop|manageResidual:)/.test(value)))
+ const wrong=JSON.parse(saved.toString('utf8'));wrong[index]=Buffer.from(Buffer.from(wrong[index],'base64').toString('utf8')+'\n// 不同作者代的额外代码\n').toString('base64')
+ fs.writeFileSync(unknownFile,JSON.stringify(wrong),'utf8')
+ await assert.rejects(unknown.run('uninstall'),/需要当前酒馆准确官方源码/)
+ assert.deepEqual(unknown.access.capture(),unproved,'错误旧候选不能强盖未知新版')
+ fs.writeFileSync(unknownFile,saved)
+ fs.appendFileSync(unknown.access.file(index),'\n// 真实活動源码漂移\n','utf8');const drifted=unknown.access.capture()
+ await assert.rejects(unknown.run('uninstall'),/需要当前酒馆准确官方源码/)
+ assert.deepEqual(unknown.access.capture(),drifted,'未知新版漂移不得修改目标或after')
 })
 
 test('宿主退出已撤缝（包在/记录无/源码净）：uninstall仅卸装配不重放恢复，install重建接缝与记录',async t=>{
@@ -147,8 +156,9 @@ test('宿主退出已撤缝（包在/记录无/源码净）：uninstall仅卸装
  f.events.length=0
  const removed=await f.run('uninstall')
  assert.equal(removed.changed,true)
- assert.ok(removed.outcome.withdrawnClean===true,'结果应标记退出撤缝态')
- assert.ok(f.events.includes('manage:uninstall'),'装配卸载必须执行')
+ assert.equal(removed.fallback,true,'退出撤缝态同样进入共用卸载')
+ assert.equal(removed.changedFiles.length,0,'已净源码不重放或改写')
+ assert.ok(f.events.includes('manageResidual:uninstall'),'装配卸载必须执行')
  assert.ok(!f.events.includes('restorePackage'),'无失败恢复')
  f.access.assertImage(withdrawn,'源码保持作者原像不动')
  // 退出撤缝态install：按首装重建接缝与标准记录。

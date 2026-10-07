@@ -102,8 +102,8 @@ test('selectLocal 网络优先：本地候选须与发行版本一致才采用�
     assert.deepEqual(mod.selectLocal({ action: 'install', cwd: empty, cache: cacheDir, version: '0.1.8' }), { kind: 'archive', file: path.join(cacheDir, 'dsh-tavern-sqlite-v2-0.1.8.tgz') })
     // --package 显式人工指定不受版本一致性约束
     assert.deepEqual(mod.selectLocal({ action: 'install', local: staleDir, installed: staleDir, cwd: base, cache: empty, version: '0.1.8' }), { kind: 'directory', file: staleDir })
-    // 未安装时卸载 → absent 不下载
-    assert.deepEqual(mod.selectLocal({ action: 'uninstall', cwd: empty, cache: empty, version: '0.1.8' }), { kind: 'absent' })
+    // 未见完整安装包不证明源码已卸净：回落新完整发行执行器，仍处理半装残留。
+    assert.equal(mod.selectLocal({ action: 'uninstall', cwd: empty, cache: empty, version: '0.1.8' }), null)
   } finally { rmSync(base, { recursive: true, force: true }) }
 })
 

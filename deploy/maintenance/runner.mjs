@@ -170,11 +170,21 @@ export function reportMaintenanceFailure(error, evidence, elapsedMs, output = co
   output('失败结果：' + resultFile)
   error.maintenanceReported = true
 }
+// 两层维护交接（前台/后台共用）：显式宿主路径必须一直传到实际执行器。
+export function maintenanceChildArgs(entry, op, evidence, reportDir, elapsed) {
+  return [entry, op.action, '--home', op.home, '--app', op.app, '--profile', op.profile,
+    op.check ? '--check' : '--apply', '--internal', '--evidence', evidence, '--elapsed', String(elapsed),
+    ...(op['desktop-app'] ? ['--desktop-app', op['desktop-app']] : []),
+    ...(op.port ? ['--port', op.port] : []),
+    ...(op['systemd-unit'] ? ['--systemd-unit', op['systemd-unit']] : []),
+    ...(op['prepare-env'] ? ['--prepare-env'] : []),
+    ...(op['report-dir'] ? ['--report-dir', reportDir] : [])]
+}
 export function runCli(url, adapter) {
   if (!process.argv[1] || path.resolve(process.argv[1]) !== fileURLToPath(url)) return
   const main = async () => {
     if (process.argv.includes('--help')) {
-      console.log(`${adapter.packageName} 离线装卸（macOS/Linux/WSL2 CLI；作者2.5.0/DSH rc.2）\nnode deploy/maintenance.mjs install|uninstall [--home <已有安装目录>] [--port <核对端口>] [--systemd-unit <既有单元>] [--prepare-env] [--check] [--background]\n默认apply；本地完整包不联网、不索取网页凭证、不复制依赖/存档。运行中停止后按原方式恢复；原本停止则保持停止。包就绪后60秒成功预算；异常恢复独立处理。网页/真实玩法由用户确认。\nV2运行中目标须已带--experimental-vm-modules；默认不改启动配置。--prepare-env（仅install）显式授权两件环境预修：①systemd单元ExecStart补VM旗标（备份原unit、失败自动回滚）；②旧代维护残留备份隔离到证据目录（只移动不删除）。四个解析依赖须离线可用，不补装宿主peer、不联网补依赖。`)
+      console.log(`${adapter.packageName} 离线装卸（macOS/Linux/WSL2 CLI；作者2.5.0/DSH rc.2）\nnode deploy/maintenance.mjs install|uninstall [--home <已有安装目录>] [--desktop-app <嵌入式DSH Desktop安装根>] [--port <核对端口>] [--systemd-unit <既有单元>] [--prepare-env] [--check] [--background]\n默认apply；本地完整包不联网、不索取网页凭证、不复制依赖/存档。运行中停止后按原方式恢复；原本停止则保持停止。包就绪后60秒成功预算；异常恢复独立处理。网页/真实玩法由用户确认。\nV2运行中目标须已带--experimental-vm-modules；默认不改启动配置。--prepare-env（仅install）显式授权两件环境预修：①systemd单元ExecStart补VM旗标（备份原unit、失败自动回滚）；②旧代维护残留备份隔离到证据目录（只移动不删除）。四个解析依赖须离线可用，不补装宿主peer、不联网补依赖。`)
       return
     }
     if (!['linux', 'darwin', 'win32'].includes(process.platform)) throw Error('不支持的平台：' + process.platform)
@@ -183,7 +193,7 @@ export function runCli(url, adapter) {
     // 它的停/启不由安装器接管（只做存在性判定＋提示用户从托盘退出），装包走桌面版自己的 CLI。
     // Windows **CLI 版**需要把服务停/启交还作者的生命周期命令，该通路尚未接线——明确拒绝，不猜测。
     if (process.platform === 'win32' && op.host !== 'desktop') {
-      throw Error('原生 Windows 仅支持酒馆桌面版（data/harness 布局）；Windows CLI 版安装通路尚未接线，拒绝猜测')
+      throw Error('原生 Windows 仅支持独立酒馆桌面包或借助 DSH Desktop 的桌面形态；Windows CLI 版安装通路尚未接线，拒绝猜测')
     }
     // 每次Node交接的启动/import/目录识别也算入共享时间，不在worker入口重新从零计时。
     const budget = maintenanceBudget({ milliseconds: successBudgetMs(op.host), elapsed: Number(op.elapsed || 0) + performance.now() }), root = path.dirname(path.dirname(fileURLToPath(url))), runtime = runtimeFor(op)
@@ -205,7 +215,7 @@ export function runCli(url, adapter) {
     if (!op.internal) {
       const staged = path.join(evidence, 'executor-package'); copyPackage(root, staged)
       budget.remaining()
-      const args = [path.join(staged, 'deploy', 'maintenance.mjs'), op.action, '--home', op.home, '--app', op.app, '--profile', op.profile, op.check ? '--check' : '--apply', '--internal', '--evidence', evidence, '--elapsed', String(budget.elapsed()), ...(op.port ? ['--port', op.port] : []), ...(op['systemd-unit'] ? ['--systemd-unit', op['systemd-unit']] : []), ...(op['prepare-env'] ? ['--prepare-env'] : []), ...(op['report-dir'] ? ['--report-dir', reportDir] : [])]
+      const args = maintenanceChildArgs(path.join(staged, 'deploy', 'maintenance.mjs'), op, evidence, reportDir, budget.elapsed())
       if (op.background) {
         // Windows 上 detached:true 的语义是"新控制台窗口"（POSIX 才是脱离会话）——必须显式隐藏，
         // 否则用户会看到一连串弹出的命令行窗口。后台模式仍需 detached 以在父进程退出后继续。

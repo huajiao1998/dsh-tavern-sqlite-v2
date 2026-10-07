@@ -35,7 +35,10 @@ curl -fsSL https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest/d
 
 ## Windows 一键装卸（0.2.3 起）
 
-下载 Release 附件 `dsh-tavern-sqlite-v2-<版本>-win.zip`，解压到酒馆目录内任意一层（例如 `D:\Program Files (x86)\DSH-Tavern\`），进入解压出的 `dsh-tavern-sqlite-v2` 文件夹，右键 `install.ps1` →「使用 PowerShell 运行」进入菜单（安装 / 更新 / 卸载 / 只读预检）。也可命令行：
+下载 Release 附件 `dsh-tavern-sqlite-v2-<版本>-win.zip`，解压到酒馆目录内任意一层（例如 `D:\Program Files (x86)\DSH-Tavern\`），进入解压出的 `dsh-tavern-sqlite-v2` 文件夹：
+
+- **双击 `run-install.cmd`**（推荐）：菜单、进度直接显示在这个窗口里，选序号回车即可；结束时停住等你看，不会闪退。
+- 或右键 `install.ps1` →「使用 PowerShell 运行」；也可命令行直用（自动化/排错）：
 
 ```powershell
 .\install.ps1 install    # 安装（离线，用本包）
@@ -48,12 +51,31 @@ curl -fsSL https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest/d
 - `update` 仅下载官方 GitHub Release 资产并用 SHA256SUMS 核对，不索取任何凭据。
 - Windows CLI 版需自行安装 Node.js 22+，并保证酒馆启动带 `--experimental-vm-modules`。
 - 找不到酒馆时可用 `-TavernHome <目录>` 显式指定。
-- **Windows 推荐双击 `run-install.cmd`**（0.2.7 起随包提供）：它绕过执行策略、把全部输出（含 PowerShell 解析错误）写进同目录 `install.log`，并且结束时总是暂停——双击不会闪退。也可继续右键 `install.ps1` 运行。
+- **Windows 推荐双击 `run-install.cmd`**（0.2.7 起随包提供）：它绕过执行策略、把菜单与进度实时显示在窗口里（不会把输出藏进日志让你盲输序号），结束时总是暂停，双击不会闪退。日志由 `install.ps1` 自己写到同目录 `install.log`；万一 PowerShell 在执行脚本前就失败（无 BOM 被按 ANSI 解码、执行策略拦截），`run-install.cmd` 会捕获并显示启动错误，尝试追加到同一日志；独立的临时错误日志路径也会显示。**脚本始终只执行一次**，不会因日志转到临时目录而重跑安装。也可继续右键 `install.ps1` 运行。
 - 0.2.7起，安装器日志**进入脚本就立即打开**（不再等跑到维护步骤）：没找到酒馆/Node、参数不合法这类早期失败同样会留下日志。日志固定为脚本同目录 `install.log`（每次覆盖），不是酒馆维护证据，不读取存档；脚本目录不可写时改放 `%TEMP%\dsh-tavern-install.log` 并在窗口里告知。等待条件不再依赖宿主类型：只要还连着控制台，除 `-Yes` 外一律停住等你看（点窗口叉或输入0才是正常退出）。
 - **安装阶段产物只落插件包目录**：`install.log` 与 `result.json`（维护入口通过 `--report-dir` 写的用户可见结果）都在 `install.ps1` 同目录；报错时把这两个文件发给维护者即可，不必去翻酒馆 `maintenance` 目录。酒馆维护目录只保留安装期内部证据材料（预演副本、单元备份等）。
 - “现装不同代”指插件包差异，不是酒馆版本不匹配；安装仍不盲目覆盖不同代。新卸载实现会处理可证明的升级覆盖/半装残留，0.2.9新增兜底能力见下节。
 
 升级已有旧版：先卸旧，再安装新包。获取器只在本地完整包与发行版同代时复用，否则下载固定新发行附件。坏现装包不可当执行器，但不再据此拒绝残留卸载；使用完整新包。没有装配且源码已确认卸净才是幂等，不以“没看到包”早退。不跨V1/V2认领。
+
+## 借助 DSH Desktop 安装的酒馆（0.3.0，待实机验收）
+
+如果是先安装 DSH Desktop，再在其中安装酒馆，home 通常为 `%USERPROFILE%\.dsh`，不需要改装独立酒馆桌面包。使用含此适配的新包，在解压目录执行：
+
+```powershell
+# 宿主目录必须是含 DSH Desktop.exe 的那层；按你的实际安装路径填写
+$desktop = 'D:\应用\DSH Desktop'
+.\run-install.cmd check -TavernHome "$env:USERPROFILE\.dsh" -DesktopApp "$desktop"
+# 预检通过后，从托盘完全退出共享 DSH Desktop，再由你决定安装
+.\run-install.cmd install -TavernHome "$env:USERPROFILE\.dsh" -DesktopApp "$desktop"
+# update / uninstall 同样带上这两个参数；不带动作时打开菜单
+```
+
+- `-DesktopApp` / 维护入口 `--desktop-app` 是**宿主程序安装根目录**，不是作者源码树 `--app`，也不是 home；参数在更新卸旧、卸载及维护前台/后台交接中保持。
+- 要求作者的 `.dsh-tavern-local.json`、home、`tavern` profile 和作者包实际链接对应。宿主需有解包式 `resources/app/lib/desktop-cli.js`、匹配的 DSH/boot/peer 和可识别 Electron 声明；缺失、错误或多个独立 launcher 运行时仍拒绝，不伪造启动器、不猜宿主。
+- 本形态的维护进程需 PATH 或既有工具缓存中的 Node（须具备 `node:sqlite` 与 zstd；建议 Node.js 24）。首版不把共享 Desktop.exe 当维护 Node，避免宿主运行检测把维护进程误判为酒馆；不绕过在运行保护。原独立桌面包的运行时复用不变。
+- 实际装卸前需退出**整个共享 DSH Desktop**；安装器只提示，不自动结束/重启它，不修改其他 profile。只读预检可在它运行时执行，但会写安装器日志/维护证据。
+- 目前仅源码核对及隔离夹具验证，不等于 issue 报告环境已安装、页面/卡脚本已验收；0.3.0 提供此代码级适配，0.2.9 及更早安装器不接受新宿主参数。纯 `app.asar` 且无解包 `resources/app` 的宿主暂不支持。
 
 ## 双平台兜底卸载（0.2.9）
 

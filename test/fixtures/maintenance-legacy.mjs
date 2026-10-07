@@ -75,7 +75,7 @@ export function options(argv){
 export function packagePolicyArgs(op){return [...(op.online?[]:['--offline']),'--ignore-scripts']}
 export function networkWorkerArgs(op){return op.online?['--online']:[]}
 function packageFiles(root){
- const pkg=json(path.join(root,'package.json')),allowed=new Set(['package.json',...(existsSync(path.join(root,'README.md'))?['README.md']:[]),...pkg.files.map(s=>s.replace(/\/\*.*$/,''))]),out=[]
+ const pkg=json(path.join(root,'package.json')),allowed=new Set(['package.json',...(existsSync(path.join(root,'INSTALL.zh-CN.md'))?['INSTALL.zh-CN.md']:[]),...pkg.files.map(s=>s.replace(/\/\*.*$/,''))]),out=[]
  function walk(rel){
   const src=path.resolve(root,rel);if(!src.startsWith(path.resolve(root)+path.sep)||rel.includes('..')||rel.split(path.sep).includes('node_modules'))throw new Error('包声明路径越界或依赖目录')
   if(!existsSync(src))throw new Error('包声明文件缺失：'+rel)

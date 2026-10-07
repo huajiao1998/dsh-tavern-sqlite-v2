@@ -73,8 +73,17 @@ test('PS1双流日志与CLI失败报告连到真实调用位置，不依赖用�
   // 双击安全入口：外层 .cmd 必须绕过执行策略、把输出落盘并总是暂停（解析错误/策略拦截也要留证据）。
   const launcher = readFileSync(new URL('../deploy/run-install.cmd', import.meta.url), 'utf8')
   assert.match(launcher, /-ExecutionPolicy Bypass/)
-  assert.match(launcher, />> "%LOG%" 2>&1/)
+  const calls = launcher.split(/\r?\n/).filter(line => /^\s*"%PS%"\s+-NoLogo\b/.test(line))
+  assert.equal(calls.length, 1, '不论日志位置如何，启动器只执行一次')
+  assert.match(calls[0], /%\* 2> "%ERR%"$/)
+  assert.ok(!calls[0].replace('2> "%ERR%"', '').includes('>'), 'stdout菜单不能重定向')
   assert.match(launcher, /^\s*pause\s*$/m)
+  // 正跑那一次绝不能重定向：菜单/进度必须留在窗口里，日志由 install.ps1 自己写。
+  // 0.2.9 实测缺陷：`-File ... %* >> "%LOG%" 2>&1` 把整个菜单吞进日志，用户只看到“输入序号”。
+  const liveRun = launcher.split(/\r?\n/).filter(line => /^\s*"%PS%"\s+-NoLogo\b/.test(line))
+  assert.equal(liveRun.length, 1, '必须恰好有一条不重定向的实时运行行：' + JSON.stringify(liveRun))
+  assert.match(launcher, /DSH_TAVERN_LAUNCHER=1/)
+  assert.match(installer, /\$env:DSH_TAVERN_LAUNCHER -eq '1'/, 'PS1 必须认可外层负责最后暂停')
   assert.match(readFileSync(new URL('../scripts/build-release.mjs', import.meta.url), 'utf8'), /run-install\.cmd/, '发行包必须带上该入口')
   const runner = readFileSync(new URL('../deploy/maintenance/runner.mjs', import.meta.url), 'utf8')
   assert.match(runner, /reportMaintenanceFailure\(error, evidence, Math\.round\(budget\.elapsed\(\)\), console\.log, reportDir\)/)
@@ -187,5 +196,43 @@ if (process.platform === 'win32') {
     const log = readFileSync(logFile, 'utf8')
     assert.ok(log.length > 100, '日志必须包含真实错误文本')
     assert.match(log, /install\.ps1/, '日志要指向出问题的脚本')
+  })
+  // 0.2.9 实测缺陷：`-File ... %* >> "%LOG%" 2>&1` 把菜单和进度全吞进日志，
+  // 用户窗口里只剩 Read-Host 的“输入序号后回车”，根本看不到要选什么。
+  test('cmd入口同目录无日志仍只执行一次', t => {
+    const root = temp(t), counter = path.join(root, 'count.txt')
+    writeFileSync(path.join(root, 'run-install.cmd'), readFileSync(new URL('../deploy/run-install.cmd', import.meta.url)))
+    writeFileSync(path.join(root, 'install.ps1'), [
+      "$OutputEncoding=[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)",
+      "[System.IO.File]::AppendAllText((Join-Path $PSScriptRoot 'count.txt'), 'RUN' + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))",
+      "[System.IO.File]::WriteAllText((Join-Path $PSScriptRoot 'temp-fake.log'), 'TEMP-LOG', [System.Text.UTF8Encoding]::new($false))",
+      "Write-Host 'MENU-NOLOG: 1) install 0) exit'", 'exit 7',
+    ].join('\n'), 'utf8')
+    const result = spawnSync('cmd', ['/c', 'run-install.cmd', '<', 'nul'], { cwd: root, encoding: 'utf8', timeout: 15000, windowsHide: true })
+    assert.ifError(result.error); assert.equal(result.status, 7, result.stdout + result.stderr)
+    assert.match(result.stdout, /MENU-NOLOG/)
+    assert.equal(readFileSync(counter, 'utf8').trim(), 'RUN')
+    assert.equal(existsSync(path.join(root, 'install.log')), false)
+    assert.equal(readFileSync(path.join(root, 'temp-fake.log'), 'utf8'), 'TEMP-LOG')
+  })
+  test('cmd入口把菜单实时显示在窗口里，且只跑一次', t => {
+    const root = temp(t), dir = path.join(root, 'live')
+    spawnSync('cmd', ['/c', 'mkdir', dir], { windowsHide: true })
+    // 假安装器：像真 install.ps1 一样自己写日志并打印菜单（全 ASCII，免编码干扰）。
+    writeFileSync(path.join(dir, 'install.ps1'), [
+      "param([string]$Action = '', [switch]$Yes)",
+      "$log = Join-Path $PSScriptRoot 'install.log'",
+      "[System.IO.File]::AppendAllText($log, 'RUN-MARKER' + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))",
+      "Write-Host 'MENU-LIVE: 1) install  2) update  0) exit'",
+      "if ($env:DSH_TAVERN_LAUNCHER -ne '1') { throw 'launcher env missing' }",
+      'exit 0',
+    ].join('\n') + '\n', 'utf8')
+    writeFileSync(path.join(dir, 'run-install.cmd'), readFileSync(new URL('../deploy/run-install.cmd', import.meta.url)))
+    const result = spawnSync('cmd', ['/c', 'run-install.cmd', '<', 'nul'], { cwd: dir, encoding: 'utf8', timeout: 30000, windowsHide: true })
+    assert.ifError(result.error)
+    const out = result.stdout + result.stderr
+    assert.match(out, /MENU-LIVE: 1\) install/, '双击入口必须把菜单显示在窗口里，不能只进日志')
+    const log = readFileSync(path.join(dir, 'install.log'), 'utf8')
+    assert.equal((log.match(/RUN-MARKER/g) || []).length, 1, '脚本自己写过日志时不得再兜底重跑（否则可能把真安装跑两遍）')
   })
 }

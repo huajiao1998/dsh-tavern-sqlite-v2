@@ -8,7 +8,7 @@
 #   0) 退出
 #
 # 也支持命令行直用（自动化/排错）：
-#   .\install.ps1 install|update|uninstall|check [-TavernHome <目录>] [-Yes]
+#   .\install.ps1 install|update|uninstall|check [-TavernHome <目录>] [-DesktopApp <宿主安装目录>] [-Yes]
 #
 # 约定：把压缩包解压到**酒馆目录内任意一层**（例如 D:\Program Files (x86)\DSH-Tavern\），
 # 脚本会从自身位置**向上扫描**找酒馆；找不到时再扫常见默认位置，仍找不到则报错并提示 -TavernHome。
@@ -17,6 +17,8 @@
 param(
   [Parameter(Position = 0)][string]$Action = '',
   [string]$TavernHome,
+  # 嵌入式Desktop使用独立宿主安装根目录，不占用作者源码--app参数。
+  [string]$DesktopApp,
   [switch]$Yes,
   [switch]$Help
 )
@@ -52,6 +54,8 @@ function Warn([string]$text) { $line = '! ' + $text; Write-Host $line -Foregroun
 # 只有用户主动点窗口叉关闭或输入 0 退出才是正常结束；其他任何异常退出前都必须停住等用户看。
 function Wait-Exit {
   if ($Yes) { return }
+  # 由 run-install.cmd 启动时，最后那次暂停归外层负责，避免用户连按两次回车。
+  if ($env:DSH_TAVERN_LAUNCHER -eq '1') { return }
   if ([Console]::IsInputRedirected) { return }
   try { Read-Host '按回车退出' | Out-Null } catch {}
 }
@@ -75,7 +79,7 @@ trap {
 }
 
 if ($Help) {
-  Say '用法：.\install.ps1 [install|update|uninstall|check] [-TavernHome <酒馆目录>] [-Yes]'
+  Say '用法：.\install.ps1 [install|update|uninstall|check] [-TavernHome <酒馆目录>] [-DesktopApp <DSH Desktop 安装目录>] [-Yes]'
   Say '不带参数运行 = 打开菜单（安装/更新/卸载/预检）'
   exit 0
 }
@@ -105,14 +109,21 @@ function Test-TavernRoot([string]$dir) {
   if (-not $dir -or -not (Test-Path $dir)) { return $null }
   $harness = Join-Path $dir 'data\harness'
   if ((Test-Path (Join-Path $dir 'launcher-settings.xml')) -and (Test-Path (Join-Path $harness 'profiles\tavern\package.json'))) {
-    return @{ home = $harness; kind = 'desktop' }
+    return @{ home = $harness; kind = 'desktop'; layout = 'launcher' }
   }
   foreach ($base in @($dir, (Join-Path $dir 'apps\dsh-tavern'), (Join-Path $dir 'data\harness\apps\dsh-tavern'))) {
     $marker = Join-Path $base '.dsh-tavern-local.json'
     if (-not (Test-Path $marker)) { continue }
     try { $local = Get-Content $marker -Raw -Encoding UTF8 | ConvertFrom-Json } catch { continue }
-    if ($local.host -eq 'desktop' -and $local.dshHome -and (Test-Path (Join-Path $local.dshHome 'profiles\tavern\package.json'))) {
-      return @{ home = $local.dshHome; kind = 'desktop' }
+    if ($local.host -eq 'desktop') {
+      if (-not $local.dshHome -or -not [System.IO.Path]::IsPathRooted($local.dshHome)) { return $null }
+      if (-not (Test-Path (Join-Path $local.dshHome 'profiles\tavern\package.json'))) { return $null }
+      $homePath = [System.IO.Path]::GetFullPath($local.dshHome).TrimEnd('\', '/')
+      $parent = Split-Path $homePath -Parent
+      $isLauncher = (Split-Path $homePath -Leaf) -eq 'harness' -and (Split-Path $parent -Leaf) -eq 'data'
+      if ($isLauncher -and -not (Test-Path (Join-Path (Split-Path $parent -Parent) 'launcher-settings.xml'))) { return $null }
+      # 这里只识别候选；菜单前用Node的options/runtimeFor核作者link、home及运行时，判据与实际维护一致。
+      return @{ home = $homePath; kind = 'desktop'; layout = $(if ($isLauncher) { 'launcher' } else { 'embedded' }) }
     }
   }
   if (Test-Path (Join-Path $dir 'profiles\tavern\package.json')) { return @{ home = $dir; kind = 'cli' } }
@@ -155,6 +166,8 @@ function Find-NodeRuntime([hashtable]$tavern) {
         ForEach-Object { Join-Path $_.FullName 'node.exe' } | Where-Object { Test-Path $_ } | Select-Object -First 1
       if ($node) { return @{ exe = $node; runAsNode = $false } }
     }
+    # 嵌入式首版维护用PATH或工具缓存中的Node，不能盲把共享Desktop.exe当Node：进程保护按宿主路径判在跑。
+    if ($tavern.layout -eq 'embedded') { return $null }
     $tavernRoot = Split-Path (Split-Path $tavern.home -Parent) -Parent
     $runtime = Get-ChildItem $tavernRoot -Directory -Filter 'runtime-*' -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($runtime) {
@@ -165,9 +178,48 @@ function Find-NodeRuntime([hashtable]$tavern) {
   return $null
 }
 
+# 与实际维护共用目标/运行时判据；仅导入只读识别模块，不执行维护或启动profile。
+function Assert-DesktopTarget([hashtable]$tavern, [hashtable]$node) {
+  if ($tavern.kind -ne 'desktop') {
+    if ($DesktopApp) { Fail '-DesktopApp 只适用于桌面宿主，不能用它认领 CLI 酒馆' }
+    return
+  }
+  $target = Join-Path $root 'deploy\maintenance\target.mjs'
+  $probe = @'
+import { pathToFileURL } from 'node:url';
+const { options, runtimeFor } = await import(pathToFileURL(process.argv[1]).href);
+const request = JSON.parse(Buffer.from(process.argv[2], 'base64').toString('utf8'));
+const args = [request.action, '--home', request.home];
+if (request.desktopApp) args.push('--desktop-app', request.desktopApp);
+const op = options(args);
+if (op.host !== 'desktop') throw Error('桌面候选未通过实际宿主判定');
+const runtime = runtimeFor(op);
+console.log(JSON.stringify({ layout: op.desktopLayout, runtimeRoot: runtime.desktop.root }));
+'@
+  # 菜单/更新尚未决定安装动作，先按卸载资格识别，避免因安装peer错误堵死安全卸载。
+  $verb = if ($Action -eq 'install' -or $Action -eq 'check') { 'install' } else { 'uninstall' }
+  $request = @{ action = $verb; home = $tavern.home; desktopApp = $DesktopApp } | ConvertTo-Json -Compress
+  $encoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($request))
+  $saved = $env:ELECTRON_RUN_AS_NODE
+  $savedErrorAction = $ErrorActionPreference
+  try {
+    if ($node.runAsNode) { $env:ELECTRON_RUN_AS_NODE = '1' }
+    $ErrorActionPreference = 'Continue'
+    $lines = @(& $node.exe --input-type=module -e $probe $target $encoded 2>&1 | ForEach-Object { [string]$_ })
+    $code = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $savedErrorAction
+    if ($node.runAsNode) { if ($null -eq $saved) { Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue } else { $env:ELECTRON_RUN_AS_NODE = $saved } }
+  }
+  if ($code -ne 0) { Fail ('桌面目标识别未通过：' + ($lines -join "`n")) }
+  $checked = ($lines -join "`n") | ConvertFrom-Json
+  $tavern.layout = $checked.layout
+}
+
 # ——— 3. 跑维护（同一窗口内显示全部进度）———
 function Invoke-Maintenance([hashtable]$tavern, [hashtable]$node, [string]$entry, [string]$verb, [switch]$Check, [string]$LogFile = '') {
   $argv = @($entry, $verb, '--home', $tavern.home)
+  if ($DesktopApp) { $argv += @('--desktop-app', $DesktopApp) }
   if ($Check) { $argv += '--check' }
   # 安装阶段的所有用户可见产物都必须落在**插件包目录**（install.ps1 旁边）：
   # install.log 在这里，维护写出的 result.json 也要求写到这里，用户报错不必去翻酒馆维护目录。
@@ -320,8 +372,13 @@ $tavern = Find-Tavern
 if (-not $tavern) {
   Fail '没找到酒馆安装。请把本压缩包解压到酒馆目录（例如 D:\Program Files (x86)\DSH-Tavern\）后重试，或用 -TavernHome 指定目录。'
 }
+if ($tavern.layout -eq 'embedded' -and -not $DesktopApp) {
+  Fail '借助 DSH Desktop 的酒馆需指定宿主安装目录：-DesktopApp <含 DSH Desktop.exe 的目录>；不猜运行时、不要求改装独立酒馆。'
+}
+if ($DesktopApp) { $DesktopApp = [System.IO.Path]::GetFullPath($DesktopApp) }
 $node = Find-NodeRuntime $tavern
 if (-not $node) { Fail '没找到可用的 Node 运行时：请安装 Node.js 22+，或使用带独立 Node 的酒馆桌面版。' }
+Assert-DesktopTarget $tavern $node
 Say ('酒馆目录：' + $tavern.home + '（' + $tavern.kind + '）')
 Say ('使用运行时：' + $node.exe + $(if ($node.runAsNode) { '（Electron RUN_AS_NODE）' } else { '' }))
 Say ''

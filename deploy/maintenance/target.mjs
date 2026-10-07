@@ -12,7 +12,7 @@ export function options(argv, { cwd = process.cwd(), env = process.env, userHome
   for (let i = 1; i < argv.length; i++) {
     const key = argv[i]
     if (['--check', '--apply', '--internal', '--background', '--prepare-env'].includes(key)) out[key.slice(2)] = true
-    else if (['--home', '--app', '--profile', '--port', '--evidence', '--systemd-unit', '--elapsed', '--report-dir'].includes(key)) {
+    else if (['--home', '--app', '--desktop-app', '--profile', '--port', '--evidence', '--systemd-unit', '--elapsed', '--report-dir'].includes(key)) {
       if (!argv[i + 1] || argv[i + 1].startsWith('--')) throw Error('参数缺值：' + key)
       out[key.slice(2)] = argv[++i]
     } else throw Error('未知参数：' + key)
@@ -44,7 +44,12 @@ export function options(argv, { cwd = process.cwd(), env = process.env, userHome
   if (local.host === 'desktop' && path.resolve(local.dshHome) !== out.home) {
     throw Error('桌面版宿主标记的 dshHome 与实际安装目录不一致，拒绝认领')
   }
-  return { ...out, profileDir, host: local.host, ...(local.host === 'desktop' ? { tavernRoot: local.root, desktopMarker: local.marker } : {}) }
+  if (out['desktop-app']) {
+    if (local.host !== 'desktop' || local.desktopLayout !== 'embedded') throw Error('--desktop-app 仅用于嵌入式桌面版；不能替换独立启动器运行时或认领 CLI')
+    out['desktop-app'] = path.resolve(cwd, out['desktop-app'])
+  }
+  if (local.desktopLayout === 'embedded' && !out['desktop-app']) throw Error('嵌入式桌面版必须显式指定 --desktop-app <DSH Desktop 安装根目录>；不猜宿主')
+  return { ...out, profileDir, host: local.host, ...(local.host === 'desktop' ? { tavernRoot: local.root, desktopMarker: local.marker, desktopLayout: local.desktopLayout } : {}) }
 }
 
 /**
@@ -59,16 +64,23 @@ export function tavernHost(appRoot) {
   try { data = json(marker) } catch (error) { throw Error('桌面版宿主标记无法解析：' + (error && error.message)) }
   if (data?.host !== 'desktop') return { host: 'cli' }
   if (typeof data.dshHome !== 'string' || !path.isAbsolute(data.dshHome)) throw Error('桌面版宿主标记缺少合法 dshHome')
-  // 桌面布局固定为 <root>/data/harness；用启动器标记复核，不靠猜路径。
-  const root = path.dirname(path.dirname(data.dshHome))
-  if (path.basename(data.dshHome) !== 'harness' || path.basename(path.dirname(data.dshHome)) !== 'data' || !existsSync(path.join(root, 'launcher-settings.xml'))) {
-    throw Error('桌面版目录布局与启动器标记不符，拒绝认领')
+  const dshHome = path.resolve(data.dshHome), root = path.dirname(path.dirname(dshHome))
+  // 已有独立launcher的损坏不能以“embedded”放行；两种布局有各自的证明。
+  if (path.basename(dshHome) === 'harness' && path.basename(path.dirname(dshHome)) === 'data') {
+    if (!existsSync(path.join(root, 'launcher-settings.xml'))) throw Error('桌面版目录布局与启动器标记不符，拒绝认领')
+    return { host: 'desktop', dshHome, root, marker, desktopLayout: 'launcher' }
   }
-  return { host: 'desktop', dshHome: data.dshHome, root, marker }
+  const profile = path.join(dshHome, 'profiles', 'tavern'), linked = path.join(profile, 'node_modules', 'dsh-tavern-plugin')
+  if (!existsSync(dshHome) || lstatSync(dshHome).isSymbolicLink() || realpathSync(dshHome) !== dshHome ||
+      !existsSync(path.join(profile, 'package.json')) || !existsSync(linked) || realpathSync(linked) !== path.join(appRoot, 'tavern-plugin')) {
+    throw Error('嵌入式桌面版标记、home/profile 与作者包实际链接不一致，拒绝认领')
+  }
+  return { host: 'desktop', dshHome, marker, desktopLayout: 'embedded' }
 }
 
 /** 桌面版运行时解析：启动器目录下的 `runtime-*` Electron 应用（不猜、不多选）。 */
 function desktopRuntimeFor(op) {
+  if (op.desktopLayout === 'embedded') return embeddedDesktopRuntimeFor(op)
   const root = op.tavernRoot
   if (!root) throw Error('桌面版宿主缺少启动器根目录，拒绝继续')
   const candidates = readdirSync(root).filter(name => name.startsWith('runtime-')).map(name => {
@@ -100,6 +112,47 @@ function desktopRuntimeFor(op) {
     host: 'desktop',
     desktop: { exe, appDir, bootstrap: path.join(appDir, 'lib', 'desktop-cli.js'), electronVersion, peerRoot, root: candidates[0].dir },
   }
+}
+
+// 独立安装的共享Desktop：只认显式程序树；不扫描注册表、磁盘或猜当前代。
+function embeddedDesktopRuntimeFor(op) {
+  const root = op['desktop-app']
+  if (!root || !path.isAbsolute(root)) throw Error('嵌入式桌面版缺少明确的 --desktop-app')
+  const appDir = path.join(root, 'resources', 'app'), peerRoot = path.join(appDir, 'node_modules')
+  for (const dir of [root, appDir, peerRoot]) {
+    if (!existsSync(dir) || !lstatSync(dir).isDirectory() || lstatSync(dir).isSymbolicLink() || realpathSync(dir) !== dir) {
+      throw Error('嵌入式宿主程序目录需完整、真实且无符号链接：' + dir)
+    }
+  }
+  const exe = path.join(root, 'DSH Desktop.exe'), manifest = path.join(appDir, 'package.json'), bootstrap = path.join(appDir, 'lib', 'desktop-cli.js')
+  for (const file of [exe, manifest, bootstrap]) {
+    if (!existsSync(file) || !lstatSync(file).isFile() || realpathSync(file) !== file) throw Error('嵌入式宿主缺少真实程序文件：' + file)
+  }
+  const app = json(manifest)
+  if (app.name !== 'dsh-plugin-desktop') throw Error('指定宿主不是 dsh-plugin-desktop，拒绝认领')
+  // 和当前CLI/桌面driver同一固定适配版本，绝不因manifest宽范围放行未验peer。
+  const names = ['dsh', 'dsh-app-boot', 'dsh-session-persistence', 'dsh-session-persistence-jsonl', 'dsh-session-query']
+  const require = createRequire(manifest)
+  const ownModule = peer => {
+    const dir = path.join(peerRoot, ...peer.split('/'))
+    if (!existsSync(path.join(dir, 'package.json'))) throw Error('嵌入式宿主本地模块缺失：' + peer)
+    const entry = realpathSync(require.resolve(peer))
+    if (!entry.startsWith(realpathSync(dir) + path.sep)) throw Error('嵌入式宿主模块解析到另一副本：' + peer)
+    return entry
+  }
+  if (op.action !== 'uninstall') for (const name of names) {
+    const peer = '@deepseek-ai/' + name, file = path.join(peerRoot, ...peer.split('/'), 'package.json')
+    if (!existsSync(file) || json(file).name !== peer || json(file).version !== '0.1.5-rc.2') throw Error('嵌入式宿主peer缺失/未适配：' + peer + '；不安装第二份宿主')
+    // CLI包以bin启动，没有默认main；只对可导入的boot/插件peer核入口。
+    if (name !== 'dsh') ownModule(peer)
+    else if (!existsSync(path.join(peerRoot, ...peer.split('/'), 'lib', 'bin.js'))) throw Error('嵌入式宿主CLI入口缺失：' + peer)
+  }
+  const electronRange = String(app.peerDependencies?.electron || app.devDependencies?.electron || '')
+  const electronVersion = /^(?:\^|~)?(\d+\.\d+\.\d+)$/.exec(electronRange)?.[1]
+  if (!electronVersion) throw Error('嵌入式宿主 Electron 声明无法明确解析，拒绝猜测')
+  const atomicUrl = pathToFileURL(ownModule('@deepseek-ai/dsh-atomic-write')).href
+  return { cli: null, cliEntries: [], atomicUrl, host: 'desktop',
+    desktop: { exe, appDir, bootstrap, electronVersion, peerRoot, root } }
 }
 
 export function runtimeFor(op) {
