@@ -106,7 +106,7 @@ export function runtimeFor(op) {
   if (op.host === 'desktop') return desktopRuntimeFor(op)
   const root = path.join(op.home, 'runtime', 'lib', 'node_modules', '@deepseek-ai'), cli = path.join(op.home, 'runtime', 'bin', 'dsh')
   const pkg = json(path.join(root, 'dsh', 'package.json')), boot = json(path.join(root, 'dsh-app-boot', 'package.json'))
-  if (pkg.version !== '0.1.5-rc.2' || boot.version !== '0.1.5-rc.2') throw Error('只支持已适配DSH/boot 0.1.5-rc.2，不自动改宿主版本')
+  if (op.action !== 'uninstall' && (pkg.version !== '0.1.5-rc.2' || boot.version !== '0.1.5-rc.2')) throw Error('只支持已适配DSH/boot 0.1.5-rc.2，不自动改宿主版本')
   const entry = realpathSync(cli), anchor = path.join(root, 'dsh', 'package.json'), require = createRequire(anchor)
   // 复用运行时已有维护文件锁，非数据库锁；无需flock或新增npm依赖。
   const atomicUrl = pathToFileURL(require.resolve('@deepseek-ai/dsh-atomic-write')).href

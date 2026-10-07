@@ -3,7 +3,7 @@
 set -eu
 RELEASE_URL='__DSH_RELEASE_URL__'
 RELEASE_SHA256='__DSH_RELEASE_SHA256__'
-VERSION='0.2.8'
+VERSION='0.2.9'
 SCRIPT_DIR=''
 case "$0" in
   *install.sh) SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) ;;
@@ -24,6 +24,10 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 const NAME = 'dsh-tavern-sqlite-v2'
 const MAX = 16 * 1024 * 1024
+// 供应链口径与维护入口 driver.mjs 同表：零运行时依赖 + vendor 账本 + 四个入口文件。
+const VENDOR_ENTRIES = { lodash: 'lib/vendor/lodash/lodash.min.js', json5: 'lib/vendor/json5/index.mjs', jsonrepair: 'lib/vendor/jsonrepair/esm/index.js', yaml: 'lib/vendor/yaml/dist/index.js' }
+// 别的版本线一律不碰：既不自动迁移/共装，也不替它们卸载。
+const OTHER_LINES = ['dsh-tavern-storage-sqlite', 'dsh-tavern-storage-sqlite-v1', 'dsh-tavern-storage-sqlite-v2', 'dsh-tavern-sqlite-v1']
 export function bootstrapOptions(args) {
   let action = 'install', local
   const pass = []
@@ -38,7 +42,24 @@ export function bootstrapOptions(args) {
   return { action, local, pass }
 }
 function option(pass, key) { const index = pass.indexOf(key); return index < 0 ? undefined : pass[index + 1] }
-export function installedPackage(pass, env = process.env) {
+/** 现装目录能否当执行器：只有完整可用包（包身份/零依赖/vendor/兜底资产齐全）才回路径。
+ *  损坏、半装、悬空链接一律返回 undefined，由引导层回落完整新发行包；不猜、不修、不联网替换。 */
+function usablePackage(dir) {
+  try {
+    if (!dir || !fs.existsSync(dir)) return undefined
+    const real = fs.realpathSync(dir)
+    if (!fs.statSync(real).isDirectory()) return undefined
+    validatePackage(real)
+    return real
+  } catch { return undefined }
+}
+/**
+ * 定位目标profile的V2现装。
+ * install：严守依赖/bundle/链接三者一致，不猜缺包也不猜已卸载。
+ * uninstall：容忍本插件半装/无包/悬空链接——缺包不等于没装过，接缝可能仍在，必须继续交给维护入口；
+ *   只回“可用的完整本地包”作执行器建议（不碰别的版本线，不读用户业务数据）。
+ */
+export function installedPackage(pass, env = process.env, { action = 'install' } = {}) {
   const profile = option(pass, '--profile') || 'tavern'
   if (profile !== 'tavern') throw Error('当前V2只适配tavern profile')
   const explicit = option(pass, '--home'), candidates = explicit ? [path.resolve(explicit)] : [...new Set([env.DSH_TAVERN_CLI_HOME, env.DSH_HOME, process.cwd(), path.join(os.homedir(), '.dsh-tavern')].filter(Boolean).map(p => path.resolve(p)))].filter(p => fs.existsSync(path.join(p, 'profiles', profile, 'package.json')))
@@ -46,17 +67,55 @@ export function installedPackage(pass, env = process.env) {
   const profileDir=path.join(candidates[0],'profiles',profile),manifestFile=path.join(profileDir,'package.json')
   if(!fs.existsSync(manifestFile))throw Error('目标不是已有酒馆profile，下载前拒绝')
   const manifest=JSON.parse(fs.readFileSync(manifestFile,'utf8')),dir=path.join(profileDir,'node_modules',NAME)
-  for (const name of ['dsh-tavern-storage-sqlite', 'dsh-tavern-storage-sqlite-v1', 'dsh-tavern-storage-sqlite-v2', 'dsh-tavern-sqlite-v1']) if (manifest.dependencies?.[name] || manifest.dsh?.profile?.bundles?.includes(name)) throw Error('已装旧包名或另一版本线：' + name + '；先用其所属旧安装器卸载，不自动迁移/共装')
+  for (const name of OTHER_LINES) if (manifest.dependencies?.[name] || manifest.dsh?.profile?.bundles?.includes(name)) throw Error('已装旧包名或另一版本线：' + name + '；先用其所属旧安装器卸载，不自动迁移/共装')
   const present=!!manifest.dependencies?.[NAME],listed=(manifest.dsh?.profile?.bundles||[]).includes(NAME)
-  if(present!==listed||present!==fs.existsSync(dir))throw Error('已装依赖/bundle/链接不一致，拒绝猜测缺包下载或已卸载')
-  return present ? fs.realpathSync(dir) : undefined
+  if (action !== 'uninstall') {
+    if(present!==listed||present!==fs.existsSync(dir))throw Error('已装依赖/bundle/链接不一致，拒绝猜测缺包下载或已卸载')
+    return present ? fs.realpathSync(dir) : undefined
+  }
+  return usablePackage(dir)
+}
+/** 核心维护链的资产存在检查：只按结构引用核（相对导入 + new URL('./x', import.meta.url)），
+ *  不预设兜底资产文件名——主线新增/改名/增件都自动纳入，缺件即判包不完整。 */
+function maintenanceAssets(root) {
+  const dir = path.join(root, 'deploy', 'maintenance')
+  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return ['deploy/maintenance']
+  const files = [path.join(root, 'deploy', 'maintenance.mjs')]
+  for (const name of fs.readdirSync(dir)) if (name.endsWith('.mjs') && fs.statSync(path.join(dir, name)).isFile()) files.push(path.join(dir, name))
+  const strip = text => text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|\s)\/\/[^\n]*/g, '$1')
+  const missing = new Set()
+  for (const file of files) {
+    if (!fs.existsSync(file)) continue
+    const text = strip(fs.readFileSync(file, 'utf8')), from = path.dirname(file)
+    for (const pattern of [/\bfrom\s*['"](\.[^'"]*)['"]/g, /\bimport\s*\(\s*['"](\.[^'"]*)['"]\s*\)/g, /\bimport\s+['"](\.[^'"]*)['"]/g, /new URL\(\s*['"](\.[^'"]*)['"]\s*,\s*import\.meta\.url\s*\)/g]) {
+      for (const hit of text.matchAll(pattern)) {
+        const target = path.resolve(from, hit[1]), rel = path.relative(root, target)
+        if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !fs.existsSync(target)) missing.add(path.relative(root, target) || hit[1])
+      }
+    }
+  }
+  return [...missing].sort()
 }
 export function validatePackage(root) {
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
-  if (manifest.name !== NAME || JSON.stringify(Object.keys(manifest.dependencies || {}).sort()) !== JSON.stringify(['json5', 'jsonrepair', 'lodash', 'yaml']) || !Array.isArray(manifest.files)) throw Error('不是完整V2包或声明了未知运行依赖')
+  const declared = Object.keys(manifest.dependencies || {})
+  // 零运行时依赖：lodash/yaml/json5/jsonrepair 已 vendor 进包内，任何声明依赖都拒绝（供应链政策不放宽）。
+  if (manifest.name !== NAME || declared.length > 0 || !Array.isArray(manifest.files)) throw Error('不是完整V2包或声明了未知运行依赖：' + [manifest.name !== NAME ? '包名 ' + manifest.name : '', declared.length ? '依赖 ' + declared.join('、') : '', Array.isArray(manifest.files) ? '' : '缺files声明'].filter(Boolean).join('；') + '；本包要求零运行时依赖（解析器已 vendor 进包内）')
+  // vendor 账本 + 四个入口：与维护入口 driver.mjs 同一道护栏，缺件不联网替换损坏包。
+  const ledger = path.join(root, 'lib', 'vendor', 'manifest.json')
+  if (!fs.existsSync(ledger)) throw Error('缺少 vendor 账本 lib/vendor/manifest.json；不联网替换损坏包')
+  let record
+  try { record = JSON.parse(fs.readFileSync(ledger, 'utf8')) } catch (error) { throw Error('vendor 账本无法解析：' + (error && error.message)) }
+  for (const [name, entry] of Object.entries(VENDOR_ENTRIES)) {
+    const recorded = record.packages?.[name]
+    if (!recorded || recorded.version === undefined) throw Error('vendor 账本缺少 ' + name + ' 的记录；不联网替换损坏包')
+    if (!fs.existsSync(path.join(root, entry))) throw Error('vendor 入口缺失：' + entry + '；不联网替换损坏包')
+  }
   for (const rel of ['deploy/maintenance.mjs', 'deploy/maintenance/runner.mjs', 'deploy/maintenance/source.mjs', 'index.js', 'cordis.patch.yml', ...manifest.files.map(p => p.replace(/\/\*.*$/, ''))]) {
     if (rel.includes('..') || path.isAbsolute(rel) || !fs.existsSync(path.join(root, rel))) throw Error('本地插件包不完整：' + rel + '；不联网替换损坏包')
   }
+  const assets = maintenanceAssets(root)
+  if (assets.length) throw Error('本地插件包不完整（维护链引用缺失）：' + assets.join('、') + '；不联网替换损坏包')
   return manifest
 }
 // 本地候选的版本识别：目录读 package.json（须本包名），tgz 从文件名取版本。
@@ -71,10 +130,11 @@ export function archiveVersion(file) {
   return match ? match[1] : null
 }
 export function selectLocal({ action, local, installed, scriptDir = '', cwd = process.cwd(), cache, version }) {
-  if (action === 'uninstall' && !installed) return { kind: 'absent' }
   // 网络优先（2026-10-05 用户定）：本地候选（已装目录/相邻包/缓存tgz）只有与本次发行版本
   // 完全一致才采用；版本不符一律回落下载网络发行包，不用旧代本地件当执行器。
   // --package 是显式人工指定，不受版本一致性约束。
+  // 卸载不再因“没有现装包”早退（action 只用于区分语义，两动作同一套候选）：缺包不等于接缝已撤，
+  // 仍选本地指定/新发行包；都选不到才下载，下载校验完成后才进维护。
   const sameVersion = candidate => {
     if (!version) return false
     return candidate.kind === 'archive' ? archiveVersion(candidate.file) === version : directoryVersion(candidate.file) === version
@@ -97,7 +157,7 @@ export function selectLocal({ action, local, installed, scriptDir = '', cwd = pr
     const file = path.join(dir, NAME + '-' + version + '.tgz')
     if (fs.existsSync(file)) return { kind: 'archive', file }
   }
-  // 无同版本本地件：回落 null ⇒ 引导层下载网络发行包执行。
+  // 无同版本本地件：回落 null ⇒ 引导层下载网络发行包执行（下载校验完成后才进维护）。
   return null
 }
 export async function downloadArchive(url, expected, file, { request = fetch } = {}) {
@@ -140,10 +200,11 @@ export function unpackArchive(file, root, expected) {
   validatePackage(root)
 }
 export async function bootstrap(args = process.argv.slice(2), { env = process.env, request = fetch, invoke } = {}) {
-  const op = bootstrapOptions([...args]), installed = installedPackage(op.pass, env), version = env.DSH_STORAGE_RELEASE_VERSION || '0.1.2'
+  const op = bootstrapOptions([...args]), installed = installedPackage(op.pass, env, { action: op.action }), version = env.DSH_STORAGE_RELEASE_VERSION || '0.1.2'
   const cache = path.resolve(env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), NAME)
+  // 卸载缺现装包不再当“没装过”早退：接缝可能仍在，继续选本地指定/新发行包（选不到才下载）。
+  if (op.action === 'uninstall' && !installed) console.log('目标profile未记录V2现装；缺包不等于接缝已撤，继续用本地完整包或发行包执行卸载。')
   let selected = selectLocal({ ...op, installed, scriptDir: env.DSH_STORAGE_BOOTSTRAP_DIR, cache, version })
-  if (selected?.kind === 'absent') { console.log('目标profile没有安装V2；不下载、不停启、不修改。'); return 0 }
   if (!selected) {
     const archive = path.join(cache, NAME + '-' + version + '.tgz')
     console.log('本地无插件包，下载固定发行包；下载期间不停止实例。')

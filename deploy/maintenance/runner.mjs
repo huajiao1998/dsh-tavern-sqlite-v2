@@ -10,6 +10,7 @@ import { options, runtimeFor, assertTargetAllowed, packagePolicyArgs } from './t
 import { createDriver } from './driver.mjs'
 import { sourceAccess, assertPackageSource, assertSourceUninstalled, rehearseSource, finishSourceUninstall, finishRecoveredSourceUninstall, commitRecoveredPreimage, STANDARD_RECORD } from './source.mjs'
 import { findLegacyLeftovers, quarantineLeftovers, leftoverDecision, describeError } from './environment.mjs'
+import { executeResidualUninstall } from './residual-uninstall.mjs'
 export { options, packagePolicyArgs }
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 export function packageFiles(root) {
@@ -47,6 +48,7 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
   try {
     // 显式--prepare-env：预检前补环境（systemd单元VM旗标），失败自动回滚并中止。
     if (prepareEnv) await step('环境预修：systemd单元VM旗标（显式--prepare-env，备份可回滚）', () => driver.prepareEnvironment(action))
+    if (action === 'uninstall') return await executeResidualUninstall({ adapter, driver, source, evidenceDir, progress, budget })
     state = await step('预检目标/本地运行时/装配（不复制依赖或存档、不认证）', () => driver.preflight(action))
     assertPackageSource(source, adapter)
     // 旧代维护残留备份：仅对非noop的install构成障碍（uninstall/noop时它们是当前安装的自管产物，
@@ -147,6 +149,7 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
 }
 // CLI 与回归共用同一只读检查分支：证据副本可写，目标源码/profile不写。
 export async function checkMaintenance({ action, adapter, driver, source, evidenceDir, budget = maintenanceBudget() }) {
+  if (action === 'uninstall') return executeResidualUninstall({ adapter, driver, source, evidenceDir, budget, check: true })
   const state = await driver.preflight(action); assertPackageSource(source, adapter)
   if (state.noop && action === 'uninstall') assertSourceUninstalled(source)
   const inspection = state.noop && action === 'uninstall' ? null

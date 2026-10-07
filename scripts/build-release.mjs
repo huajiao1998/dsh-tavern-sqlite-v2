@@ -18,6 +18,7 @@ fs.mkdirSync(out, { recursive: true })
 const packRoot = path.join(out, 'package'); fs.mkdirSync(packRoot)
 const { packageFiles } = await import('../deploy/maintenance/runner.mjs')
 const { assertPackageDependencies } = await import('../deploy/maintenance/driver.mjs')
+const { loadAuthorCleanImages } = await import('../deploy/maintenance/residual-uninstall.mjs')
 const packFilter = rel => rel !== 'README.md' && rel !== 'install.log' && !rel.endsWith(path.sep + 'install.log') && !rel.startsWith('test' + path.sep)
 for (const rel of packageFiles(root).filter(packFilter)) {
   const target = path.join(packRoot, rel); fs.mkdirSync(path.dirname(target), { recursive: true }); fs.copyFileSync(path.join(root, rel), target)
@@ -32,6 +33,10 @@ fs.writeFileSync(path.join(packRoot, 'package.json'), JSON.stringify({ ...pkg, f
   const missing = expected.filter(rel => !actual.includes(rel))
   if (missing.length) throw Error('发行包不完整：缺少 ' + missing.length + ' 个文件（例：' + missing.slice(0, 3).join('、') + '）；拒绝出包')
   assertPackageDependencies(JSON.parse(fs.readFileSync(path.join(packRoot, 'package.json'), 'utf8')), packRoot)
+  loadAuthorCleanImages(path.join(packRoot, 'deploy', 'maintenance', 'author-clean-images.json.gz'))
+  for (const required of ['deploy/maintenance/residual-uninstall.mjs', 'deploy/maintenance/residual-assembly.mjs']) {
+    if (!fs.existsSync(path.join(packRoot, required))) throw Error('发行包缺兜底卸载模块：' + required)
+  }
 }
 // 公开包README独立，不把运维README及内部台账链接带进发行包。
 fs.writeFileSync(path.join(packRoot, 'README.md'), fs.readFileSync(path.join(root, 'deploy', 'INSTALL.md'), 'utf8'), 'utf8')

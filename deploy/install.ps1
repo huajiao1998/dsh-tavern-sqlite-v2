@@ -266,7 +266,7 @@ function Do-Install([hashtable]$tavern, [hashtable]$node, [string]$entry) {
 }
 
 function Do-Uninstall([hashtable]$tavern, [hashtable]$node, [string]$entry) {
-  Say '开始卸载（离线）…'
+  Say '开始卸载（离线；含安装中断/酒馆升级覆盖后的残留兜底，不碰存档和数据库）…'
   $code = Invoke-Maintenance $tavern $node $entry 'uninstall'
   if ($code -ne 0) { Fail ('卸载失败（exit ' + $code + '）：请把上面的输出发给维护者') }
   Ok '已卸载。若酒馆桌面版曾经运行，请重开一次使其回到原状。'
@@ -292,7 +292,7 @@ function Do-Update([hashtable]$tavern, [hashtable]$node) {
       Say '发现新版本，使用官方包安装（先卸载旧代，再安装新版；存档与用户配置不动）'
       $remote = Save-ReleasePackage $release
       if ($remote) {
-        $code = Invoke-Maintenance $tavern $node $localEntry 'uninstall'
+        $code = Invoke-Maintenance $tavern $node $remote 'uninstall'
         if ($code -ne 0) { Fail ('卸载旧代失败（exit ' + $code + '）：已停止，未安装新版') }
         $code = Invoke-Maintenance $tavern $node $remote 'install'
         if ($code -ne 0) { Fail ('安装新版本失败（exit ' + $code + '）：请把上面的输出发给维护者') }

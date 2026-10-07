@@ -12,6 +12,7 @@ import { rewriteExecStartVmFlag } from './environment.mjs'
 import { waitSystemdExecIdentity } from './start-identity.mjs'
 import { STANDARD_RECORD } from './source.mjs'
 import { AUTHOR_VERSION } from '../../lib/standard-host.js'
+import { residualAssembly } from './residual-assembly.mjs'
 const family = ['dsh-tavern-storage-sqlite', 'dsh-tavern-storage-sqlite-v1', 'dsh-tavern-storage-sqlite-v2', 'dsh-tavern-sqlite-v1', 'dsh-tavern-sqlite-v2']
 // 运行时依赖**必须为零**：四个解析器依赖（lodash/yaml/json5/jsonrepair）已 vendor 进包内
 // （见 lib/vendor/VENDOR.md + manifest.json）。零依赖是"任何宿主都能离线安装"的前提：
@@ -209,7 +210,7 @@ export function linkHostPeersIntoPackage(pkg, desktop, installDir) {
 
 export function createDesktopDriver(op, adapter, packageRoot, evidence, budget, { runtime, runPackage = packageCommand, presence = desktopTavernProcesses, activeBudget = budget, logger = console } = {}) {
   const desktop = runtime.desktop, installed = path.join(op.profileDir, 'node_modules', adapter.packageName)
-  let prior = null, originalDependencyBytes = {}
+  let prior = null, originalDependencyBytes = {}, residual = null
   const driver = { runtime, recoveryPackage: null, wasRunning: false, host: 'desktop' }
   const storeDir = pnpmStoreDir(op.profileDir)
   const env = {
@@ -259,11 +260,11 @@ export function createDesktopDriver(op, adapter, packageRoot, evidence, budget, 
       // 缺 vm 时插件自己走 Worker 路径（execArgv 带旗标），故此处不做事、不假装成功。
       return { changed: false, host: 'desktop', reason: '桌面版经 Worker 取得 vm 能力，无需环境预修' }
     },
-    async preflight(action) {
+    async preflight(action, { residual: cleanResidual = false } = {}) {
       const pkg = json(path.join(packageRoot, 'package.json'))
       if (pkg.name !== adapter.packageName) throw Error('维护入口与本地包身份不一致')
-      assertPackageDependencies(pkg, packageRoot)
-      for (const peer of Object.keys(pkg.peerDependencies || {})) {
+      if (!cleanResidual) assertPackageDependencies(pkg, packageRoot)
+      for (const peer of cleanResidual ? [] : Object.keys(pkg.peerDependencies || {})) {
         const manifest = path.join(desktop.peerRoot, ...peer.split('/'), 'package.json')
         if (!existsSync(manifest) || json(manifest).version !== '0.1.5-rc.2') throw Error('桌面版既有宿主peer缺失/未适配：' + peer + '；不自动安装第二份宿主')
         // 宿主 peer 还必须在**桌面应用自己**的 node_modules 里存在——投影（见 ensureHostPeerLinks）
@@ -272,15 +273,21 @@ export function createDesktopDriver(op, adapter, packageRoot, evidence, budget, 
         if (!existsSync(hostCopy)) throw Error('桌面版应用侧缺少宿主 peer 同实例副本：' + peer + '（' + hostCopy + '）')
       }
       prior = profileState(op.profileDir)
-      originalDependencyBytes = Object.fromEntries(Object.keys(prior.deps).filter(name => name !== adapter.packageName).map(name => {
+      originalDependencyBytes = cleanResidual ? {} : Object.fromEntries(Object.keys(prior.deps).filter(name => name !== adapter.packageName).map(name => {
         const file = path.join(op.profileDir, 'node_modules', ...name.split('/'), 'package.json')
         return [file, existsSync(file) ? readFileSync(file) : null]
       }))
       for (const name of family) if (name !== adapter.packageName && (prior.deps[name] || prior.bundles.includes(name))) throw Error('另一版本线已安装，先用所属包卸载')
       const author = json(path.join(op.app, 'tavern-plugin', 'package.json'))
-      if (author.name !== 'dsh-tavern-plugin' || author.version !== AUTHOR_VERSION) throw Error('作者版本未适配')
-      const patch = readFileSync(path.join(op.profileDir, 'cordis.patch.yml'), 'utf8').replace(/^\s*#.*$/gm, '').trim()
-      if (patch !== '[]' && patch !== '') throw Error('profile自定义patch非空，请先核冲突；不覆盖用户配置')
+      if (author.name !== 'dsh-tavern-plugin' || (!cleanResidual && author.version !== AUTHOR_VERSION)) throw Error('作者版本未适配')
+      const patch = cleanResidual ? '' : readFileSync(path.join(op.profileDir, 'cordis.patch.yml'), 'utf8').replace(/^\s*#.*$/gm, '').trim()
+      if (!cleanResidual && patch !== '[]' && patch !== '') throw Error('profile自定义patch非空，请先核冲突；不覆盖用户配置')
+      if (cleanResidual) {
+        if (action !== 'uninstall') throw Error('兜底残留路径仅用于卸载')
+        residual = residualAssembly({ home: op.home, profileDir: op.profileDir, packageName: adapter.packageName, evidence })
+        driver.wasRunning = false
+        return { noop: false, wasRunning: false, host: 'desktop', runningNow: running().length > 0, assemblyPresent: residual.present }
+      }
       // `--check` 是只读预检，允许酒馆开着；真正写前的停止态断言在 assertIdentity/manage 里
       //（runner 在装包前还会再调一次 assertStopped）。这里只记录当前是否在跑，便于如实报告。
       const runningNow = running().length > 0
@@ -310,6 +317,11 @@ export function createDesktopDriver(op, adapter, packageRoot, evidence, budget, 
       } else if (existsSync(path.join(op.app, STANDARD_RECORD))) throw Error('包不在但接缝在，拒绝认领')
       driver.wasRunning = false
       return { noop: (action === 'install' ? present : !present) && !withdrawnClean, wasRunning: false, host: 'desktop', runningNow, ...(withdrawnClean ? { withdrawnClean: true } : {}) }
+    },
+    async manageResidual(action) {
+      await assertStopped()
+      if (!residual) throw Error('兜底装配未预检')
+      return action === 'restore' ? residual.restore() : residual.uninstall()
     },
     async assertIdentity() {
       // 桌面版不做进程身份认领（Windows 无 argv/cwd/代次可核）；写前只需确证目标不在跑。
@@ -382,7 +394,7 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { proce
   // 桌面版（Electron）走整体替换的独立驱动：POSIX 的进程身份与 systemd 所有权在 Windows 无等价物，
   // 不做"半套身份校验"，只做存在性判定＋桌面版自己的装包入口。CLI/POSIX 路径一行未改。
   if (op.host === 'desktop') return createDesktopDriver(op, adapter, packageRoot, evidence, budget, { runtime, runPackage })
-  let original, prior, unit, latest, stopSignalled = false, launch = 0, recovery = false, activeBudget = budget
+  let original, prior, unit, latest, stopSignalled = false, launch = 0, recovery = false, activeBudget = budget, residual = null
   let originalDependencyBytes
   const env = { ...stripSecrets(process.env), DSH_HOME: op.home, DSH_TAVERN_CLI_HOME: op.home, pnpm_config_update_notifier: 'false', npm_config_offline: 'true', pnpm_config_offline: 'true' }
   const inspectUnit = () => properties(unit?.unit || op['systemd-unit'], activeBudget.remaining(2000), runCommand)
@@ -481,25 +493,25 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { proce
       }
       return { changed: false, vmFlag: 'stopped-without-managed-unit' }
     },
-    async preflight(action) {
+    async preflight(action, { residual: cleanResidual = false } = {}) {
       assertTargetAllowed(op)
       const pkg = json(path.join(packageRoot, 'package.json'))
       if (pkg.name !== adapter.packageName) throw Error('维护入口与本地包身份不一致')
       // 供应链护栏：零运行时依赖 + vendor 账本齐全（解析器依赖已打进包内）。
-      assertPackageDependencies(pkg, packageRoot)
-      for(const peer of Object.keys(pkg.peerDependencies||{})){
+      if (!cleanResidual) assertPackageDependencies(pkg, packageRoot)
+      for(const peer of cleanResidual ? [] : Object.keys(pkg.peerDependencies||{})){
         const manifest=path.join(op.home,'runtime','lib','node_modules',...peer.split('/'),'package.json')
         if(!existsSync(manifest)||json(manifest).version!=='0.1.5-rc.2')throw Error('既有宿主peer缺失/未适配：'+peer+'；不自动安装第二份宿主')
       }
       prior = profileState(op.profileDir)
       // 只留已有直接依赖的软件清单字节，不备份依赖目录；事后检查未升级其它包。
-      originalDependencyBytes=Object.fromEntries(Object.keys(prior.deps).filter(name=>name!==adapter.packageName).map(name=>{const p=path.join(op.profileDir,'node_modules',...name.split('/'),'package.json');return [p,existsSync(p)?readFileSync(p):null]}))
+      originalDependencyBytes=cleanResidual ? {} : Object.fromEntries(Object.keys(prior.deps).filter(name=>name!==adapter.packageName).map(name=>{const p=path.join(op.profileDir,'node_modules',...name.split('/'),'package.json');return [p,existsSync(p)?readFileSync(p):null]}))
       // family含旧三线与新v1/v2：写前阻止旧线/新线共装。
       for (const name of family) if (name !== adapter.packageName && (prior.deps[name] || prior.bundles.includes(name))) throw Error('另一版本线已安装，先用所属包卸载')
       const author = json(path.join(op.app, 'tavern-plugin', 'package.json'))
-      if (author.name !== 'dsh-tavern-plugin' || author.version !== AUTHOR_VERSION) throw Error('作者版本未适配')
-      const patch = readFileSync(path.join(op.profileDir, 'cordis.patch.yml'), 'utf8').replace(/^\s*#.*$/gm, '').trim()
-      if (patch !== '[]' && patch !== '') throw Error('profile自定义patch非空，请先核冲突；不覆盖用户配置')
+      if (author.name !== 'dsh-tavern-plugin' || (!cleanResidual && author.version !== AUTHOR_VERSION)) throw Error('作者版本未适配')
+      const patch = cleanResidual ? '' : readFileSync(path.join(op.profileDir, 'cordis.patch.yml'), 'utf8').replace(/^\s*#.*$/gm, '').trim()
+      if (!cleanResidual && patch !== '[]' && patch !== '') throw Error('profile自定义patch非空，请先核冲突；不覆盖用户配置')
       original = processFinder(context)
       if (original) {
         assertTargetAllowed({ ...op, port: original.port })
@@ -520,6 +532,13 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { proce
         if (unit.cwd !== op.app || !unit.argv?.includes(runtime.cli) || !unit.argv.includes('--profile ' + op.profile + ' ') || unit.type !== 'simple' || unit.killMode !== 'control-group') throw Error('停止态systemd单元目标不符')
         // stopped+systemd：从unit.argv拆词取准确启动命令，不改unit/NODE_OPTIONS。
         assertLaunchMode(action, adapter, unit.argv ? unit.argv.split(/\s+/).filter(Boolean) : null)
+      }
+      if (cleanResidual) {
+        if (action !== 'uninstall') throw Error('兜底残留路径仅用于卸载')
+        residual = residualAssembly({ home: op.home, profileDir: op.profileDir, packageName: adapter.packageName, evidence })
+        driver.wasRunning = !!original
+        if (original) { context.port = original.port; context.host = original.host }
+        return { noop: false, wasRunning: !!original, assemblyPresent: residual.present }
       }
       // 纯停止态没有待恢复启动命令：不改任何启动配置，安装后仍停止；将来启动仍须带VM旗标。
       // capability probe由原进程Node保持flag加入vm.SourceTextModule检测；--uninstall不要求该能力。
@@ -618,6 +637,11 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { proce
       await driver.stopIfAlive(latest)
     },
     manage,
+    async manageResidual(action) {
+      await driver.assertStopped()
+      if (!residual) throw Error('兜底装配未预检')
+      return action === 'restore' ? residual.restore() : residual.uninstall()
+    },
     async restorePackage() {
       if (prior.deps[adapter.packageName]) await manage('install', driver.recoveryPackage || packageRoot)
       else if (profileState(op.profileDir).deps[adapter.packageName] || existsSync(installed)) await manage('uninstall')
