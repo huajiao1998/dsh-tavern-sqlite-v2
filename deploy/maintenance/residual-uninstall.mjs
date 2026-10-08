@@ -9,6 +9,10 @@ import { STANDARD_RECORD } from './source.mjs'
 import { planAuthorRebase } from '../author-rebase-plan.mjs'
 
 const RECORDS = [STANDARD_RECORD, '.tavern-seams.json', '.tavern-legacy-view-seams.json', '.tavern-save-ui-seam.json']
+// 0.3.4：唯一 optional 作者路径（本模块自有字面量，不 import author-compatibility，避免循环依赖）。
+// 旧官方 revision（raw 404 实证）确实没有该文件 ⇒ 允许该 image **缺键**；catalog 保持原 55 键、不补 null、不改冻结内容。
+// 当前有 file 而该 image 无 base 时**不得**被 owned/继承接受：由下游 known()/planAuthorRebase 严格拒绝未知正文。
+const OPTIONAL_AUTHOR_TARGETS = Object.freeze(['tavern-plugin/lib/domain/game-footprint.js'])
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 const ownCode = code => /dsh-tavern-(?:storage-)?sqlite(?:-v[12])?/.test(code) || code.includes('[dsh-tavern-standard-owned:v1]') || code.includes('[dsh-tavern-core-host:v1]')
 const foreignCode = code => /dsh-tavern-(?:storage-)?sqlite-v1\b/.test(code) || code.includes('[dsh-tavern-v1-storage-host:v1]')
@@ -16,7 +20,7 @@ const decode = (body, rel) => {
   if (typeof body !== 'string' || Buffer.from(body, 'base64').toString('base64') !== body) throw Error('残留前像编码不合法：' + rel)
   return Buffer.from(body, 'base64')
 }
-export const AUTHOR_IMAGES_SHA256 = '8ad4f84f5066b73b3c0cbc91ddb48e20c8357b7ed91aa4764cf30fb779293f72'
+export const AUTHOR_IMAGES_SHA256 = '72a7b3d92c17594579bc0efbdb1ba6ca3b1bdd2053939825a4b982f353b3854b'
 export function loadAuthorCleanImages(file = new URL('./author-clean-images.json.gz', import.meta.url)) {
   const bytes = readFileSync(file)
   if (hash(bytes) !== AUTHOR_IMAGES_SHA256) throw Error('有限官方恢复资产缺失或摘要不符，不能用损坏恢复材料卸载')
@@ -36,7 +40,10 @@ function trustedImages(catalog, adapter) {
       if (rel.endsWith('.js') && ownCode(bytes.toString('utf8'))) throw Error('官方前像含插件接管代码：' + rel)
       files[rel] = bytes
     }
-    if ([...allowed].some(rel => !Object.hasOwn(files, rel))) throw Error('官方恢复资产有限目标不完整')
+    // 唯一 optional 作者路径：该官方 revision 确无此文件 ⇒ **内存归一为 null**（catalog JSON 键不动、冻结 55 键不变），
+    // 使下游 known()/candidates 一致；但**永不**因此把它当 owned/新增（见 added 计算）。
+    for (const rel of OPTIONAL_AUTHOR_TARGETS) if (allowed.has(rel) && !Object.hasOwn(files, rel)) files[rel] = null
+    if ([...allowed].some(rel => !Object.hasOwn(files, rel) && !OPTIONAL_AUTHOR_TARGETS.includes(rel))) throw Error('官方恢复资产有限目标不完整')
     return { ...tree, files }
   })
   return trees
@@ -53,7 +60,7 @@ export function planResidualUninstall({ source, adapter, catalog = loadAuthorCle
   const trees = trustedImages(catalog, adapter), before = source.capture(), expected = { ...before }
   const changed = [], kept = [], archived = [], problems = []
   const sourceTargets = adapter.targets.filter(rel => rel.endsWith('.js'))
-  const known = (rel, bytes) => bytes !== null && trees.some(tree => tree.files[rel] !== null && tree.files[rel]?.equals(bytes))
+  const known = (rel, bytes) => bytes !== null && trees.some(tree => Object.hasOwn(tree.files, rel) && tree.files[rel] !== null && tree.files[rel].equals(bytes))
   const protectedKnown = (rel, bytes) => rel === 'tavern-plugin/lib/index.js' && bytes !== null && trees.some(tree => tree.files[rel] && Buffer.from(protectAuthorStartup(tree.files[rel].toString('utf8')), 'utf8').equals(bytes))
   const receipt = releaseIdentity(source.root)
   let selected = trees.find(tree => tree.commit === receipt)
@@ -107,7 +114,8 @@ export function planResidualUninstall({ source, adapter, catalog = loadAuthorCle
     if (acceptedOriginal && current?.equals(acceptedOriginal)) { kept.push(rel); continue }
     if (known(rel, current) || protectedKnown(rel, current)) { kept.push(rel); continue }
     const images = trees.map(tree => tree.files[rel])
-    const added = images.every(bytes => bytes === null)
+    // 唯一 optional 作者路径**永不算 added/owned**：否则受限 catalog（只含旧树）会把它当“插件新建”而误删未知同名文件。
+    const added = !OPTIONAL_AUTHOR_TARGETS.includes(rel) && images.every(bytes => bytes === null)
     const installedHash = current !== null && record?.after?.[rel] === hash(current)
     const recognizedOwned = current !== null && (catalog.ownedFiles?.[rel] || []).includes(hash(current))
     if (added) {
@@ -119,6 +127,11 @@ export function planResidualUninstall({ source, adapter, catalog = loadAuthorCle
       throw Error('新增同名文件归属不能确认，保留且拒绝假报卸净：' + rel)
     }
     if (current === null && !selected?.files[rel] && !record?.after?.[rel] && !Object.hasOwn(record?.before || {}, rel)) continue
+    // 0.3.4 窄修：唯一 optional 作者路径的**真实缺席**——当前无该文件、记录 before 显式 null 且 after **无合法 sha**
+    // （＝该目标从未被施缝安装过，record 只统一登记了 before:null 键）⇒ 作者树原本就没有它，保持缺席。
+    // 绝不从较新 candidate 嫁接官方新 body（否则旧树卸载后应 absent 却 exists）；仅在 current===null 成立，
+    // 不删除当前存在的未知文件、也不跳过已装目标所需的恢复（after 有合法 sha 时照旧走恢复路径）。
+    if (OPTIONAL_AUTHOR_TARGETS.includes(rel) && current === null && record?.before?.[rel] === null && !/^[a-f0-9]{64}$/.test(record?.after?.[rel] || '')) continue
     if (current !== null && foreignCode(current.toString('utf8'))) throw Error('作者目标含另一产品线代码：' + rel)
     // 未修改作者文件不因为“没有标记”就宣称干净。已装前像若为可信官方原像才能采用。
     let clean = installedHash ? acceptedOriginal : null
@@ -134,7 +147,7 @@ export function planResidualUninstall({ source, adapter, catalog = loadAuthorCle
     const wasTouched = current === null || installedHash || recordedTarget || truncatedOfficial || (current !== null && ownCode(current.toString('utf8')))
     if (!clean && wasTouched && selected?.files[rel]) clean = selected.files[rel]
     if (!clean && wasTouched && !receipt) {
-      const candidates = images.filter(bytes => bytes !== null)
+      const candidates = images.filter(bytes => bytes !== null && bytes !== undefined)
       if (candidates.length && candidates.every(bytes => bytes.equals(candidates[0]))) clean = candidates[0]
     }
     if (!clean) throw Error('不能证明作者目标已干净或恢复版本；未修改目标：' + rel + '。需要当前酒馆准确官方源码（不是删除酒馆/存档或修改after哈希）')

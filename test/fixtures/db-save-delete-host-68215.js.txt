@@ -1,0 +1,27 @@
+// provenance（真实官方切片，仅裁剪未改字节）：
+//   repo flizzywine/dsh-tavern  pinned 68215e47516637e00c75d2b4bba3192679559425
+//   file tavern-plugin/lib/index.js  full-file sha256 933fb276598d57b75da37067f3bdc178f98c208f2d66d2ee8358662d3456d287  291542B
+//   slice: 工厂真实行 + 真实 deleteChat 方法 + exportConversation 首行作末哨兵（供测试提取 caller 与 factory 作用域，非合成实现）
+  const gameFootprint = createGameFootprint({ dataRoot })
+  async function deleteChat(chatId) {
+    await stopChatForDeletion(chatId)
+    const chat = await readChat(str(chatId))
+    const footprint = chat ? await gameFootprint.describe(chat, { ownsSession: id => ownsBackgroundSession(chat, id) }) : null
+    const result = await conversationRegistry.remove(chatId)
+    deletedChatIds.add(chatId)
+    await pluginMedia.removeChat(chatId).catch(() => console.warn('dsh-tavern: 插件媒体记录清理失败', chatId))
+    pluginApi.gameRemoved(footprint?.foregroundSessionId || chat?.sessionId)
+    if (footprint) {
+      deletedSessionIds.add(footprint.foregroundSessionId)
+      await apiDiagnostics.forget(footprint.foregroundSessionId).catch(() => {})
+      await backgroundAgentRunner.releaseFor(footprint.foregroundSessionId)
+      // A session DSH still holds loaded would be written back; delete it on the next start.
+      const live = footprint.items.filter(item => item.category === 'subsession' && agentRegistry.get(item.sessionId))
+      footprint.items = footprint.items.filter(item => !live.includes(item))
+      await gameFootprint.deferSessionDeletion(live)
+      const cleanup = await gameFootprint.removeLeftovers(footprint)
+      if (cleanup.failures.length) console.warn('dsh-tavern: 删除游戏后有残留未清理', chatId, cleanup.failures.slice(0, 5))
+    }
+    return result
+  }
+  async function exportConversation(chatId, sessionId, title) {

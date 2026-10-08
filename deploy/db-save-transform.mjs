@@ -73,3 +73,54 @@ export function applyDbSaveHostTransform(source) {
   next = next.slice(0, point) + initialization + next.slice(point)
   return "import { createDbSaveExchange, createDbSaveRegistration, createDbSaveResourceTransfer } from './domain/storage-db-save.js'\n" + DB_SAVE_MARKER + '\n' + applyDbSaveDeleteTransform(next)
 }
+// 0.3.4：延后删除足迹接缝——复用作者既有 pending 队列，仅扩**只读 SQL 路径核验**；不改队列格式、不换 root、不新增存储。
+export const DB_SAVE_FOOTPRINT_MARKER = '// [dsh-tavern-db-save-footprint:v1]'
+const FOOTPRINT_FACTORY_ANCHOR = "export function createGameFootprint({ dataRoot, sessionsRoot = path.join(path.dirname(dataRoot), 'sessions') }) {"
+const FOOTPRINT_FACTORY_PATCHED = "export function createGameFootprint({ dataRoot, sessionsRoot = path.join(path.dirname(dataRoot), 'sessions'), canDeleteDeferredPath }) {"
+const FOOTPRINT_LEFTOVER_ANCHOR = "      if (!resolved.startsWith(root + path.sep) && !resolved.startsWith(path.resolve(sessionsRoot) + path.sep)) continue"
+// 先算 sqlTarget（原 root 范围内也调用：active 必须 throw 保 pending），再 original 允许 || sqlTarget；不尾追 && 只在 outside 才 guard。
+const FOOTPRINT_LEFTOVER_PATCHED = "      const sqlTarget = canDeleteDeferredPath === undefined ? false : canDeleteDeferredPath(resolved) === true\n      if (!resolved.startsWith(root + path.sep) && !resolved.startsWith(path.resolve(sessionsRoot) + path.sep) && !sqlTarget) continue"
+const FOOTPRINT_DEFERRED_ANCHOR = "      if (typeof target !== 'string' || !path.resolve(target).startsWith(sessions)) continue"
+const FOOTPRINT_DEFERRED_PATCHED = "      if (typeof target !== 'string') continue\n      const sqlTarget = canDeleteDeferredPath === undefined ? false : canDeleteDeferredPath(path.resolve(target)) === true\n      if (!path.resolve(target).startsWith(sessions) && !sqlTarget) continue"
+const HOST_FACTORY_ANCHOR = '  const gameFootprint = createGameFootprint({ dataRoot })'
+const HOST_FACTORY_PATCHED = `  const dbSaveDeferredVerifier = resolved => {
+    const persistence = ctx.get('sessionPersistence')
+    if (typeof persistence?.dbSaveCanDeleteDeferredPath !== 'function') throw Error('延后删除缺少 SQL 路径核验服务，保留登记')
+    return persistence.dbSaveCanDeleteDeferredPath(resolved)
+  }
+  const gameFootprint = createGameFootprint({ dataRoot, canDeleteDeferredPath: dbSaveDeferredVerifier })`
+const HOST_LIVE_ANCHOR = "      const live = footprint.items.filter(item => item.category === 'subsession' && agentRegistry.get(item.sessionId))"
+const HOST_LIVE_PATCHED = "      const live = footprint.items.filter(item => item.category === 'subsession' && (item.deferred === true || agentRegistry.get(item.sessionId)))"
+const FOOTPRINT_PATCHES = [
+  ['createGameFootprint factory', FOOTPRINT_FACTORY_ANCHOR, FOOTPRINT_FACTORY_PATCHED],
+  ['removeLeftovers', FOOTPRINT_LEFTOVER_ANCHOR, FOOTPRINT_LEFTOVER_PATCHED],
+  ['processDeferredDeletions', FOOTPRINT_DEFERRED_ANCHOR, FOOTPRINT_DEFERRED_PATCHED]
+]
+const count = (source, text) => source.split(text).length - 1
+export function applyDbSaveFootprintTransform(source) {
+  const applied = FOOTPRINT_PATCHES.every(([, , patched]) => count(source, patched) === 1)
+  if (applied) {
+    for (const [label, anchor] of FOOTPRINT_PATCHES) if (count(source, anchor) !== 0) throw Error('game-footprint 接缝同时含新旧锚点：' + label)
+    return source
+  }
+  const missing = FOOTPRINT_PATCHES.filter(([, anchor, patched]) => !(count(source, patched) === 1 && count(source, anchor) === 1))
+  if (source.includes(DB_SAVE_FOOTPRINT_MARKER) || missing.length !== FOOTPRINT_PATCHES.length) throw Error('game-footprint 延后删除接缝半施或标记不符：' + missing.map(([label]) => label).join(','))
+  let next = source
+  for (const [, anchor, patched] of FOOTPRINT_PATCHES) next = next.replace(anchor, patched)
+  for (const [label, anchor, patched] of FOOTPRINT_PATCHES) {
+    if (count(next, patched) !== 1 || count(next, anchor) !== 0) throw Error('game-footprint 延后删除接缝未命中：' + label)
+  }
+  return DB_SAVE_FOOTPRINT_MARKER + '\n' + next
+}
+export function applyDbSaveFootprintHostTransform(source) {
+  if (!source.includes('createGameFootprint')) return source
+  const liveApplied = count(source, HOST_LIVE_PATCHED) === 1, factoryApplied = count(source, HOST_FACTORY_PATCHED) === 1
+  if (liveApplied && factoryApplied) {
+    if (count(source, HOST_LIVE_ANCHOR) !== 0 || count(source, HOST_FACTORY_ANCHOR) !== 0) throw Error('作者删局延后删除接缝同时含新旧锚点')
+    return source
+  }
+  if (liveApplied || factoryApplied) throw Error('作者删局延后删除接缝半施：' + (liveApplied ? 'live filter 已施而 createGameFootprint 装配缺失' : 'createGameFootprint 装配已施而 live filter 缺失'))
+  const liveOld = count(source, HOST_LIVE_ANCHOR) === 1, factoryOld = count(source, HOST_FACTORY_ANCHOR) === 1
+  if (!liveOld || !factoryOld) throw Error('作者删局存在但延后删除接缝锚点缺失：' + (!factoryOld ? 'createGameFootprint 装配' : 'live filter'))
+  return source.replace(HOST_FACTORY_ANCHOR, HOST_FACTORY_PATCHED).replace(HOST_LIVE_ANCHOR, HOST_LIVE_PATCHED)
+}

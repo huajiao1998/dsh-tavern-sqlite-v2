@@ -8,7 +8,11 @@ const BRIDGE = 'tavern-plugin/lib/domain/storage-db-save.js'
 const OLD = ['5d2ffacf4231c9f45dc641b9db9e0286c4fa5f60', '9e9b26d52d820e4f70a23c2cf3a3b39bcaf28544', '5c69907994df9f432b8898168ce5dff371929c2a', '8480f7deb9b645d396bfbd75092810a8b8ad70b2']
 const B741 = 'b74135535ec0b37b11ed77f252dd034c3ce5e285', DD875 = 'dd8757c8b32c5f92152339bed2599c949752a5ce'
 const ALLOWED = [...maintenanceTargets.filter(rel => rel.endsWith('.js')), 'tavern-plugin/package.json']
-const ASSET_SHA256 = '8ad4f84f5066b73b3c0cbc91ddb48e20c8357b7ed91aa4764cf30fb779293f72'
+// 0.3.4 新增的唯一 optional 受管目标：4 棵旧 tree 无该键（保持原 scope，不补 null key）
+const GAME_REL = 'tavern-plugin/lib/domain/game-footprint.js'
+const OLD_ALLOWED = ALLOWED.filter(rel => rel !== GAME_REL)
+const GAME_SHA256 = '01e3c4e853ca2a16a44f71586e9eee60ff5ce430ccfc09a63e5688116b9f7c9a'
+const ASSET_SHA256 = '72a7b3d92c17594579bc0efbdb1ba6ca3b1bdd2053939825a4b982f353b3854b'
 const NEW_APP = '04bda78eaad25adfe6979cb211a17fd85d852393', NEW_MAIN = '68215e47516637e00c75d2b4bba3192679559425'
 // 04bda78 官方 manifest(dsh-tavern-runtime.json @68215e47) 声明的变动 target 字节
 const CHANGED_04 = {
@@ -40,8 +44,8 @@ test('DB新桥接恢复资产各旧代完整且为空', () => {
     const tree = catalog.trees.find(item => item.commit === commit)
     assert.ok(tree, '缺旧代 tree：' + commit)
     const keys = new Set(Object.keys(tree.files))
-    for (const rel of ALLOWED) assert.ok(keys.has(rel), commit + ' 缺维护目标：' + rel)
-    assert.equal(keys.size, ALLOWED.length, commit + ' 键数不等于当前维护目标集')
+    for (const rel of OLD_ALLOWED) assert.ok(keys.has(rel), commit + ' 缺维护目标：' + rel)
+    assert.equal(keys.size, OLD_ALLOWED.length, commit + ' 键数不等于旧代维护目标集')
     assert.equal(tree.files[BRIDGE], null, '旧代不存在的新bridge必须为空：' + commit)
     for (const rel of ['tavern-plugin/lib/domain/chat-sqlite-store.js', 'tavern-plugin/lib/domain/storage-package.js', 'tavern-plugin/lib/domain/legacy-view-seams.js']) assert.equal(tree.files[rel], null, '旧代官方不存在的shim必须为空：' + rel)
   }
@@ -55,6 +59,7 @@ test('DB最新b741恢复资产字节身份与来源完整', () => {
     assert.equal(tree.authorVersion, '2.5.0')
     assert.equal(Object.keys(tree.files).length, ALLOWED.length)
     for (const rel of ALLOWED) assert.ok(Object.hasOwn(tree.files, rel), commit + ' 缺维护目标：' + rel)
+    assert.equal(tree.files[GAME_REL]?.sha256, GAME_SHA256, commit + ' 新可选删局模块字节身份不符')
     for (const [rel, item] of Object.entries(tree.files)) {
       if (item === null) continue
       assert.equal(sha(Buffer.from(item.body, 'base64')), item.sha256, commit + ' 字节与摘要不符：' + rel)
@@ -75,6 +80,7 @@ test('DB新代04bda78恢复资产字节身份与旧树冻结', () => {
     assert.equal(tree.authorVersion, '2.5.0')
     assert.equal(Object.keys(tree.files).length, ALLOWED.length)
     assert.equal(Object.values(tree.files).filter(item => item === null).length, 12)
+    assert.equal(tree.files[GAME_REL]?.sha256, GAME_SHA256, tree.commit + ' 新可选删局模块字节身份不符')
   }
   const b741 = catalog.trees.find(item => item.commit === B741)
   assert.deepEqual(Object.keys(app.files).filter(rel => app.files[rel] === null), Object.keys(b741.files).filter(rel => b741.files[rel] === null), '新代 null 模式与 b741 不同')
@@ -88,6 +94,8 @@ test('DB新代04bda78恢复资产字节身份与旧树冻结', () => {
   for (const [commit, digest] of Object.entries(FROZEN)) {
     const tree = catalog.trees.find(item => item.commit === commit)
     assert.ok(tree, '缺旧树：' + commit)
-    assert.equal(sha(Buffer.from(JSON.stringify(tree.files), 'utf8')), digest, '旧树指纹被改动：' + commit)
+    // 旧树原指纹：移除本轮新增的唯一 optional 键后再算（常量不替换、不洗历史）
+    const original = Object.fromEntries(Object.entries(tree.files).filter(([rel]) => rel !== GAME_REL))
+    assert.equal(sha(Buffer.from(JSON.stringify(original), 'utf8')), digest, '旧树指纹被改动：' + commit)
   }
 })

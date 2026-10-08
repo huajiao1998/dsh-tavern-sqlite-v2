@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { loadAuthorCleanImages } from '../deploy/maintenance/residual-uninstall.mjs'
-import { applyStandardSeams, checkStandardSeams } from '../deploy/standard-seams.mjs'
+import { applyStandardSeams, checkStandardSeams, uninstallStandardSeams } from '../deploy/standard-seams.mjs'
 import { AUTHOR_VERSION } from '../lib/standard-host.js'
 const B741 = 'b74135535ec0b37b11ed77f252dd034c3ce5e285'
 const NEW_APP = '04bda78eaad25adfe6979cb211a17fd85d852393'
@@ -108,4 +108,29 @@ test('DB最新b741标准接缝接同一SQL交换资源桥', t => {
   // ⑤ 非接缝目标的官方字节保持逐字（package.json 不在接缝写集内）
   const pkg = readFileSync(path.join(f.appDir, 'tavern-plugin', 'package.json'), 'utf8')
   assert.equal(sha(Buffer.from(pkg, 'utf8')), f.tree.files['tavern-plugin/package.json'].sha256)
+})
+
+// 新增（独立具名）：新受管目标的标准装配前像记录与卸载字节恢复（只此单名，旧两名不改）
+test('DB删局模块标准装配记录前像且卸载恢复官方字节', t => {
+  const f = fixture(t, B741)
+  const RECORD = '.tavern-standard-seams.json'
+  const GAME = 'tavern-plugin/lib/domain/game-footprint.js'
+  const official = Buffer.from(f.tree.files[GAME].body, 'base64')
+  assert.equal(sha(official), f.tree.files[GAME].sha256, '前置：官方 game 字节身份')
+  assert.equal(applyStandardSeams({ appDir: f.appDir, authorVersion: AUTHOR_VERSION }).changed, true)
+  const record = JSON.parse(readFileSync(path.join(f.appDir, RECORD), 'utf8'))
+  // 前像/后像都记录该新受管目标：before＝官方原字节，after＝实际装配后字节
+  assert.ok(record.before && Object.hasOwn(record.before, GAME), '记录缺 before 前像：' + GAME)
+  assert.ok(record.after && Object.hasOwn(record.after, GAME), '记录缺 after 后像：' + GAME)
+  const beforeBytes = Buffer.from(record.before[GAME].body ?? record.before[GAME], 'base64')
+  assert.deepEqual(beforeBytes, official, 'before 前像必须是官方原字节')
+  const afterSha = record.after[GAME].sha256 ?? record.after[GAME]
+  assert.equal(sha(readFileSync(path.join(f.appDir, GAME))), afterSha, 'after 后像必须是当前实际字节')
+  // 装配后的 game 文件必须带真实接缝：factory 回调字段与 SQL 目标判定
+  const gameNow = readFileSync(path.join(f.appDir, GAME), 'utf8')
+  assert.ok(gameNow.includes('canDeleteDeferredPath'), 'seamed game 文件缺 factory 回调字段')
+  assert.ok(gameNow.includes('const sqlTarget ='), 'seamed game 文件缺 SQL 目标判定')
+  // 卸载后该新受管目标必须逐字节恢复官方原像
+  assert.equal(uninstallStandardSeams({ appDir: f.appDir }).changed, true)
+  assert.deepEqual(readFileSync(path.join(f.appDir, GAME)), official, '卸载后必须恢复官方 game 字节')
 })

@@ -177,8 +177,14 @@ function run() {
   // apply 会在受管目录里创建它们。缺失位必须**逐个**落在"我们自己的垫片"白名单内，别的缺失即清单漂移。
   const ADDED_BY_APPLY = /^tavern-plugin\/lib\/domain\/(?:chat-sqlite-store|storage-[a-z-]+|legacy-view-seams)\.js$/
   for (const rel of missing) {
+    // 唯一 optional 新模块：固定旧作者树真实不含该文件（不是 apply 负责创建的垫片位），保持真实缺席
+    if (rel === 'tavern-plugin/lib/domain/game-footprint.js') {
+      assert.equal(existsSync(path.join(app, rel)), false, '固定旧作者树真实缺该可选模块：' + rel)
+      continue
+    }
     assert.match(rel, ADDED_BY_APPLY, '受管 target 缺失但不是 apply 负责创建的垫片位（清单漂移）：' + rel)
   }
+  const optionalMissing = missing.filter(rel => rel === 'tavern-plugin/lib/domain/game-footprint.js').length
   assert.ok(picked.length >= 40, '受管 targets 覆盖过少（' + picked.length + '/' + TARGETS.length + '），疑似解压不全')
   // 转换链需要受管 targets 之外的作者 include：整棵 tavern-plugin 拷贝后必须齐全（实测教训见 extractTree 注释）
   for (const rel of ['tavern-plugin/lib/index.js', 'tavern-plugin/src/client/main.js', 'tavern-plugin/lib/client.js',
@@ -186,7 +192,7 @@ function run() {
     assert.equal(existsSync(path.join(app, rel)), true, '转换链必需 include 缺失：' + rel)
   }
   console.log('① 身份门通过：tarball 顶层 dsh-tavern-' + AUTHOR_SHA + ' / ' + AUTHOR_VERSION
-    + ' / 受管 targets ' + picked.length + '/' + TARGETS.length + '（apply 待创建 ' + missing.length + ' 个垫片位）')
+    + ' / 受管 targets ' + picked.length + '/' + TARGETS.length + '（apply 待创建 ' + (missing.length - optionalMissing) + ' 个垫片位；唯一 optional 真实缺席 ' + optionalMissing + '）')
 
   // ---------- ② apply：2.5 真字节上标准接入成立 ----------
   const pristine = Object.fromEntries(picked

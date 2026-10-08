@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { loadAuthorImages, authorImages, AUTHOR_PACKAGE_REL } from '../deploy/author-compatibility.mjs'
+import { loadAuthorImages, authorImages, AUTHOR_PACKAGE_REL, classifyAuthorCompatibility } from '../deploy/author-compatibility.mjs'
 import { applyStandardSeams, checkStandardSeams, uninstallStandardSeams, inspectStandardSeamsPlan } from '../deploy/standard-seams.mjs'
 
 const RECORD = '.tavern-standard-seams.json'
@@ -52,6 +52,55 @@ test('兼容版本首装可检查并卸回当前作者', () => {
     assert.equal(existsSync(path.join(appDir, RECORD)), false, '卸载后不应残留标准记录')
   } finally {
     rmSync(appDir, { recursive: true, force: true })
+  }
+})
+
+// ===== 新增（唯一具名）：新增可选删局模块仅同一可信作者前像双缺可跳 =====
+// 全部用 minimal mock images（`{commit, authorVersion, files:{rel:Buffer}}`），不依赖 live 8/9 catalog；
+// game body 读入库的官方 fixture（tracked），不联网、不读产品/用户数据。
+test('新增可选删局模块仅同一可信作者前像双缺可跳', () => {
+  const GAME_REL = 'tavern-plugin/lib/domain/game-footprint.js'
+  const REQUIRED_REL = 'tavern-plugin/lib/example.js'
+  const gameBody = readFileSync(new URL('./fixtures/game-footprint-68215.js', import.meta.url))
+  const requiredBody = Buffer.from('export const n = 1\n')
+  const manifest = Buffer.from(JSON.stringify({ name: 'dsh-tavern-plugin', version: '2.5.0' }, null, 2) + '\n')
+  const image = (commit, files) => ({ commit, authorVersion: '2.5.0', files })
+  const dirs = []
+  const classify = (currentFiles, images) => {
+    const appDir = mkdtempSync(path.join(tmpdir(), 'author-compat-optional-'))
+    dirs.push(appDir)
+    for (const [rel, buf] of Object.entries(currentFiles)) {
+      if (!buf) continue
+      const file = path.join(appDir, rel)
+      mkdirSync(path.dirname(file), { recursive: true })
+      writeFileSync(file, buf)
+    }
+    return classifyAuthorCompatibility({ appDir, targets: [REQUIRED_REL, GAME_REL], images })
+  }
+  const base = { [REQUIRED_REL]: requiredBody, [AUTHOR_PACKAGE_REL]: manifest }
+  const old = image('old-commit', { [REQUIRED_REL]: requiredBody, [AUTHOR_PACKAGE_REL]: manifest })
+  const fresh = image('new-commit', { [REQUIRED_REL]: requiredBody, [AUTHOR_PACKAGE_REL]: manifest, [GAME_REL]: gameBody })
+  try {
+    // ① 旧 image 无 game ＋ 当前也无 game、其余同树完整 ⇒ 双缺跳过，ok
+    assert.equal(classify(base, [old]).ok, true, '同树双缺应可跳过 optional')
+    // ② 新 image 带官方 game body ＋ 当前同 bytes、其它 complete ⇒ ok 且 matchedCommit＝新树
+    const withGame = classify({ ...base, [GAME_REL]: gameBody }, [old, fresh])
+    assert.equal(withGame.ok, true, '新树带该可选文件且当前逐字节相同应通过')
+    assert.equal(withGame.matchedCommit, 'new-commit', '应以覆盖全部目标的那棵 image 为匹配树')
+    // ③ 安全反例（主指定，不得弱化）：当前 game 存在、而唯一比对 image（旧树）无该文件 ⇒ 拒
+    assert.equal(classify({ ...base, [GAME_REL]: gameBody }, [old]).ok, false, '当前有该可选文件而比对树无，必须按作者未知拒绝')
+    // ③b 追加反例：当前 game 与所有声明该文件的可信 image 都不同（未知来源）⇒ 拒
+    assert.equal(classify({ ...base, [GAME_REL]: Buffer.from('export const unknown = 1\n') }, [old, fresh]).ok, false, '当前该可选文件与所有可信 image 都不同必须拒绝')
+    // ④ 当前 game 缺而新 image 有该 body ⇒ 不得用另一棵补 ⇒ 拒
+    assert.equal(classify(base, [fresh]).ok, false, '当前缺而比对树存在该文件不得拼合')
+    // ⑤ 跨 image 拼合：A 有正确 game 但 required 错、B required 正确但无 game ⇒ 拒
+    const imageA = image('a', { [REQUIRED_REL]: Buffer.from('export const n = 2\n'), [AUTHOR_PACKAGE_REL]: manifest, [GAME_REL]: gameBody })
+    const imageB = image('b', { [REQUIRED_REL]: requiredBody, [AUTHOR_PACKAGE_REL]: manifest })
+    assert.equal(classify({ ...base, [GAME_REL]: gameBody }, [imageA, imageB]).ok, false, '不得跨 image 拼字节')
+    // ⑥ 普通 required 缺 ⇒ 仍拒
+    assert.equal(classify({ [AUTHOR_PACKAGE_REL]: manifest }, [old]).ok, false, '普通受管目标缺失仍必须拒绝')
+  } finally {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
   }
 })
 

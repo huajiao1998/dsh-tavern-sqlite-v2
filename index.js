@@ -73,7 +73,7 @@ const TAKEOVER_KEYS = [
 	"findLog", "requireStoredLog", "resolveCurrentLog", "readStoredLog",
 	"stat", "list", "locate",
 	"ensureMigrated", "readStored", "truncateEvents", "loadRollbackSession", "bindRollbackArchive", "setRollbackPending", "guardTurnStart", "assertWritable", "create", "open", "ensureRootEncoding",
-	"dbSaveSessionPath", "dbSaveDrain", "dbSaveValidate", "dbSaveInstall", "dbSaveRemove", "dbSaveFinish", "dbSaveDeleteFootprint", "drainOpenHandles"
+	"dbSaveSessionPath", "dbSaveDrain", "dbSaveValidate", "dbSaveInstall", "dbSaveRemove", "dbSaveFinish", "dbSaveDeleteFootprint", "dbSaveCanDeleteDeferredPath", "drainOpenHandles"
 ]
 
 export default class TavernSessionPersistence extends JsonlSessionPersistence {
@@ -460,9 +460,34 @@ export default class TavernSessionPersistence extends JsonlSessionPersistence {
 			if (sessionId !== id) throw Error('DB删局目标身份不符：' + id)
 			prepared.push({ id, file })
 		}
-		for (const { id } of prepared) if ([...(this.tracker?.openHandles || [])].some(handle => handle.id === id)) throw Error('DB删局目标仍有活动句柄，拒绝删除：' + id)
-		for (const { id } of prepared) { this.store.dbs.get(id)?.close(); this.store.dbs.delete(id) }
-		return prepared.flatMap(({ id, file }) => [file, file + '-wal', file + '-shm'].map(target => ({ category: 'subsession', kind: 'file', path: target, sessionId: id, foreground: id === foregroundId })))
+		// 全部身份/归属校验已过；活动句柄只影响**物理删除时机**（交给作者既有 pending 延后队列），
+		// 不再一刀拒绝：冷目标照旧关缓存并立即返回足迹，活动目标标 deferred:true 且**不关缓存**。
+		const handles = this.tracker?.openHandles
+		if (handles === undefined || handles === null || typeof handles[Symbol.iterator] !== 'function') throw Error('DB删局缺少可枚举句柄跟踪，拒绝判定归属')
+		const active = new Set([...handles].map(handle => handle?.id))
+		for (const { id } of prepared) if (!active.has(id)) { this.store.dbs.get(id)?.close(); this.store.dbs.delete(id) }
+		return prepared.flatMap(({ id, file }) => [file, file + '-wal', file + '-shm'].map(target => ({ category: 'subsession', kind: 'file', path: target, sessionId: id, foreground: id === foregroundId, ...(active.has(id) ? { deferred: true } : {}) })))
+	}
+	/**
+	 * 启动期延后删除的**只读**路径核验：只接受本后端 SQL 会话库的精确路径（root 精确、basename 白名单），
+	 * 不读库/游戏文件/事件；未知路径返回 false；该目标仍有活动句柄时**抛错**（不能返回 false，否则作者会清空 pending 丢登记）。
+	 */
+	dbSaveCanDeleteDeferredPath(file) {
+		if (typeof file !== 'string' || file === '') return false
+		if (!path.isAbsolute(file)) return false
+		const root = this.store?.root
+		if (typeof root !== 'string' || root === '') return false
+		const resolved = path.resolve(file)
+		if (path.dirname(resolved) !== path.resolve(root)) return false
+		const match = /^([a-zA-Z0-9_-]{1,160})\.db(?:-wal|-shm)?$/.exec(path.basename(resolved))
+		if (!match) return false
+		const id = match[1], exact = this.store.pathOf(id)
+		if (resolved !== exact && resolved !== exact + '-wal' && resolved !== exact + '-shm') return false
+		// 句柄枚举要求**只对合法 SQL 目标**成立：未知原 native 队列路径已在上面返回 false，不受 tracker 缺失影响。
+		const handles = this.tracker?.openHandles
+		if (handles === undefined || handles === null || typeof handles[Symbol.iterator] !== 'function') throw Error('延后删除缺少可枚举句柄跟踪，拒绝核验')
+		if ([...handles].some(handle => handle?.id === id)) throw Error('延后删除目标仍有活动句柄，保留登记：' + id)
+		return true
 	}
 	dbSaveRemove(id) {
 		this.assertWritable(id)

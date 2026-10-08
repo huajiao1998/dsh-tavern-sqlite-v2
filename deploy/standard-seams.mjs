@@ -12,7 +12,7 @@ import { applyOpeningRuntimeTransform } from './opening-runtime-transform.mjs'
 import { applyRollbackTransform } from './core-rollback-transform.mjs'
 import { applyModelErrorTransform } from './model-error-transform.mjs'
 import { applyCompactionWarningTransform } from './compaction-warning-transform.mjs'
-import { applyDbSaveHostTransform } from './db-save-transform.mjs'
+import { applyDbSaveHostTransform, applyDbSaveFootprintTransform, applyDbSaveFootprintHostTransform } from './db-save-transform.mjs'
 import { applyRowHistoryTransform, applyRowTimelineTransform } from './row-rollback-transform.mjs'
 import { applySettlementRoundTransform } from './settlement-round-transform.mjs'
 import { applyRollbackBusinessTimelineTransform, applyRollbackBusinessTurnTransform } from './rollback-business-transform.mjs'
@@ -58,7 +58,7 @@ const TARGETS = [
     'legacy-view-seams.js', 'round-history.js', 'story-timeline.js', 'model-error-presentation.js', 'tavern-script-host-adapter.js', 'tavern-script-dispatch.js',
     'server-template-runtime.js', 'conversation-fork-point.js', 'chat-history-rescue.js',
     'opening-preparation.js', 'storage-opening-runtime.js', 'storage-fork-history.js', 'storage-server-execution.js', 'storage-rollback.js', 'storage-budgets.js', 'storage-package.js',
-    'storage-db-save.js', 'storage-current-variables.js', 'storage-compaction-warning.js', 'read-variables.js', 'storage-rollback-business.js', 'turn-orchestration.js', 'settlement-jobs.js', 'foreground-handoff.js', 'server-template-sync.js', 'candidate-worldbook-preparation.js', 'auto-compaction.js', 'chat-session-state.js', 'card-summary-cache.js', 'worldbook-library.js', 'file-resources.js', 'session-resource-access.js', 'background-session-retirement.js'].map(name => DOMAIN + name),
+    'storage-db-save.js', 'storage-current-variables.js', 'storage-compaction-warning.js', 'read-variables.js', 'storage-rollback-business.js', 'turn-orchestration.js', 'settlement-jobs.js', 'foreground-handoff.js', 'server-template-sync.js', 'candidate-worldbook-preparation.js', 'auto-compaction.js', 'chat-session-state.js', 'card-summary-cache.js', 'worldbook-library.js', 'file-resources.js', 'session-resource-access.js', 'background-session-retirement.js', 'game-footprint.js'].map(name => DOMAIN + name),
   '.tavern-seams.json', '.tavern-legacy-view-seams.json', '.tavern-save-ui-seam.json',
 ]
 export const maintenanceTargets = Object.freeze([...TARGETS])
@@ -189,7 +189,8 @@ function buildCore(appDir) {
   write.set('tavern-plugin/lib/index.js', applyCurrentResourceHostTransform(applyBackgroundRetirementHostTransform(write.get('tavern-plugin/lib/index.js'))))
   const saveHost = write.get('tavern-plugin/lib/index.js')
   if (saveHost.includes('  async function exportGameSave(') || saveHost.includes('// [dsh-tavern-db-save:v1]')) {
-    write.set('tavern-plugin/lib/index.js', applyDbSaveHostTransform(saveHost))
+    write.set('tavern-plugin/lib/index.js', applyDbSaveFootprintHostTransform(applyDbSaveHostTransform(saveHost)))
+    if (existsSync(inside(appDir, DOMAIN + 'game-footprint.js'))) write.set(DOMAIN + 'game-footprint.js', applyDbSaveFootprintTransform(text(appDir, DOMAIN + 'game-footprint.js')))
     write.set(DOMAIN + 'storage-db-save.js', shim("import { storagePackage } from './storage-package.js'\nexport const { createDbSaveExchange, createDbSaveRegistration, createDbSaveResourceTransfer } = await storagePackage('db-save-exchange')\n"))
   }
   write.set(DOMAIN + 'session-resource-access.js', applyCurrentResourceAccessTransform(text(appDir, DOMAIN + 'session-resource-access.js')))
@@ -329,7 +330,10 @@ export function applyStandardSeams({ appDir, authorVersion, allowRebase = true }
     core.set('tavern-plugin/lib/index.js', applyCurrentResourceHostTransform(applyBackgroundRetirementHostTransform(applyForkHistoryTransform(core.get('tavern-plugin/lib/index.js')))))
     // applyAllSeams重写同一入口后必须在最终代重新接DB存档；否则桥文件存在但原按钮仍走作者JSON包。
     const finalSaveHost = core.get('tavern-plugin/lib/index.js')
-    if (finalSaveHost.includes('  async function exportGameSave(') || finalSaveHost.includes('// [dsh-tavern-db-save:v1]')) core.set('tavern-plugin/lib/index.js', applyDbSaveHostTransform(finalSaveHost))
+    if (finalSaveHost.includes('  async function exportGameSave(') || finalSaveHost.includes('// [dsh-tavern-db-save:v1]')) {
+      core.set('tavern-plugin/lib/index.js', applyDbSaveFootprintHostTransform(applyDbSaveHostTransform(finalSaveHost)))
+      if (existsSync(inside(appDir, DOMAIN + 'game-footprint.js'))) core.set(DOMAIN + 'game-footprint.js', applyDbSaveFootprintTransform(text(appDir, DOMAIN + 'game-footprint.js')))
+    }
     const openingHostAnchor = 'createOpeningPreparation({ readCard, worldBooks, extensionSettings:'
     const openingHostNext = 'createOpeningPreparation({ readCard, worldBooks, dispatchMarksProvider: () => storageDispatchMarks, extensionSettings:'
     if (!core.get('tavern-plugin/lib/index.js').includes(openingHostNext)) {

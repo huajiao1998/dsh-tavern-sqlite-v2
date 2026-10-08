@@ -16,7 +16,7 @@ import { gunzipSync } from 'node:zlib'
 import path from 'node:path'
 import { protectAuthorStartup } from './maintenance/author-safety.mjs'
 
-export const AUTHOR_IMAGES_SHA256 = '8ad4f84f5066b73b3c0cbc91ddb48e20c8357b7ed91aa4764cf30fb779293f72'
+export const AUTHOR_IMAGES_SHA256 = '72a7b3d92c17594579bc0efbdb1ba6ca3b1bdd2053939825a4b982f353b3854b'
 export const DEFAULT_IMAGES_URL = new URL('./maintenance/author-clean-images.json.gz', import.meta.url)
 export const AUTHOR_PACKAGE_NAME = 'dsh-tavern-plugin'
 export const AUTHOR_PACKAGE_REL = 'tavern-plugin/package.json'
@@ -199,6 +199,13 @@ export function authorImages(catalog) {
 const asText = buffer => (buffer === null || buffer === undefined ? null : buffer.toString('utf8'))
 
 /**
+ * **唯一** optional 受管目标：0.3.4 新增的 `domain/game-footprint.js`。旧官方 tree 没有该文件，
+ * 因此允许“当前缺 + 正在比对的这棵 image 也缺（null/undefined）”在 perImage 跳过；其余组合照旧失败，
+ * 绝不跨 image 拼字节，也不放宽任何其它文件。
+ */
+export const OPTIONAL_IMAGE_TARGETS = Object.freeze(['tavern-plugin/lib/domain/game-footprint.js'])
+
+/**
  * 主判定：**唯一可信来源＝既有官方 tree**；要求单一共同 tree 覆盖全部作者目标。
  * @returns {{ ok: boolean, mode: 'identical'|'presentation'|null, matchedCommit: string|null, skippedOwned: string[], failures: string[] }}
  */
@@ -208,7 +215,9 @@ export function classifyAuthorCompatibility({ appDir, targets, images } = {}) {
 
   // 作者 manifest **一律并入**（standard TARGETS 不含 package.json；调用方无需记得拼，避免漏判导致新版恒拒）。
   const declared = [...new Set([...targets, AUTHOR_PACKAGE_REL])]
-  const isOwned = rel => images.every(image => !image.files[rel])
+  // 唯一 optional 作者路径**永不当 owned**：即使传入的 images 全缺该键（受限投影/mock），它仍必须留在 authorTargets，
+  // 由 perImage「current 缺 ∧ 该 image 也缺」才跳过；current 有而 base 缺一律 refuse。
+  const isOwned = rel => !OPTIONAL_IMAGE_TARGETS.includes(rel) && images.every(image => !image.files[rel])
   const authorTargets = declared.filter(rel => !isOwned(rel))
   const skippedOwned = declared.filter(isOwned)
   if (authorTargets.length === 0) throw new Error('兼容判定没有作者目标（全部为 owned/artifact）')
@@ -216,7 +225,11 @@ export function classifyAuthorCompatibility({ appDir, targets, images } = {}) {
   const current = {}, failures = []
   for (const rel of authorTargets) {
     const file = insideApp(appDir, rel)
-    if (!existsSync(file)) { failures.push(rel + '（当前树缺该受管文件）'); continue }
+    if (!existsSync(file)) {
+      // optional 目标当前缺失：记 null（不在收集期直接全局失败），由 perImage 判“双缺才跳过”。
+      if (OPTIONAL_IMAGE_TARGETS.includes(rel)) { current[rel] = null; continue }
+      failures.push(rel + '（当前树缺该受管文件）'); continue
+    }
     current[rel] = readFileSync(file)
   }
 
@@ -226,8 +239,10 @@ export function classifyAuthorCompatibility({ appDir, targets, images } = {}) {
     let presentation = false
     for (const rel of authorTargets) {
       const now = current[rel]
-      if (now === undefined) { missing.push(rel); continue }
       const base = image.files[rel]
+      // 唯一 optional：current 与**正在比对的这棵 image** 同时缺该项才跳过；其余组合照旧失败。
+      if (OPTIONAL_IMAGE_TARGETS.includes(rel) && (now === undefined || now === null) && (base === null || base === undefined)) continue
+      if (now === undefined || now === null) { missing.push(rel + '（当前树缺该受管文件）'); continue }
       if (!base) { missing.push(rel + '(该 tree 无此项)'); continue }
       if (base.equals(now)) continue
       if (rel === AUTHOR_PACKAGE_REL) continue
