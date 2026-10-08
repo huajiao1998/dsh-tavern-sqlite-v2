@@ -46,11 +46,15 @@ try {
   const chatsRoot = path.join(root, 'chats')
   const blockId = 'chat-blocky'
   const journalId = 'chat-journal'
+  const directoryJournalId = 'chat-journal-directory'
   const sourceMessages = [{ role: 'user', message: 'hi' }]
   const blockChat = { id: blockId, sessionId: 'session-source', _storageRevision: 1, chat_metadata: {}, messages: sourceMessages }
+  const directoryJournalChat = { id: directoryJournalId, sessionId: 'session-journal-directory', _storageRevision: 3, chat_metadata: {}, messages: sourceMessages }
   mkdirSync(path.join(chatsRoot, blockId, 'blocks', 'ab'), { recursive: true })
   writeFileSync(path.join(chatsRoot, blockId, 'head.json'), '{"format":1,"headId":"ab' + '0'.repeat(62) + '"}', 'utf8')
   writeFileSync(path.join(chatsRoot, blockId, 'blocks', 'ab', 'ab' + '0'.repeat(62) + '.json'), '{"kind":"state"}', 'utf8')
+  mkdirSync(path.join(chatsRoot, directoryJournalId, 'snapshots'), { recursive: true })
+  mkdirSync(path.join(chatsRoot, directoryJournalId, 'journals'), { recursive: true })
   writeFileSync(path.join(chatsRoot, journalId + '.json'), JSON.stringify({ id: journalId, sessionId: 'session-journal', _storageRevision: 1, messages: sourceMessages }), 'utf8')
 
   const reads = []
@@ -59,7 +63,9 @@ try {
   const legacyStore = {
     async read(id) {
       reads.push(id)
-      return id === blockId || id === 'chat-shadow-block' ? { ...structuredClone(blockChat), id } : undefined
+      if (id === blockId || id === 'chat-shadow-block') return { ...structuredClone(blockChat), id }
+      if (id === directoryJournalId) return structuredClone(directoryJournalChat)
+      return undefined
     },
     async update(...args) { legacyWrites.push(args); throw new Error('不得回写作者原档') },
   }
@@ -81,6 +87,7 @@ try {
   assert.deepEqual(source, blockChat)
   assert.deepEqual(reads, [blockId], '块布局必须通过作者 store 读取')
   assert.equal((await store.read(journalId)).messages.length, 1)
+  assert.deepEqual(await store.read(directoryJournalId), directoryJournalChat, '只有 snapshots/journals 的旧档必须交给作者 store 读取')
   assert.deepEqual(await store.readRevision(blockId, 1), blockChat)
   assert.equal((await store.readSlice(blockId, [])).chat.id, blockId)
   assert.deepEqual(snapshot(chatsRoot), originalBytes, '读原档不能改任何文件或生成数据库')
@@ -98,7 +105,7 @@ try {
   assert.equal(unreadableUpdaterCalls, 0, '不能把读不出的原件当新档传给 updater')
 
   // 3) 每个原档的普通 update、恒等 update、空 update、migrate:true 均拒绝，且不调用 updater。
-  for (const id of [blockId, journalId]) {
+  for (const id of [blockId, journalId, directoryJournalId]) {
     let updaterCalls = 0
     const mutate = chat => { updaterCalls++; chat._storageRevision++; chat.messages.push({ role: 'assistant', message: '不得写入' }); return chat }
     for (const metadata of [{}, { source: 'tavern.open' }, { migrate: true }]) {

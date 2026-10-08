@@ -88,11 +88,13 @@ function signManifest(appDir, { revision = 'a'.repeat(40), releaseSequence = 999
 }
 const authorRelsOf = tree => Object.entries(tree.files).filter(([, item]) => item !== null).map(([rel]) => rel)
 const readRecord = appDir => JSON.parse(readFileSync(fileOf(appDir, RECORD_REL), 'utf8'))
-const assertLocalManifestRecord = (record, manifestBytes, label) => {
-  assert.equal(record.compatibilityMode, LOCAL_MODE, label + '：record.compatibilityMode 必须是 ' + LOCAL_MODE)
-  assert.ok(record.runtimeManifest && typeof record.runtimeManifest === 'object', label + '：record.runtimeManifest 必须存在')
-  assert.equal(record.runtimeManifest.body, manifestBytes.toString('base64'), label + '：runtimeManifest.body 必须是清单 bytes 的 canonical base64')
-  assert.equal(record.runtimeManifest.sha256, sha(manifestBytes), label + '：runtimeManifest.sha256 必须是清单 bytes 摘要')
+/** 作者文件（tree.files 非 null）＋给定附加 rel 的当下字节快照。 */
+const authorSnapshotBytes = (appDir, tree, extra = []) => new Map([...authorRelsOf(tree), ...extra]
+  .filter(rel => existsSync(fileOf(appDir, rel))).map(rel => [rel, readFileSync(fileOf(appDir, rel))]))
+/** 锚点-only 契约：新记录写真实 `compatibilityMode:'anchor-only'`，**不含 runtimeManifest**。 */
+const assertAnchorOnlyRecord = (record, label) => {
+  assert.equal(record.compatibilityMode, 'anchor-only', label + '：record.compatibilityMode 必须是 anchor-only')
+  assert.equal(Object.hasOwn(record, 'runtimeManifest'), false, label + '：新记录不得写 runtimeManifest')
 }
 /** 自洽性前置：用自带 validator 确认清单与现场一致（不含 images ⇒ 不做 owned 判定）。 */
 function assertManifestSelfConsistent(appDir, manifestBytes) {
@@ -112,10 +114,10 @@ test('本地清单未收录代首装放行记录模式且卸载逐字节复原',
   // authorVersion 一律不传：由真实 package.json（2.5.91）读取，不迎合固定身份
   const applied = applyStandardSeams({ appDir })
   assert.equal(applied.changed, true, '首装必须产生变更（未收录代走本地清单路径）')
-  assert.equal(applied.compatibilityMode, LOCAL_MODE, 'apply 首装返回值必须带 compatibilityMode=' + LOCAL_MODE)
+  assert.equal(applied.compatibilityMode, 'anchor-only', 'apply 首装返回值必须带 compatibilityMode=anchor-only（锚点-only 准入）')
   assert.equal(checkStandardSeams({ appDir }).ready, true, '首装后严格 check 必须 ready')
   const record = readRecord(appDir)
-  assertLocalManifestRecord(record, manifestBytes, '首装后')
+  assertAnchorOnlyRecord(record, '首装后')
   assert.equal(record.authorVersion, '2.5.91', 'record.authorVersion 取作者包版本')
   assert.equal(Object.hasOwn(record.after, PKG_REL), false, 'package.json 不得进 after（after＝全 TARGETS+artifacts 现存文件）')
   assert.ok(Object.hasOwn(record.after, 'tavern-plugin/lib/index.js'), 'after 必须覆盖 TARGETS 现存文件（例：入口）')
@@ -140,11 +142,11 @@ test('本地清单自洽但必需转换锚点被破坏时首装拒绝且现场�
   const manifestBytes = signManifest(appDir, { version: '2.5.91', authorRels: authorRelsOf(tree) })
   assertManifestSelfConsistent(appDir, manifestBytes)
   const before = snapshotDir(appDir)
-  assert.throws(() => applyStandardSeams({ appDir }), /清单代(?:隔离预演|安装)失败/, '必需锚点被破坏时首装必须 throw（隔离预演失败）')
+  assert.throws(() => applyStandardSeams({ appDir }), /锚点-only (?:隔离预演|安装)失败/, '必需锚点被破坏时首装必须 throw（隔离预演失败）')
   assertSameDir(appDir, before, '首装被拒后现场')
   assert.equal(existsSync(fileOf(appDir, RECORD_REL)), false, '被拒首装不得留下标准记录')
-  // 裁定（2026-10-08）：无记录 + 未知代的**严格 check 就是 throw**（既有契约）；可用身份只在授权兼容模式（allowRebase:true）下判定。
-  assert.throws(() => checkStandardSeams({ appDir }), /拒绝未知版本/, '无记录未知代的严格 check 必须 throw（拒绝未知版本）')
+  // 锚点-only 契约（2026-10-09）：无记录 + 未知代不再由版本门禁拒绝 ⇒ 严格 check 返回 not-ready（不抛）。
+  assert.equal(checkStandardSeams({ appDir }).ready, false, '无记录未知代的严格 check 必须 not ready（不再版本拒）')
   assert.equal(checkStandardSeams({ appDir, allowRebase: true }).ready, false, '授权兼容模式下该树仍不是可用身份（not ready）')
   assertSameDir(appDir, before, 'check 之后现场')
 })
@@ -155,7 +157,7 @@ test('首装后作者代覆盖重接成功且卸载回新原字节', async t => 
   appendHarmlessComment(appDir, COMMENT_REL, 'local harmless note (non-anchor)')
   const firstManifest = signManifest(appDir, { version: '2.5.91', authorRels: authorRelsOf(tree) })
   assert.equal(applyStandardSeams({ appDir }).changed, true, '前置：首装成功')
-  assertLocalManifestRecord(readRecord(appDir), firstManifest, '前置首装后')
+  assertAnchorOnlyRecord(readRecord(appDir), '前置首装后')
   // 作者代覆盖：**从 tree.files 恢复全部非 null 作者字节**（不是在我们已安装的字节上追加），再注释并重签新 pkg
   for (const [rel, item] of Object.entries(tree.files)) {
     if (item === null) continue
@@ -176,8 +178,7 @@ test('首装后作者代覆盖重接成功且卸载回新原字节', async t => 
   assert.equal(applied.changed, true, '作者代覆盖后 apply 必须重接成功')
   assert.equal(checkStandardSeams({ appDir }).ready, true, '重接后严格 check 必须 ready')
   const record = readRecord(appDir)
-  assert.equal(record.compatibilityMode, LOCAL_MODE, '重接后记录仍须标记 ' + LOCAL_MODE)
-  assert.ok(record.runtimeManifest && typeof record.runtimeManifest.body === 'string', '重接后记录仍须带 runtimeManifest')
+  assertAnchorOnlyRecord(record, '重接后')
   assert.deepEqual(readFileSync(fileOf(appDir, MANIFEST_REL)), newManifest, '重接不得改动新清单')
   assert.equal(uninstallStandardSeams({ appDir }).changed, true, '重接后卸载必须产生变更')
   assertSameDir(appDir, newOriginal, '重接后卸载')
@@ -185,30 +186,34 @@ test('首装后作者代覆盖重接成功且卸载回新原字节', async t => 
   assert.equal(existsSync(fileOf(appDir, RECORD_REL)), false, '卸载后不得残留标准记录')
 })
 
-test('已装package.json漂移且清单未更新时check与卸载拒绝且不写', async t => {
-  const { appDir, tree } = copyLastTree(t, 'drift')
+test('已装package额外字段不阻挡卸载也不回退', async t => {
+  const { appDir, tree } = copyLastTree(t, 'pkg-extra')
   rewritePackageVersion(appDir, '2.5.91')
   appendHarmlessComment(appDir, COMMENT_REL, 'local harmless note (non-anchor)')
   const manifestBytes = signManifest(appDir, { version: '2.5.91', authorRels: authorRelsOf(tree) })
+  const authorBefore = authorSnapshotBytes(appDir, tree, [COMMENT_REL])   // 施缝前作者字节（卸载必须逐字回这里）
   assert.equal(applyStandardSeams({ appDir }).changed, true, '前置：首装成功')
   const record = readRecord(appDir)
-  assert.equal(Object.hasOwn(record.after, PKG_REL), false, '前置：package.json 不在 after（漂移点应落在清单身份上）')
-  // 漂移：package.json 加 extra 字段（version 保持），**不更新清单**
+  assert.equal(Object.hasOwn(record.after, PKG_REL), false, '前置：package.json 不在 after（非受管目标，卸载不该回退它）')
+  // package.json 加 extra 字段（version 保持）——契约变化后**不得**因此阻挡卸载，也不得把它回退/写回旧原像
   const pkgFile = fileOf(appDir, PKG_REL)
   const pkg = JSON.parse(readFileSync(pkgFile, 'utf8'))
-  pkg.localExtraField = 'unauthorized drift'
+  pkg.localExtraField = 'user extra field'
   writeFileSync(pkgFile, Buffer.from(JSON.stringify(pkg, null, 2) + '\n', 'utf8'))
-  assert.equal(JSON.parse(readFileSync(pkgFile, 'utf8')).version, '2.5.91', '漂移不得改 version')
+  const pkgDrifted = readFileSync(pkgFile)
+  assert.equal(JSON.parse(pkgDrifted.toString('utf8')).version, '2.5.91', '漂移不得改 version')
   assert.deepEqual(readFileSync(fileOf(appDir, MANIFEST_REL)), manifestBytes, '漂移不得更新清单')
-  const drifted = snapshotDir(appDir)
-  assert.throws(() => checkStandardSeams({ appDir }), /漂移/, '严格 check 必须 throw')
-  assertSameDir(appDir, drifted, 'check 之后现场')
-  // 裁定（2026-10-08）：manifest plan 失败时**无论 allowRebase 都 throw**（防 allowRebase 漂移 ready 假阳性）
-  assert.throws(() => checkStandardSeams({ appDir, allowRebase: true }), /漂移/, '授权兼容模式下本地清单计划失败也必须 throw')
-  assertSameDir(appDir, drifted, '授权模式 check 之后现场')
-  assert.throws(() => uninstallStandardSeams({ appDir }), /漂移|拒绝/, '漂移后卸载必须 throw')
-  assertSameDir(appDir, drifted, '卸载被拒后现场')
-  assert.equal(existsSync(fileOf(appDir, RECORD_REL)), true, '被拒卸载不得删除标准记录')
+  // 严格 check：只看 record.after（package 不在其中）⇒ 仍 ready（不因额外字段拒）
+  assert.equal(checkStandardSeams({ appDir }).ready, true, 'package 额外字段不得阻挡严格 check（strict check 仅 record.after）')
+  const removed = uninstallStandardSeams({ appDir })
+  assert.equal(removed.changed, true, 'package 额外字段不得阻挡卸载')
+  assert.deepEqual(readFileSync(pkgFile), pkgDrifted, '卸载不得回退/写回 package.json（非受管目标）')
+  assert.deepEqual(readFileSync(fileOf(appDir, MANIFEST_REL)), manifestBytes, '卸载不得改动清单')
+  assert.equal(existsSync(fileOf(appDir, RECORD_REL)), false, '卸载必须删除标准记录')
+  for (const [rel, bytes] of authorBefore) {
+    if (rel === PKG_REL) continue   // package.json 的"不回退"已在上方逐字节断言（非受管目标，卸载不动它）
+    assert.deepEqual(readFileSync(fileOf(appDir, rel)), bytes, '作者文件必须逐字回原：' + rel)
+  }
 })
 
 test('本地清单首装后残留卸载保留未知代作者字节且不补冻结字节', async t => {
@@ -246,9 +251,9 @@ test('本地清单首装后残留卸载保留未知代作者字节且不补冻�
   assert.equal(plan.summary.fallback, true, '未知代（未收录 revision）必须走 fallback 计划')
   assert.deepEqual(plan.summary.notes ?? [], [], '计划不得报告无法证明/损坏项：' + JSON.stringify(plan.summary.notes))
   // 裁定（2026-10-08）：residual summary 必须带回本地清单模式与 witness（供 residual 侧核身份）
-  assert.equal(plan.summary.compatibilityMode, LOCAL_MODE, 'summary.compatibilityMode 必须是 ' + LOCAL_MODE)
-  assert.ok(plan.summary.runtimeWitness && typeof plan.summary.runtimeWitness === 'object', 'summary.runtimeWitness 必须存在')
-  assert.equal(plan.summary.runtimeWitness.sha256, sha(manifestBytes), 'summary.runtimeWitness.sha256 必须等于现场清单 bytes 摘要')
+  // 锚点-only 契约：residual 计划的模式来自记录归约（不再有清单 witness）
+  assert.equal(plan.summary.compatibilityMode, 'record-reduction', 'summary.compatibilityMode 必须标 record-reduction')
+  assert.equal(plan.summary.runtimeWitness, null, 'summary.runtimeWitness 必须为 null（不再读发布清单）')
   // ③ 清单与 pkg 不被计划/落地破坏
   assert.deepEqual(readFileSync(fileOf(appDir, MANIFEST_REL)), manifestBytes, '计划不得改动清单')
   assert.equal(JSON.parse(readFileSync(fileOf(appDir, PKG_REL), 'utf8')).version, '2.5.91', '计划不得改动作者 pkg 版本')

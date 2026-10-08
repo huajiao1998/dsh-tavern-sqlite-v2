@@ -202,7 +202,16 @@ export function createChatSqliteStore(options = {}) {
 
   function hasLegacyArtifact(chatId) {
     const id = safeChatId(chatId)
-    return existsSync(path.join(chatsRoot, id + '.json')) || existsSync(path.join(chatsRoot, id, 'head.json'))
+    if (existsSync(path.join(chatsRoot, id + '.json'))) return true
+    const dir = path.join(chatsRoot, id)
+    if (!existsSync(dir)) return false
+    // 作者原档有两种目录形态：内容寻址的 head.json/blocks，以及旧版
+    // chat-journal-store 的 snapshots/journals。后者没有 head.json，仍必须纳入
+    // 原档只读判定，才能让 materialize 进入注入的 authorChatStore.read(id)。
+    return existsSync(path.join(dir, 'head.json'))
+      || existsSync(path.join(dir, 'blocks'))
+      || existsSync(path.join(dir, 'snapshots'))
+      || existsSync(path.join(dir, 'journals'))
   }
 
   // 原档身份不因同 ID 的空库/旧迁移残留而变成可写；只能显式分叉到全新的 ID。
@@ -601,7 +610,8 @@ export function createChatSqliteStore(options = {}) {
         const chat = await legacyStore.read(id)
         if (chat !== undefined && chat !== null) return chat
       } catch (error) {
-        // 作者 store 也读不出来（真没有这个档 / 格式不认识）⇒ 当作没有 legacy
+        // 作者 store 也读不出来（真没有这个档 / 格式不认识）⇒ 保持既有 undefined 语义；
+        // 写入口仍会因 hasLegacyArtifact 拒绝覆盖，不会把它当成可写新档。
         logger.warn?.('[session-sqlite] 块布局 legacy 读取失败 ' + id + '：' + String(error?.message || error))
       }
     }
@@ -639,10 +649,8 @@ export function createChatSqliteStore(options = {}) {
   }
 
   // ---------- 惰性迁移：文件版 → SQLite（行级） ----------
-  function hasFileStoreData(chatId) {
-    const id = safeChatId(chatId)
-    return existsSync(path.join(chatsRoot, id, 'snapshots')) || existsSync(path.join(chatsRoot, id, 'journals'))
-  }
+  // 原档承载判定统一走 hasLegacyArtifact / legacyLayoutOf（含 head.json、blocks、snapshots、journals），
+  // 不再另留一份"只看 journals/snapshots"的窄判定。
 
   async function cachedState(chatId) {
     const stamp = await version(chatId)
@@ -677,10 +685,6 @@ export function createChatSqliteStore(options = {}) {
     // 原件优先，不能为了查看旧 ID 打开 shadow 数据库并触发 WAL/schema 升级。
     const original = hasLegacyArtifact(id)
     if (original || !existsSync(file)) {
-      if (!original && hasFileStoreData(id)) {
-        // [a1-file-store-retired] 2026-09-29 砍单刀6：文件存档后端已退役，journals/snapshots 不再是迁移源
-        throw new Error('文件版存档已退役：' + id + ' 存在 journals/snapshots 残留但无 archive.db，请人工处理')
-      }
       const legacy = await legacyRead(id)
       if (legacy === undefined) return null
       const revision = revisionOf(legacy)

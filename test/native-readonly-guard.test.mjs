@@ -24,10 +24,12 @@ try {
   const dataRoot = path.join(root, 'data')
   writeJson(path.join(root, 'profiles', 'tavern', 'package.json'), { dshTavern: { dataRoot } })
   writeJson(path.join(dataRoot, 'sessions.json'), {
-    'session-block': 'chat-block', 'session-journal': 'chat-journal',
+    'session-block': 'chat-block', 'session-journal': 'chat-journal', 'session-journal-directory': 'chat-journal-directory',
     'session-shadow': 'chat-shadow', 'session-migrated': 'chat-migrated', 'session-missing': 'chat-missing',
   })
   writeJson(path.join(dataRoot, 'chats', 'chat-block', 'head.json'), { format: 1 })
+  mkdirSync(path.join(dataRoot, 'chats', 'chat-journal-directory', 'snapshots'), { recursive: true })
+  mkdirSync(path.join(dataRoot, 'chats', 'chat-journal-directory', 'journals'), { recursive: true })
   writeJson(path.join(dataRoot, 'chats', 'chat-journal.json'), { id: 'chat-journal' })
   writeJson(path.join(dataRoot, 'chats', 'chat-shadow', 'head.json'), { format: 1 })
   for (const chatId of ['chat-shadow', 'chat-migrated']) {
@@ -38,7 +40,7 @@ try {
   writeFileSync(artifactPath, '{"id":"session-original"}\n', 'utf8')
   setLegacyBinding({ chatId: 'chat-bound', sessionId: 'session-bound', originalSessionId: 'session-original', artifactPath })
   const bytesBefore = snapshot(root)
-  const legacyIds = ['session-block', 'session-journal', 'session-shadow', 'session-bound', 'session-original']
+  const legacyIds = ['session-block', 'session-journal', 'session-journal-directory', 'session-shadow', 'session-bound', 'session-original']
   const ordinaryIds = ['session-migrated', 'session-missing', 'session-unrelated']
   for (const id of legacyIds) assert.equal(isLegacySession(id), true, id)
   for (const id of ordinaryIds) assert.equal(isLegacySession(id), false, id)

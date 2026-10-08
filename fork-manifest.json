@@ -1,0 +1,44 @@
+{
+  "note": "fork 清单：记录每个 fork 的来源（上游路径）、我们的副本、以及 **fork 时上游版本的 md5**。fork-drift-check.py 用它判断\"上游是否已变\"（变了 = 需要我们决定要不要合并）。",
+  "upstreamLayoutNote": "上游树按 <repoRoot>/tavern-plugin/lib/... 布局；lab 的 repo 根是 /root/e2e-lab/repo-latest。",
+  "forks": [
+    {
+      "name": "conversation-fork-point",
+      "upstream": "tavern-plugin/lib/domain/conversation-fork-point.js",
+      "ours": "lib/conversation-fork-point.js",
+      "upstreamMd5AtFork": "36c4a3071066a00f0a656a9da32be810",
+      "reason": "A4a 历史分叉入口关闭（行级存档不保留历史版本 ⇒ 回溯整段退役 + 明确报错）"
+    },
+    {
+      "name": "server-template-runtime",
+      "upstream": "tavern-plugin/lib/domain/server-template-runtime.js",
+      "ours": "lib/server-template-runtime.js",
+      "upstreamMd5AtFork": "51088468ce65e7fde404e7212cc55613",
+      "reason": "服务端模板预算 120s → BUDGETS.serverTemplateMs（900s）（2026-09-30 更正：作者主线 origin/main 仍是 120000 ⇒ 并未采纳）",
+      "cancelled": true,
+      "cancelReason": "不 fork：改由 lib/budgets.js 的薄缝交付（serverTemplateMs 一处常量 + 作者文件一行 import）。理由见 §36：该文件 churn 7 次，缝比 fork 划算，且能继续拿上游其它改进。（此前\"上游已采纳\"的取消理由是错的，已于 §42 撤回。）"
+    },
+    {
+      "name": "chat-history-rescue",
+      "upstream": "tavern-plugin/lib/domain/chat-history-rescue.js",
+      "ours": "lib/chat-history-rescue.js",
+      "upstreamMd5AtFork": "0f61627cbe40293f5c18950e2ee6aa2e",
+      "reason": "④ 允许字符串 schema（本卡 stat_data 是 object、schema 是 string ⇒ 原判据下 459 条消息全不算候选）"
+    },
+    {
+      "name": "read-variables",
+      "upstream": "tavern-plugin/lib/domain/read-variables.js",
+      "ours": "lib/read-variables.js",
+      "upstreamMd5AtFork": "d314a88fb736e500655288d5f1cd96ba",
+      "reason": "B 第二阶段变量查询引擎（JSON Pointer 游标分页 / 防漂移 revision / 预算）—— 作者主线亦有此文件 ⇒ fork"
+    },
+    {
+      "name": "host-session-patch",
+      "upstream": "tavern-plugin/lib/domain/host-session-patch.js",
+      "ours": "lib/domain/host-session-patch.js",
+      "upstreamMd5AtFork": "223f4bf51463cba9e4c686330e0f2664",
+      "reason": "宿主会话内存补丁（原型接管 + own-property 兜底 + 租约中性化）—— 作者主线亦有同名文件（md5 223f4bf5…）⇒ 我们这份是大幅重写 ⇒ 按 fork 登记，纳入落后检测"
+    }
+  ],
+  "upstreamReferenceNote": "⚠ 基准必须取**作者主线**（origin/main），不能取 lab 的 HEAD —— lab 的 HEAD = 作者主线 + 我们自己的 6 个提交（2026-09-30 实测 rev-list 0/6），照 HEAD 比会误判成\"上游已采纳\"。"
+}

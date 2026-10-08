@@ -37,13 +37,10 @@ import { applyBackgroundRetirementTransform, applyBackgroundRetirementHostTransf
 import { applySessionResourceRouteTransform } from './session-resource-route-transform.mjs'
 import { applyCurrentResourceAccessTransform, applyCurrentResourceHostTransform } from './session-current-resource-transform.mjs'
 
-import { AUTHOR_VERSION } from '../lib/standard-host.js'
 import { clientCoreWrites } from './client-seams.mjs'
 import { applyForkHistoryTransform } from './fork-history-transform.mjs'
 import { applyNativeDataTransform, isNativeDataApplied, ANCHORS as NATIVE_DATA_ANCHORS } from './native-data-transform.mjs'
 import { applyNativeMessageTransform, isNativeMessageApplied } from './native-data-transform.mjs'
-import { classifyAuthorCompatibility, loadAuthorImages, authorImages } from './author-compatibility.mjs'
-import { validateRuntimeManifest } from './author-runtime-manifest.mjs'
 import { planAuthorRebase } from './author-rebase-plan.mjs'
 
 const RECORD = '.tavern-standard-seams.json'
@@ -94,25 +91,12 @@ function snapshot(appDir) {
     return [rel, existsSync(file) ? readFileSync(file).toString('base64') : null]
   }))
 }
-function captureRuntimeManifest(appDir) {
-  const file = inside(appDir, 'dsh-tavern-runtime.json')
-  if (!existsSync(file)) return null
-  if (!lstatSync(file).isFile() || lstatSync(file).isSymbolicLink()) throw Error('作者runtime manifest不是普通文件')
-  const bytes = readFileSync(file)
-  if (!bytes.length || bytes.length > 4 * 1024 * 1024) throw Error('作者runtime manifest大小非法')
-  return { body: bytes.toString('base64'), sha256: hash(bytes) }
-}
 function restore(appDir, before, owned = artifacts(appDir)) {
   for (const rel of new Set([...owned, ...Object.keys(before)])) {
     const file = inside(appDir, rel), body = before[rel]
     if (body == null) { if (existsSync(file)) unlinkSync(file) }
     else { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, Buffer.from(body, 'base64')) }
   }
-}
-let cachedImages = null
-function trustedAuthorImages() {
-  if (cachedImages === null) cachedImages = authorImages(loadAuthorImages())
-  return cachedImages
 }
 function readStandardRecord(appDir) {
   artifacts(appDir) // 读取记录及其目标之前先拒绝有限目录中的外部链接。
@@ -131,28 +115,17 @@ function readStandardRecord(appDir) {
   }
   for (const [rel, body] of Object.entries(record.before)) if (body !== null && (typeof body !== 'string' || Buffer.from(body, 'base64').toString('base64') !== body)) throw Error('标准前像编码不合法：' + rel)
   for (const [rel, digest] of Object.entries(record.after)) if (!/^[a-f0-9]{64}$/.test(digest)) throw Error('标准后像摘要不合法：' + rel)
-  if (record.runtimeManifest !== undefined) {
-    const m = record.runtimeManifest
-    if (!m || typeof m !== 'object' || typeof m.body !== 'string' || Buffer.from(m.body, 'base64').toString('base64') !== m.body || !/^[a-f0-9]{64}$/.test(m.sha256)) throw Error('标准记录runtime manifest不合法')
-    if (hash(Buffer.from(m.body, 'base64')) !== m.sha256) throw Error('标准记录runtime manifest摘要不符')
-  }
+  // 接入锚点-only：旧记录里的 `runtimeManifest` 字段**完全忽略**（不读、不校验、不算摘要），不留来源认证诊断。
   return record
 }
-/** 只读投影：旧 before 仅用于还原已核 after 的文件，最终必须匹配同一可信作者契约。 */
+/** 只读投影（锚点-only）：有记录时按记录真实 before/after 归约（不再以 catalog/manifest 准入）；
+ *  无记录（首装）时给诊断结论，准入由隔离完整施缝＋语法＋ready 决定。 */
 function compatibleAuthorVerdict(appDir) {
   const record = readStandardRecord(appDir)
-  if (!record) {
-    const runtimeTargets = [...TARGETS]
-    if (existsSync(inside(appDir, MESSAGE_COORDINATOR))) runtimeTargets.push(MESSAGE_COORDINATOR)
-    const runtime = validateRuntimeManifest({ appDir, targets: runtimeTargets, images: trustedAuthorImages() })
-    if (runtime?.ok) return { ok: true, mode: 'local-runtime-manifest', matchedCommit: null, skippedOwned: [], failures: [], runtimeWitness: runtime.witness }
-    const frozen = classifyAuthorCompatibility({ appDir, targets: TARGETS, images: trustedAuthorImages() })
-    if (!frozen.ok && runtime) frozen.failures = [...runtime.failures, ...frozen.failures]
-    return frozen
-  }
+  if (!record) return { ok: true, mode: 'anchor-only', matchedCommit: null, skippedOwned: [], failures: [] }
   const targets = [...TARGETS]
   if (existsSync(inside(appDir, MESSAGE_COORDINATOR)) || Object.hasOwn(record.before, MESSAGE_COORDINATOR) || Object.hasOwn(record.after, MESSAGE_COORDINATOR)) targets.push(MESSAGE_COORDINATOR)
-  const plan = planAuthorRebase({ appDir, targets, record, images: trustedAuthorImages() })
+  const plan = planAuthorRebase({ appDir, targets, record, images: null })
   return { ...plan, ok: plan.compatible }
 }
 function authorManifest(appDir) {
@@ -180,18 +153,11 @@ function requireAuthor(appDir, authorVersion, { allowRebase = false } = {}) {
   if (pkg.name !== 'dsh-tavern-plugin') throw new Error('标准接入仅支持作者包 dsh-tavern-plugin，拒绝未知包名')
   if (typeof pkg.version !== 'string' || !pkg.version.trim()) throw Error('作者版本字段不合法')
   if (authorVersion !== undefined && authorVersion !== pkg.version) throw Error('作者版本与解析所得版本不一致')
-  if (pkg.version === AUTHOR_VERSION && (!allowRebase || existsSync(inside(appDir, RECORD)) || !existsSync(inside(appDir, 'dsh-tavern-runtime.json')))) return pkg
-  if (pkg.version === AUTHOR_VERSION) {
-    const verdict = compatibleAuthorVerdict(appDir)
-    if (verdict.mode === 'local-runtime-manifest') return { ...pkg, compatible: verdict }
-    return pkg
-  }
-  // 已施缝同代（record.after 全等）无需 rebase 也无需资产比对：记录 CAS 即证明；结构由严格 transform 检查兜底。
-  if (appliedRecordIntact(appDir)) return { ...pkg, compatible: { ok: true, mode: 'applied', matchedCommit: null, skippedOwned: [], failures: [] } }
-  if (!allowRebase) throw new Error('标准接入仅支持已适配作者' + AUTHOR_VERSION + '，拒绝未知版本')
-  const verdict = compatibleAuthorVerdict(appDir)
-  if (!verdict.ok) throw new Error('作者版本 ' + pkg.version + ' 与可信基线不兼容：' + verdict.failures.slice(0, 5).join('；'))
-  return { ...pkg, compatible: verdict }
+  void allowRebase
+  // 接入锚点-only（2026-10-09 用户授权）：**作者版本/发布清单只作诊断，不再作安装准入**。
+  // 已装同代由 record.after 全等证明；未知代首装由调用方走"隔离完整施缝＋语法＋ready"判定。
+  const intact = appliedRecordIntact(appDir)
+  return intact ? { ...pkg, compatible: { ok: true, mode: 'applied', matchedCommit: null, skippedOwned: [], failures: [] } } : pkg
 }
 function text(appDir, rel) { return readFileSync(inside(appDir, rel), 'utf8') }
 const RESOLVER = `// [dsh-tavern-standard-owned:v1]
@@ -307,13 +273,8 @@ export function checkStandardSeams({ appDir, authorVersion, allowRebase = false 
   const file = inside(appDir, RECORD)
   if (!existsSync(file)) return { ready: false, coverage: 'standard-core', reason: '尚未标准接入' }
   const record = readStandardRecord(appDir)
-  if (record.runtimeManifest) {
-    const targets = [...TARGETS]
-    if (Object.hasOwn(record.before, MESSAGE_COORDINATOR) || Object.hasOwn(record.after, MESSAGE_COORDINATOR)) targets.push(MESSAGE_COORDINATOR)
-    const plan = planAuthorRebase({ appDir, targets, record, images: trustedAuthorImages() })
-    if (!plan.compatible) throw Error('本地清单代身份/前像发生漂移，拒绝覆盖：' + plan.failures.slice(0, 3).join('；'))
-  }
-  // 作者版本用于诊断；已接入态的真正判据是全部 after 摘要和消费者复检。
+  // 接入锚点-only（2026-10-09 用户授权）：**严格 installed check 只看 record.after 与消费者复检**；
+  // 作者版本/发布清单（record.runtimeManifest 与树内 dsh-tavern-runtime.json）只作诊断，不再作准入/漂移判据。
   const drifted = []
   for (const [rel, expected] of Object.entries(record.after)) {
     const target = inside(appDir, rel)
@@ -340,10 +301,8 @@ function applyCompatibleRebase(appDir, plan) {
       const target = inside(stage, rel)
       mkdirSync(path.dirname(target), { recursive: true }); writeFileSync(target, Buffer.from(body, 'base64'))
     }
-    const runtimeManifest = captureRuntimeManifest(appDir)
     const packageBytes = readFileSync(inside(appDir, 'tavern-plugin/package.json'))
     if (!existsSync(inside(stage, 'tavern-plugin/package.json'))) writeFileSync(inside(stage, 'tavern-plugin/package.json'), packageBytes)
-    if (runtimeManifest) writeFileSync(inside(stage, 'dsh-tavern-runtime.json'), Buffer.from(runtimeManifest.body, 'base64'))
     const result = applyStandardSeams({ appDir: stage, allowRebase: true })
     if (!checkStandardSeams({ appDir: stage }).ready) throw Error('兼容重接副本未就绪')
     // 展示字段使用真实应用根；重新计算记录摘要，不篡改旧记录来假称一致。
@@ -357,9 +316,9 @@ function applyCompatibleRebase(appDir, plan) {
     writeFileSync(freshFile, JSON.stringify(fresh, null, 2) + '\n', 'utf8')
     const previous = JSON.parse(oldRecord.toString('utf8'))
     for (const [rel, body] of Object.entries(image)) if (body !== null && !TARGETS.includes(rel) && original[rel] !== undefined && original[rel] !== null && !Object.hasOwn(previous.after, rel)) throw Error('新备份与未知现场文件冲突，拒绝覆盖：' + rel)
-    // 写前比较有限现场和标准记录；不在副本预演期间覆盖外部更新。
+    // 写前比较有限现场和标准记录；不在副本预演期间覆盖外部更新。（发布清单只作诊断，不参与该比较）
     const now = snapshot(appDir)
-    if (JSON.stringify(now) !== JSON.stringify(original) || !readFileSync(recordFile).equals(oldRecord) || !readFileSync(inside(appDir, 'tavern-plugin/package.json')).equals(packageBytes) || JSON.stringify(captureRuntimeManifest(appDir)) !== JSON.stringify(runtimeManifest)) throw Error('兼容预演期间作者树发生变化，拒绝覆盖')
+    if (JSON.stringify(now) !== JSON.stringify(original) || !readFileSync(recordFile).equals(oldRecord) || !readFileSync(inside(appDir, 'tavern-plugin/package.json')).equals(packageBytes)) throw Error('兼容预演期间作者树发生变化，拒绝覆盖')
     // 仅撤当前记录已经证明归属的自有文件；未列入旧记录的额外备份保持不动。
     writeStarted = true
     for (const rel of plan.ownedCleanup) if (!Object.hasOwn(image, rel) || image[rel] === null) {
@@ -370,7 +329,7 @@ function applyCompatibleRebase(appDir, plan) {
     }
     writeFileSync(recordFile, readFileSync(freshFile))
     if (!checkStandardSeams({ appDir }).ready) throw Error('兼容重接后严格检查未就绪')
-    if (!readFileSync(inside(appDir, 'tavern-plugin/package.json')).equals(packageBytes) || JSON.stringify(captureRuntimeManifest(appDir)) !== JSON.stringify(runtimeManifest)) throw Error('重接完成前作者身份材料发生变化')
+    if (!readFileSync(inside(appDir, 'tavern-plugin/package.json')).equals(packageBytes)) throw Error('重接完成前作者包身份材料发生变化')
     return { ...result, authorRebased: true, authorVersion: plan.authorVersion }
   } catch (error) {
     if (writeStarted) { restore(appDir, original); writeFileSync(recordFile, oldRecord) }
@@ -380,24 +339,21 @@ function applyCompatibleRebase(appDir, plan) {
     rmSync(stage, { recursive: true, force: true })
   }
 }
-export function applyStandardSeams(options = {}) {
-  const { appDir, authorVersion, allowRebase = true } = options
-  const author = requireAuthor(appDir, authorVersion, { allowRebase })
-  if (existsSync(inside(appDir, RECORD)) || author.compatible?.mode !== 'local-runtime-manifest') return applyStandardSeamsDirect(options)
-  // 未收录作者代先在有限源码副本完整施缝；不 import 作者业务，不访问数据目录。
+/**
+ * 锚点-only 首装**私有预演**（只读：只写 os.tmpdir 下的 stage，绝不碰现场；不读/不写发布清单）。
+ * inspect 与 apply 共用同一实现，不另造多层：copy 有限受管面 → applyStandardSeamsDirect(stage) →
+ * 严格 check ready → 归一历史记录 app 字段 → 生成 after 摘要。返回 { ok, failures, image, freshBytes, version, result }。
+ */
+function preflightAnchorOnlyInstall({ appDir, authorVersion }) {
   const original = snapshot(appDir), pkgBytes = readFileSync(inside(appDir, 'tavern-plugin/package.json'))
-  const manifest = captureRuntimeManifest(appDir)
-  if (!manifest || manifest.sha256 !== author.compatible.runtimeWitness.sha256) throw Error('预演前runtime manifest发生变化')
-  const stage = mkdtempSync(path.join(os.tmpdir(), 'dsh-manifest-install-'))
-  let writeStarted = false
+  const stage = mkdtempSync(path.join(os.tmpdir(), 'dsh-anchor-only-install-'))
   try {
     for (const [rel, body] of Object.entries(original)) if (body !== null) {
       const target = inside(stage, rel); mkdirSync(path.dirname(target), { recursive: true }); writeFileSync(target, Buffer.from(body, 'base64'))
     }
     writeFileSync(inside(stage, 'tavern-plugin/package.json'), pkgBytes)
-    writeFileSync(inside(stage, 'dsh-tavern-runtime.json'), Buffer.from(manifest.body, 'base64'))
-    const result = applyStandardSeamsDirect({ appDir: stage, authorVersion, allowRebase })
-    if (!checkStandardSeams({ appDir: stage }).ready) throw Error('runtime manifest代隔离施缝未就绪')
+    const result = applyStandardSeamsDirect({ appDir: stage, authorVersion, allowRebase: true })
+    if (!checkStandardSeams({ appDir: stage }).ready) throw Error('隔离施缝后严格检查未就绪')
     for (const rel of ['.tavern-seams.json', '.tavern-legacy-view-seams.json', '.tavern-save-ui-seam.json']) {
       const file = inside(stage, rel)
       if (existsSync(file)) {
@@ -409,19 +365,40 @@ export function applyStandardSeams(options = {}) {
     const image = snapshot(stage), fresh = JSON.parse(readFileSync(inside(stage, RECORD), 'utf8'))
     fresh.after = Object.fromEntries(Object.entries(image).filter(([, body]) => body !== null).map(([rel, body]) => [rel, hash(Buffer.from(body, 'base64'))]))
     const freshBytes = Buffer.from(JSON.stringify(fresh, null, 2) + '\n', 'utf8')
-    if (JSON.stringify(snapshot(appDir)) !== JSON.stringify(original) || existsSync(inside(appDir, RECORD)) || !readFileSync(inside(appDir, 'tavern-plugin/package.json')).equals(pkgBytes) || JSON.stringify(captureRuntimeManifest(appDir)) !== JSON.stringify(manifest)) throw Error('隔离预演期间作者树发生变化，拒绝覆盖')
+    return {
+      ok: true, failures: [], image, freshBytes, result,
+      version: authorVersion ?? JSON.parse(pkgBytes.toString('utf8')).version,
+      pending: [],
+    }
+  } catch (error) {
+    return { ok: false, failures: [String(error?.message || error)], image: null, freshBytes: null, result: null, version: null, pending: [] }
+  } finally {
+    if (path.dirname(stage) !== path.resolve(os.tmpdir()) || !path.basename(stage).startsWith('dsh-anchor-only-install-')) throw Error('隔离副本路径不符')
+    rmSync(stage, { recursive: true, force: true })
+  }
+}
+export function applyStandardSeams(options = {}) {
+  const { appDir, authorVersion, allowRebase = true } = options
+  requireAuthor(appDir, authorVersion, { allowRebase })
+  if (existsSync(inside(appDir, RECORD))) return applyStandardSeamsDirect(options)
+  // 接入锚点-only 首装（2026-10-09 用户授权）：无记录 ⇒ **不要求发布清单、完全不读清单**；
+  // 先在有限源码副本做完整隔离预演（完整 apply＋语法＋ready），再落到现场；现场写前仍核 CAS（快照/记录/package）。
+  const original = snapshot(appDir), pkgBytes = readFileSync(inside(appDir, 'tavern-plugin/package.json'))
+  const rehearsal = preflightAnchorOnlyInstall({ appDir, authorVersion })
+  if (!rehearsal.ok) throw new Error('锚点-only 隔离预演失败，现场未写入：' + rehearsal.failures.join('；'))
+  const { image, freshBytes, result } = rehearsal
+  let writeStarted = false
+  try {
+    if (JSON.stringify(snapshot(appDir)) !== JSON.stringify(original) || existsSync(inside(appDir, RECORD)) || !readFileSync(inside(appDir, 'tavern-plugin/package.json')).equals(pkgBytes)) throw Error('隔离预演期间作者树发生变化，拒绝覆盖')
     writeStarted = true
     restore(appDir, image, Object.keys(image))
     writeFileSync(inside(appDir, RECORD), freshBytes)
-    if (!checkStandardSeams({ appDir }).ready) throw Error('runtime manifest代安装后未就绪')
-    if (!readFileSync(inside(appDir, 'tavern-plugin/package.json')).equals(pkgBytes) || JSON.stringify(captureRuntimeManifest(appDir)) !== JSON.stringify(manifest)) throw Error('安装完成前作者身份材料发生变化')
-    return { ...result, compatibilityMode: 'local-runtime-manifest', runtimeWitness: author.compatible.runtimeWitness }
+    if (!checkStandardSeams({ appDir }).ready) throw Error('锚点-only 安装后未就绪')
+    if (!readFileSync(inside(appDir, 'tavern-plugin/package.json')).equals(pkgBytes)) throw Error('安装完成前作者包身份材料发生变化')
+    return { ...result, compatibilityMode: 'anchor-only', authorVersion: rehearsal.version }
   } catch (error) {
     if (writeStarted) { restore(appDir, original); if (existsSync(inside(appDir, RECORD))) unlinkSync(inside(appDir, RECORD)) }
-    throw new Error(writeStarted ? '清单代安装失败，已恢复本次前像' : '清单代隔离预演失败，现场未写入', { cause: error })
-  } finally {
-    if (path.dirname(stage) !== path.resolve(os.tmpdir()) || !path.basename(stage).startsWith('dsh-manifest-install-')) throw Error('隔离副本路径不符')
-    rmSync(stage, { recursive: true, force: true })
+    throw new Error(writeStarted ? '锚点-only 安装失败，已恢复本次前像' : '锚点-only 隔离预演失败，现场未写入', { cause: error })
   }
 }
 function applyStandardSeamsDirect({ appDir, authorVersion, allowRebase = true } = {}) {
@@ -475,9 +452,9 @@ function applyStandardSeamsDirect({ appDir, authorVersion, allowRebase = true } 
     }
     const after = Object.fromEntries(artifacts(appDir).filter(rel => existsSync(inside(appDir, rel))).map(rel => [rel, hash(readFileSync(inside(appDir, rel)))]))
     const old = previousRecord ? JSON.parse(previousRecord.toString('utf8')) : undefined
-    const runtimeManifest = author.compatible?.mode === 'local-runtime-manifest' ? captureRuntimeManifest(appDir) : old?.runtimeManifest
-    // 既有路径保持原样（盲 merge 未改，避免 partial regression）；新首装无旧记录，不涉及此合并。
-    writeFileSync(recordPath, JSON.stringify({ version: 1, authorVersion: author.version, before: old?.before ? { ...before, ...old.before } : before, after, ...(runtimeManifest ? { compatibilityMode: 'local-runtime-manifest', runtimeManifest } : {}) }, null, 2) + '\n', 'utf8')
+    // 记录形状（锚点-only 真字段）：只含 version/authorVersion/before/after/compatibilityMode；
+    // **不写 runtimeManifest**（发布清单在本代完全不参与安装），旧记录里的该字段仅兼容读、坏值忽略。
+    writeFileSync(recordPath, JSON.stringify({ version: 1, authorVersion: author.version, compatibilityMode: 'anchor-only', before: old?.before ? { ...before, ...old.before } : before, after }, null, 2) + '\n', 'utf8')
     return { changed: true, ready: true, coverage: 'standard-core', files: [...core.keys()] }
   } catch (error) {
     restore(appDir, before)
@@ -519,7 +496,18 @@ export function inspectStandardSeamsPlan({ appDir, authorVersion, allowRebase = 
   const file = inside(appDir, RECORD)
   const record = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : null
   const identity = record ? { version: record.version, authorVersion: record.authorVersion } : null
-  // 无记录的新版本首装：requireAuthor 的能力判定结果必须透传（否则 driver 会把 fresh 新版本误拒）。
+  if (!record) {
+    // 首装（未知作者版本）：**必须实际跑完整隔离预演**（有限只读副本内完整 apply＋语法＋ready），
+    // 否则 driver 会在未知版本上拿到假的可用结论。预演只写 os.tmpdir 的 stage，不碰现场。
+    const rehearsal = preflightAnchorOnlyInstall({ appDir, authorVersion })
+    return {
+      ready: rehearsal.ok, needsReapply: false, preflight: rehearsal.ok ? 'passed' : 'failed',
+      reason: rehearsal.ok ? 'ready' : (rehearsal.failures[0] || '隔离预演未通过'),
+      pending: [], drifted: [],
+      compatible: { ok: rehearsal.ok, mode: 'anchor-only', matchedCommit: null, skippedOwned: [], failures: rehearsal.failures },
+      authorVersion: rehearsal.version ?? author.version, record: null,
+    }
+  }
   const capability = author.compatible || null
   try {
     const state = checkStandardSeams({ appDir, authorVersion, allowRebase })

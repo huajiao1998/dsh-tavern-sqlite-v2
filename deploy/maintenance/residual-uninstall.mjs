@@ -1,5 +1,5 @@
 // 双平台共用的有限残留卸载。只操作接缝目标/已证明自有备份，不枚举用户数据。
-// 无标记不等于作者原像；恢复必须来自随包校验的官方字节，不把污染 before 或旧备份强盖新版。
+// 有记录时恢复本次真实前像，保留用户修改；缺记录时才使用随包有限恢复材料，不旧字节强盖新版。
 import { existsSync, lstatSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
@@ -86,6 +86,9 @@ export function planResidualUninstall({ source, adapter, catalog = loadAuthorCle
   const trees = trustedImages(catalog, adapter), before = source.capture(), expected = { ...before }
   const changed = [], kept = [], archived = [], problems = []
   const sourceTargets = adapter.targets.filter(rel => rel.endsWith('.js'))
+  // 此作者文件已由标准记录捕获，但不扩张冻结目录的覆盖目标。
+  const coordinator = 'tavern-plugin/lib/domain/background-task-coordinator.js'
+  if (Object.hasOwn(before, coordinator)) sourceTargets.push(coordinator)
   const known = (rel, bytes) => bytes !== null && trees.some(tree => Object.hasOwn(tree.files, rel) && tree.files[rel] !== null && tree.files[rel].equals(bytes))
   const protectedKnown = (rel, bytes) => rel === 'tavern-plugin/lib/index.js' && bytes !== null && trees.some(tree => tree.files[rel] && Buffer.from(protectAuthorStartup(tree.files[rel].toString('utf8')), 'utf8').equals(bytes))
   const receipt = releaseIdentity(source.root)
@@ -97,8 +100,10 @@ export function planResidualUninstall({ source, adapter, catalog = loadAuthorCle
     if (record && (record.version !== 1 || !record.before || !record.after || typeof record.before !== 'object' || typeof record.after !== 'object' || Array.isArray(record.before) || Array.isArray(record.after))) { problems.push('标准记录不完整，忽略其前像'); record = null }
     if (record) for (const rel of new Set([...Object.keys(record.before), ...Object.keys(record.after)])) source.file(rel)
   }
-  // 完整裸投影须匹配冻结契约或本次本地发布清单；保留精确作者前像，不由旧 receipt 覆盖更新。
-  const accepted = record ? planAuthorRebase({ appDir: source.root, targets: adapter.targets, record, images: trees }) : null
+  // 有有效记录时按真实前像归约，不要求用户字节匹配发行清单或冻结树。
+  const completeRecord = record && Object.hasOwn(record.before, 'tavern-plugin/lib/index.js') && Object.hasOwn(record.after, 'tavern-plugin/lib/index.js') && adapter.targets.every(rel => Object.hasOwn(record.before, rel))
+  const accepted = completeRecord ? planAuthorRebase({ appDir: source.root, targets: [...new Set([...adapter.targets, ...sourceTargets])], record, images: trees }) : null
+  if (completeRecord && !accepted?.compatible) throw Error('当前接缝不能按完整记录归约，保留用户现场：' + (accepted?.failures || []).slice(0, 3).join('；'))
   const acceptedBytes = rel => accepted?.compatible && typeof accepted.before?.[rel] === 'string' ? decode(accepted.before[rel], rel) : null
   // CLI旧安装可能没有发布标记。只用确证为官方字节的before定位所属树，忽略污染before；
   // 此推断仅给仍明确属于本插件的目标恢复，不能据它覆盖零标记的未知升级文件。
@@ -141,7 +146,7 @@ export function planResidualUninstall({ source, adapter, catalog = loadAuthorCle
     if (known(rel, current) || protectedKnown(rel, current)) { kept.push(rel); continue }
     const images = trees.map(tree => tree.files[rel])
     // 唯一 optional 作者路径**永不算 added/owned**：否则受限 catalog（只含旧树）会把它当“插件新建”而误删未知同名文件。
-    const added = !OPTIONAL_AUTHOR_TARGETS.includes(rel) && images.every(bytes => bytes === null)
+    const added = rel !== coordinator && !OPTIONAL_AUTHOR_TARGETS.includes(rel) && images.every(bytes => bytes === null)
     const installedHash = current !== null && record?.after?.[rel] === hash(current)
     const recognizedOwned = current !== null && (catalog.ownedFiles?.[rel] || []).includes(hash(current))
     if (added) {
@@ -159,12 +164,13 @@ export function planResidualUninstall({ source, adapter, catalog = loadAuthorCle
     // 不删除当前存在的未知文件、也不跳过已装目标所需的恢复（after 有合法 sha 时照旧走恢复路径）。
     if (OPTIONAL_AUTHOR_TARGETS.includes(rel) && current === null && record?.before?.[rel] === null && !/^[a-f0-9]{64}$/.test(record?.after?.[rel] || '')) continue
     if (current !== null && foreignCode(current.toString('utf8'))) throw Error('作者目标含另一产品线代码：' + rel)
-    // 未修改作者文件不因为“没有标记”就宣称干净。已装前像若为可信官方原像才能采用。
+    // 完整记录优先恢复真实前像；损坏/部分历史记录仍走既有有限恢复兜底。
     let clean = installedHash ? acceptedOriginal : null
     if (!clean && installedHash && typeof record?.before?.[rel] === 'string') {
       try {
         const bytes = decode(record.before[rel], rel)
-        if (known(rel, bytes) || protectedKnown(rel, bytes)) clean = selected?.files[rel] || bytes
+        if (accepted?.compatible && !ownCode(bytes.toString('utf8')) && !foreignCode(bytes.toString('utf8'))) clean = bytes
+        else if (known(rel, bytes) || protectedKnown(rel, bytes)) clean = selected?.files[rel] || bytes
       } catch { problems.push('忽略损坏/不可用的标准前像：' + rel) }
     }
     const recordedTarget = !!receipt && !!selected && /^[a-f0-9]{64}$/.test(record?.after?.[rel] || '')
@@ -177,7 +183,7 @@ export function planResidualUninstall({ source, adapter, catalog = loadAuthorCle
       if (candidates.length && candidates.every(bytes => bytes.equals(candidates[0]))) clean = candidates[0]
     }
     if (!clean) throw Error('不能证明作者目标已干净或恢复版本；未修改目标：' + rel + '。需要当前酒馆准确官方源码（不是删除酒馆/存档或修改after哈希）')
-    replace(rel, clean, installedHash ? '撤回本插件接缝到可信作者原像' : '恢复安装中断/漂移目标的准确官方源码')
+    replace(rel, clean, installedHash ? '撤回本插件接缝到安装时实际前像' : '恢复安装中断/漂移目标的准确官方源码')
   }
   // 非源码产物只撤本插件的四份固定记录和已确证的备份，不遍历整棵app或业务树。
   for (const rel of RECORDS) {

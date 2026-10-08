@@ -4,7 +4,7 @@
 
 ## 支持范围
 
-- macOS、Linux、WSL2 CLI；已有作者 2.5.0（接缝与有限恢复基线复核至 `3100d223`）、DSH / boot 0.1.5-rc.2、Node.js 22.19+、pnpm。未知作者源码布局或未知管理器明确拒绝，不猜测覆盖。作者版本号只作**诊断定位**；已有代可按“全目标共用同一份 baseline 契约结构”验证；0.3.5 起，未收录代也可按本地 `dsh-tavern-runtime.json` 验证受管文件摘要/大小、包身份与路径，经隔离完整施缝、语法与现场身份复检后接纳。清单一致性不等于官方签名认证或未来全部语义兼容，必要锚点变化仍拒绝；清单缺失/不匹配时保留冻结契约判断。安装保存本次精确前像，卸载不自动联网猜原件。同包重装按受控刷新处理而不是盲目覆盖。本指南不对其它接口/数据 ABI 变化作自动承诺；DSH / boot rc2、同 generation 不同插件包、vendor 台账仍按各自门禁守住。
+- macOS、Linux、WSL2 CLI；已有作者 2.5.0（接缝与有限恢复基线复核至 `3100d223`）、DSH / boot 0.1.5-rc.2、Node.js 22.19+、pnpm。未知作者源码布局或未知管理器明确拒绝，不猜测覆盖。作者版本号只作**诊断定位**。当前本地源码（尚未随正式 Release 发布）按接入锚点判断兼容：必需转换全部成功、隔离副本完整施缝且语法/接缝就绪检查通过就允许安装，不要求文件匹配 runtime manifest 或冻结作者树。用户修改变量数值、注释或其他不破坏接入点的代码，不因此拒绝；缺失或过时的 runtime manifest、删除无关说明文件不影响安装。安装保存用户当前真实前像，失败回滚及卸载恢复这些字节，不用官方旧字节撤销用户改动。0.3.5 正式包仍是原清单/冻结契约准入，须等后续发行才获得本次改造。同包重装按受控刷新处理而不是盲目覆盖。本指南不对其它接口/数据 ABI 变化作自动承诺；DSH / boot rc2、同 generation 不同插件包、vendor 台账仍按各自门禁守住。
 - Windows 10 1803+：公开 0.3.0 支持桌面版（Electron）；本地源码新增原生 Windows CLI 停态装卸，尚未发布，见下节。卡脚本按 VM 能力分叉：主进程具备 VM 时原进程执行，否则用已有带实验旗标的 Worker，不按系统名称硬判。
 - 四个解析器 json5、jsonrepair、lodash、yaml 已vendor到包内，零运行时npm依赖。POSIX 官方包管理固定 `--offline --ignore-scripts --config.auto-install-peers=false`；Windows 复用本包复制、profile link/junction 与宿主 peer 同实例链接，不重装其它依赖、不联网补 SDK。兜底卸载不依赖旧包解析器/包管理。
 - POSIX 维护路径保留 `--experimental-vm-modules` 启动资格检查。已有 systemd 单元可加 `--prepare-env` 授权备份并补旗标、失败恢复；不加不改启动配置。新 Windows CLI 路径通过既有 Worker 取得 VM 能力，不要求修改后台启动旗标，拒绝 `--prepare-env`/systemd 接管。
