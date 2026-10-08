@@ -40,11 +40,15 @@ import { applyCurrentResourceAccessTransform, applyCurrentResourceHostTransform 
 import { AUTHOR_VERSION } from '../lib/standard-host.js'
 import { clientCoreWrites } from './client-seams.mjs'
 import { applyForkHistoryTransform } from './fork-history-transform.mjs'
+import { applyNativeDataTransform, isNativeDataApplied, ANCHORS as NATIVE_DATA_ANCHORS } from './native-data-transform.mjs'
+import { applyNativeMessageTransform, isNativeMessageApplied } from './native-data-transform.mjs'
 import { classifyAuthorCompatibility, loadAuthorImages, authorImages } from './author-compatibility.mjs'
+import { validateRuntimeManifest } from './author-runtime-manifest.mjs'
 import { planAuthorRebase } from './author-rebase-plan.mjs'
 
 const RECORD = '.tavern-standard-seams.json'
 const DOMAIN = 'tavern-plugin/lib/domain/'
+const MESSAGE_COORDINATOR = DOMAIN + 'background-task-coordinator.js'
 const TARGETS = [
   'tavern-plugin/lib/hooks/turn-lifecycle.js',
   'tavern-plugin/src/client/features/play-controls.js', 'tavern-plugin/src/client/features/turn-history.js',
@@ -57,7 +61,7 @@ const TARGETS = [
   ...['chat-sqlite-store.js', 'tavern-conversation-registry.js', 'conversation-initialization.js', 'session-view-reader.js',
     'legacy-view-seams.js', 'round-history.js', 'story-timeline.js', 'model-error-presentation.js', 'tavern-script-host-adapter.js', 'tavern-script-dispatch.js',
     'server-template-runtime.js', 'conversation-fork-point.js', 'chat-history-rescue.js',
-    'opening-preparation.js', 'storage-opening-runtime.js', 'storage-fork-history.js', 'storage-server-execution.js', 'storage-rollback.js', 'storage-budgets.js', 'storage-package.js',
+    'opening-preparation.js', 'storage-opening-runtime.js', 'storage-native-data.js', 'storage-fork-history.js', 'storage-server-execution.js', 'storage-rollback.js', 'storage-budgets.js', 'storage-package.js',
     'storage-db-save.js', 'storage-current-variables.js', 'storage-compaction-warning.js', 'read-variables.js', 'storage-rollback-business.js', 'turn-orchestration.js', 'settlement-jobs.js', 'foreground-handoff.js', 'server-template-sync.js', 'candidate-worldbook-preparation.js', 'auto-compaction.js', 'chat-session-state.js', 'card-summary-cache.js', 'worldbook-library.js', 'file-resources.js', 'session-resource-access.js', 'background-session-retirement.js', 'game-footprint.js'].map(name => DOMAIN + name),
   '.tavern-seams.json', '.tavern-legacy-view-seams.json', '.tavern-save-ui-seam.json',
 ]
@@ -71,6 +75,7 @@ function inside(root, rel) {
 const hash = data => createHash('sha256').update(data).digest('hex')
 function artifacts(appDir) {
   const names = new Set(TARGETS)
+  if (existsSync(inside(appDir, MESSAGE_COORDINATOR))) names.add(MESSAGE_COORDINATOR)
   for (const rel of DIRS) {
     const dir = path.resolve(appDir, rel), root=path.resolve(appDir)
     for(let p=dir;;p=path.dirname(p)){if(existsSync(p)&&lstatSync(p).isSymbolicLink())throw Error('标准备份目录不接受符号链接：'+p);if(p===root)break}
@@ -88,6 +93,14 @@ function snapshot(appDir) {
     const file = inside(appDir, rel)
     return [rel, existsSync(file) ? readFileSync(file).toString('base64') : null]
   }))
+}
+function captureRuntimeManifest(appDir) {
+  const file = inside(appDir, 'dsh-tavern-runtime.json')
+  if (!existsSync(file)) return null
+  if (!lstatSync(file).isFile() || lstatSync(file).isSymbolicLink()) throw Error('作者runtime manifest不是普通文件')
+  const bytes = readFileSync(file)
+  if (!bytes.length || bytes.length > 4 * 1024 * 1024) throw Error('作者runtime manifest大小非法')
+  return { body: bytes.toString('base64'), sha256: hash(bytes) }
 }
 function restore(appDir, before, owned = artifacts(appDir)) {
   for (const rel of new Set([...owned, ...Object.keys(before)])) {
@@ -109,7 +122,7 @@ function readStandardRecord(appDir) {
   const record = JSON.parse(readFileSync(file, 'utf8'))
   const object = value => value && typeof value === 'object' && !Array.isArray(value)
   if (record.version !== 1 || typeof record.authorVersion !== 'string' || !record.authorVersion.trim() || !object(record.before) || !object(record.after) || !Object.keys(record.after).length) throw Error('标准接入记录格式未知')
-  const allowed = rel => TARGETS.includes(rel) || (DIRS.includes(path.posix.dirname(rel)) && /\.(?:pre-seams-[\w-]+\.bak|legacy-view-seams\.backup|save-ui[^/]*\.backup)$/.test(path.posix.basename(rel)))
+  const allowed = rel => TARGETS.includes(rel) || rel === MESSAGE_COORDINATOR || (DIRS.includes(path.posix.dirname(rel)) && /\.(?:pre-seams-[\w-]+\.bak|legacy-view-seams\.backup|save-ui[^/]*\.backup)$/.test(path.posix.basename(rel)))
   if (!Object.hasOwn(record.after, 'tavern-plugin/lib/index.js') || !Object.hasOwn(record.before, 'tavern-plugin/lib/index.js')) throw Error('标准记录缺少作者入口归属')
   for (const rel of new Set([...Object.keys(record.before), ...Object.keys(record.after)])) {
     if (!allowed(rel)) throw Error('标准记录越过有限源码目标：' + rel)
@@ -118,13 +131,28 @@ function readStandardRecord(appDir) {
   }
   for (const [rel, body] of Object.entries(record.before)) if (body !== null && (typeof body !== 'string' || Buffer.from(body, 'base64').toString('base64') !== body)) throw Error('标准前像编码不合法：' + rel)
   for (const [rel, digest] of Object.entries(record.after)) if (!/^[a-f0-9]{64}$/.test(digest)) throw Error('标准后像摘要不合法：' + rel)
+  if (record.runtimeManifest !== undefined) {
+    const m = record.runtimeManifest
+    if (!m || typeof m !== 'object' || typeof m.body !== 'string' || Buffer.from(m.body, 'base64').toString('base64') !== m.body || !/^[a-f0-9]{64}$/.test(m.sha256)) throw Error('标准记录runtime manifest不合法')
+    if (hash(Buffer.from(m.body, 'base64')) !== m.sha256) throw Error('标准记录runtime manifest摘要不符')
+  }
   return record
 }
 /** 只读投影：旧 before 仅用于还原已核 after 的文件，最终必须匹配同一可信作者契约。 */
 function compatibleAuthorVerdict(appDir) {
   const record = readStandardRecord(appDir)
-  if (!record) return classifyAuthorCompatibility({ appDir, targets: TARGETS, images: trustedAuthorImages() })
-  const plan = planAuthorRebase({ appDir, targets: TARGETS, record, images: trustedAuthorImages() })
+  if (!record) {
+    const runtimeTargets = [...TARGETS]
+    if (existsSync(inside(appDir, MESSAGE_COORDINATOR))) runtimeTargets.push(MESSAGE_COORDINATOR)
+    const runtime = validateRuntimeManifest({ appDir, targets: runtimeTargets, images: trustedAuthorImages() })
+    if (runtime?.ok) return { ok: true, mode: 'local-runtime-manifest', matchedCommit: null, skippedOwned: [], failures: [], runtimeWitness: runtime.witness }
+    const frozen = classifyAuthorCompatibility({ appDir, targets: TARGETS, images: trustedAuthorImages() })
+    if (!frozen.ok && runtime) frozen.failures = [...runtime.failures, ...frozen.failures]
+    return frozen
+  }
+  const targets = [...TARGETS]
+  if (existsSync(inside(appDir, MESSAGE_COORDINATOR)) || Object.hasOwn(record.before, MESSAGE_COORDINATOR) || Object.hasOwn(record.after, MESSAGE_COORDINATOR)) targets.push(MESSAGE_COORDINATOR)
+  const plan = planAuthorRebase({ appDir, targets, record, images: trustedAuthorImages() })
   return { ...plan, ok: plan.compatible }
 }
 function authorManifest(appDir) {
@@ -152,7 +180,12 @@ function requireAuthor(appDir, authorVersion, { allowRebase = false } = {}) {
   if (pkg.name !== 'dsh-tavern-plugin') throw new Error('标准接入仅支持作者包 dsh-tavern-plugin，拒绝未知包名')
   if (typeof pkg.version !== 'string' || !pkg.version.trim()) throw Error('作者版本字段不合法')
   if (authorVersion !== undefined && authorVersion !== pkg.version) throw Error('作者版本与解析所得版本不一致')
-  if (pkg.version === AUTHOR_VERSION) return pkg
+  if (pkg.version === AUTHOR_VERSION && (!allowRebase || existsSync(inside(appDir, RECORD)) || !existsSync(inside(appDir, 'dsh-tavern-runtime.json')))) return pkg
+  if (pkg.version === AUTHOR_VERSION) {
+    const verdict = compatibleAuthorVerdict(appDir)
+    if (verdict.mode === 'local-runtime-manifest') return { ...pkg, compatible: verdict }
+    return pkg
+  }
   // 已施缝同代（record.after 全等）无需 rebase 也无需资产比对：记录 CAS 即证明；结构由严格 transform 检查兜底。
   if (appliedRecordIntact(appDir)) return { ...pkg, compatible: { ok: true, mode: 'applied', matchedCommit: null, skippedOwned: [], failures: [] } }
   if (!allowRebase) throw new Error('标准接入仅支持已适配作者' + AUTHOR_VERSION + '，拒绝未知版本')
@@ -180,6 +213,16 @@ export async function storagePackage(subpath) {
 }
 `
 function shim(body) { return '// [dsh-tavern-standard-owned:v1]\n' + body }
+// 原生数据服务只接「完整 opening 合同」的作者代：全部锚点各恰一次才施转换/生成桥；
+// 已应用标记（幂等输入）同样放行——applyNativeDataTransform 幂等返回、桥照常重生成，
+// 否则 check 的 buildCore 对比会误报 pending。旧代（缺任一锚点/布局重复）保持原兼容投影。
+function nativeDataCapable(source) {
+  if (isNativeDataApplied(source)) return true
+  // split 片段数 = 出现次数 + 1：恰一次 ⇒ length === 2（写成 1 会把所有真实作者代误判为不可接）。
+  return Object.values(NATIVE_DATA_ANCHORS).every(anchor => typeof anchor === 'string' && source.split(anchor).length === 2)
+}
+const NATIVE_DATA_OPTIONS = { projectorImportPath: './domain/storage-native-data.js' }
+
 function buildCore(appDir) {
   const write = new Map()
   // V2也需从裸S1/S2布局首装预检；纯转换保留服务端执行线，不复用V1浏览器转换。
@@ -206,6 +249,16 @@ function buildCore(appDir) {
   write.set(DOMAIN + 'round-history.js', applyCleanRollbackTransform(applyRowHistoryTransform(applyRollbackTransform(text(appDir, DOMAIN + 'round-history.js')).text)))
   write.set(DOMAIN + 'story-timeline.js', applySettlementRoundTransform(applyRollbackBusinessTimelineTransform(applyRowTimelineTransform(text(appDir, DOMAIN + 'story-timeline.js')))))
   write.set(DOMAIN + 'turn-orchestration.js', applyRollbackBodyCommitTurnTransform(applyRollbackBodySignalTurnTransform(applyRollbackSharedBranchTurnTransform(applyRollbackBusinessTurnTransform(text(appDir, DOMAIN + 'turn-orchestration.js'))))))
+  // S5 单楼写入：与 nativeDataCapable 同判据（只接支持原生数据的作者代；门控条件另由 B 的 assemble/guard 断言覆盖）。
+  // 施缝点必须在其它 turn-orchestration 转换之后（本行链尾），否则后续转换看到的是已缝合源码。
+  if (nativeDataCapable(write.get('tavern-plugin/lib/index.js'))) {
+    write.set(DOMAIN + 'turn-orchestration.js', applyNativeMessageTransform(write.get(DOMAIN + 'turn-orchestration.js'), 'appendMessages'))
+    // background-task-coordinator 是 S5 新增受管目标：随包目录尚无该文件的官方字节（冻结基线 55/56 键维持不变），
+    // 目录派生 appDir 缺它时**显式跳过并登记**（不静默）；真实安装树有该文件时正常施缝。
+    if (existsSync(inside(appDir, DOMAIN + 'background-task-coordinator.js'))) {
+      write.set(DOMAIN + 'background-task-coordinator.js', applyNativeMessageTransform(text(appDir, DOMAIN + 'background-task-coordinator.js'), 'setMessageFloor'))
+    }
+  }
   write.set(DOMAIN + 'settlement-jobs.js', applyRollbackBodyCommitJobsTransform(applySettlementQuiescenceTransform(text(appDir, DOMAIN + 'settlement-jobs.js'))))
   write.set(DOMAIN + 'foreground-handoff.js', applyRollbackBodyCommitHandoffTransform(applyRollbackBodySignalHandoffTransform(applyForegroundQuiescenceTransform(text(appDir, DOMAIN + 'foreground-handoff.js')))))
   write.set(DOMAIN + 'server-template-sync.js', applyTemplateQuiescenceTransform(text(appDir, DOMAIN + 'server-template-sync.js')))
@@ -240,6 +293,11 @@ function buildCore(appDir) {
   write.set(DOMAIN + 'chat-history-rescue.js', shim("import { storagePackage } from './storage-package.js'\nexport const { rescueHistoryInput, isRescuedHistoryMessage, assertRescueHistoryEditable, rescueHistoryNotice } = await storagePackage('chat-history-rescue')\n"))
   write.set(DOMAIN + 'storage-fork-history.js', shim("import { storagePackage } from './storage-package.js'\nexport const { normalizeForkHistoryMarkers } = await storagePackage('fork-history-markers')\n"))
   write.set('tavern-plugin/lib/index.js', applyForkHistoryTransform(write.get('tavern-plugin/lib/index.js')))
+  // 原生数据服务只接支持 opening 合同的作者代；旧代继续原兼容投影。
+  if (nativeDataCapable(write.get('tavern-plugin/lib/index.js'))) {
+    write.set('tavern-plugin/lib/index.js', applyNativeDataTransform(write.get('tavern-plugin/lib/index.js'), NATIVE_DATA_OPTIONS))
+    write.set(DOMAIN + 'storage-native-data.js', shim("import { storagePackage } from './storage-package.js'\nexport const { createSessionWindowProjector, createActivitySummaryBridge } = await storagePackage('session-window-projector')\n"))
+  }
   // 新版Chat协议shim必须逐字更新，不能只凭首行标记跳过旧副本。
   write.set(DOMAIN + 'chat-sqlite-store.js', readFileSync(new URL('./chat-sqlite-store.shim.js', import.meta.url), 'utf8'))
   return write
@@ -249,6 +307,12 @@ export function checkStandardSeams({ appDir, authorVersion, allowRebase = false 
   const file = inside(appDir, RECORD)
   if (!existsSync(file)) return { ready: false, coverage: 'standard-core', reason: '尚未标准接入' }
   const record = readStandardRecord(appDir)
+  if (record.runtimeManifest) {
+    const targets = [...TARGETS]
+    if (Object.hasOwn(record.before, MESSAGE_COORDINATOR) || Object.hasOwn(record.after, MESSAGE_COORDINATOR)) targets.push(MESSAGE_COORDINATOR)
+    const plan = planAuthorRebase({ appDir, targets, record, images: trustedAuthorImages() })
+    if (!plan.compatible) throw Error('本地清单代身份/前像发生漂移，拒绝覆盖：' + plan.failures.slice(0, 3).join('；'))
+  }
   // 作者版本用于诊断；已接入态的真正判据是全部 after 摘要和消费者复检。
   const drifted = []
   for (const [rel, expected] of Object.entries(record.after)) {
@@ -276,6 +340,10 @@ function applyCompatibleRebase(appDir, plan) {
       const target = inside(stage, rel)
       mkdirSync(path.dirname(target), { recursive: true }); writeFileSync(target, Buffer.from(body, 'base64'))
     }
+    const runtimeManifest = captureRuntimeManifest(appDir)
+    const packageBytes = readFileSync(inside(appDir, 'tavern-plugin/package.json'))
+    if (!existsSync(inside(stage, 'tavern-plugin/package.json'))) writeFileSync(inside(stage, 'tavern-plugin/package.json'), packageBytes)
+    if (runtimeManifest) writeFileSync(inside(stage, 'dsh-tavern-runtime.json'), Buffer.from(runtimeManifest.body, 'base64'))
     const result = applyStandardSeams({ appDir: stage, allowRebase: true })
     if (!checkStandardSeams({ appDir: stage }).ready) throw Error('兼容重接副本未就绪')
     // 展示字段使用真实应用根；重新计算记录摘要，不篡改旧记录来假称一致。
@@ -291,7 +359,7 @@ function applyCompatibleRebase(appDir, plan) {
     for (const [rel, body] of Object.entries(image)) if (body !== null && !TARGETS.includes(rel) && original[rel] !== undefined && original[rel] !== null && !Object.hasOwn(previous.after, rel)) throw Error('新备份与未知现场文件冲突，拒绝覆盖：' + rel)
     // 写前比较有限现场和标准记录；不在副本预演期间覆盖外部更新。
     const now = snapshot(appDir)
-    if (JSON.stringify(now) !== JSON.stringify(original) || !readFileSync(recordFile).equals(oldRecord)) throw Error('兼容预演期间作者树发生变化，拒绝覆盖')
+    if (JSON.stringify(now) !== JSON.stringify(original) || !readFileSync(recordFile).equals(oldRecord) || !readFileSync(inside(appDir, 'tavern-plugin/package.json')).equals(packageBytes) || JSON.stringify(captureRuntimeManifest(appDir)) !== JSON.stringify(runtimeManifest)) throw Error('兼容预演期间作者树发生变化，拒绝覆盖')
     // 仅撤当前记录已经证明归属的自有文件；未列入旧记录的额外备份保持不动。
     writeStarted = true
     for (const rel of plan.ownedCleanup) if (!Object.hasOwn(image, rel) || image[rel] === null) {
@@ -302,6 +370,7 @@ function applyCompatibleRebase(appDir, plan) {
     }
     writeFileSync(recordFile, readFileSync(freshFile))
     if (!checkStandardSeams({ appDir }).ready) throw Error('兼容重接后严格检查未就绪')
+    if (!readFileSync(inside(appDir, 'tavern-plugin/package.json')).equals(packageBytes) || JSON.stringify(captureRuntimeManifest(appDir)) !== JSON.stringify(runtimeManifest)) throw Error('重接完成前作者身份材料发生变化')
     return { ...result, authorRebased: true, authorVersion: plan.authorVersion }
   } catch (error) {
     if (writeStarted) { restore(appDir, original); writeFileSync(recordFile, oldRecord) }
@@ -311,7 +380,51 @@ function applyCompatibleRebase(appDir, plan) {
     rmSync(stage, { recursive: true, force: true })
   }
 }
-export function applyStandardSeams({ appDir, authorVersion, allowRebase = true } = {}) {
+export function applyStandardSeams(options = {}) {
+  const { appDir, authorVersion, allowRebase = true } = options
+  const author = requireAuthor(appDir, authorVersion, { allowRebase })
+  if (existsSync(inside(appDir, RECORD)) || author.compatible?.mode !== 'local-runtime-manifest') return applyStandardSeamsDirect(options)
+  // 未收录作者代先在有限源码副本完整施缝；不 import 作者业务，不访问数据目录。
+  const original = snapshot(appDir), pkgBytes = readFileSync(inside(appDir, 'tavern-plugin/package.json'))
+  const manifest = captureRuntimeManifest(appDir)
+  if (!manifest || manifest.sha256 !== author.compatible.runtimeWitness.sha256) throw Error('预演前runtime manifest发生变化')
+  const stage = mkdtempSync(path.join(os.tmpdir(), 'dsh-manifest-install-'))
+  let writeStarted = false
+  try {
+    for (const [rel, body] of Object.entries(original)) if (body !== null) {
+      const target = inside(stage, rel); mkdirSync(path.dirname(target), { recursive: true }); writeFileSync(target, Buffer.from(body, 'base64'))
+    }
+    writeFileSync(inside(stage, 'tavern-plugin/package.json'), pkgBytes)
+    writeFileSync(inside(stage, 'dsh-tavern-runtime.json'), Buffer.from(manifest.body, 'base64'))
+    const result = applyStandardSeamsDirect({ appDir: stage, authorVersion, allowRebase })
+    if (!checkStandardSeams({ appDir: stage }).ready) throw Error('runtime manifest代隔离施缝未就绪')
+    for (const rel of ['.tavern-seams.json', '.tavern-legacy-view-seams.json', '.tavern-save-ui-seam.json']) {
+      const file = inside(stage, rel)
+      if (existsSync(file)) {
+        const metadata = JSON.parse(readFileSync(file, 'utf8'))
+        if (Object.hasOwn(metadata, 'app')) metadata.app = path.resolve(appDir)
+        writeFileSync(file, JSON.stringify(metadata, null, 2) + '\n', 'utf8')
+      }
+    }
+    const image = snapshot(stage), fresh = JSON.parse(readFileSync(inside(stage, RECORD), 'utf8'))
+    fresh.after = Object.fromEntries(Object.entries(image).filter(([, body]) => body !== null).map(([rel, body]) => [rel, hash(Buffer.from(body, 'base64'))]))
+    const freshBytes = Buffer.from(JSON.stringify(fresh, null, 2) + '\n', 'utf8')
+    if (JSON.stringify(snapshot(appDir)) !== JSON.stringify(original) || existsSync(inside(appDir, RECORD)) || !readFileSync(inside(appDir, 'tavern-plugin/package.json')).equals(pkgBytes) || JSON.stringify(captureRuntimeManifest(appDir)) !== JSON.stringify(manifest)) throw Error('隔离预演期间作者树发生变化，拒绝覆盖')
+    writeStarted = true
+    restore(appDir, image, Object.keys(image))
+    writeFileSync(inside(appDir, RECORD), freshBytes)
+    if (!checkStandardSeams({ appDir }).ready) throw Error('runtime manifest代安装后未就绪')
+    if (!readFileSync(inside(appDir, 'tavern-plugin/package.json')).equals(pkgBytes) || JSON.stringify(captureRuntimeManifest(appDir)) !== JSON.stringify(manifest)) throw Error('安装完成前作者身份材料发生变化')
+    return { ...result, compatibilityMode: 'local-runtime-manifest', runtimeWitness: author.compatible.runtimeWitness }
+  } catch (error) {
+    if (writeStarted) { restore(appDir, original); if (existsSync(inside(appDir, RECORD))) unlinkSync(inside(appDir, RECORD)) }
+    throw new Error(writeStarted ? '清单代安装失败，已恢复本次前像' : '清单代隔离预演失败，现场未写入', { cause: error })
+  } finally {
+    if (path.dirname(stage) !== path.resolve(os.tmpdir()) || !path.basename(stage).startsWith('dsh-manifest-install-')) throw Error('隔离副本路径不符')
+    rmSync(stage, { recursive: true, force: true })
+  }
+}
+function applyStandardSeamsDirect({ appDir, authorVersion, allowRebase = true } = {}) {
   const author = requireAuthor(appDir, authorVersion, { allowRebase })
   const state = checkStandardSeams({ appDir, authorVersion, allowRebase })
   if (state.ready) return { changed: false, ...state }
@@ -340,6 +453,15 @@ export function applyStandardSeams({ appDir, authorVersion, allowRebase = true }
       if (core.get('tavern-plugin/lib/index.js').split(openingHostAnchor).length !== 2) throw new Error('开局动态分类宿主锚点缺失/重复')
       core.set('tavern-plugin/lib/index.js', core.get('tavern-plugin/lib/index.js').replace(openingHostAnchor, openingHostNext))
     }
+    // applyAllSeams 会重新生成宿主入口；最终代也必须接原生查询，而不是只生成一个无人消费的桥。
+    if (nativeDataCapable(core.get('tavern-plugin/lib/index.js'))) {
+      core.set('tavern-plugin/lib/index.js', applyNativeDataTransform(core.get('tavern-plugin/lib/index.js'), NATIVE_DATA_OPTIONS))
+      // S5 单楼写入（最终代同样接；幂等，进入条件与 buildCore 一致；随包目录缺 background-task-coordinator 字节时显式跳过）。
+      core.set(DOMAIN + 'turn-orchestration.js', applyNativeMessageTransform(core.get(DOMAIN + 'turn-orchestration.js'), 'appendMessages'))
+      if (existsSync(inside(appDir, DOMAIN + 'background-task-coordinator.js'))) {
+        core.set(DOMAIN + 'background-task-coordinator.js', applyNativeMessageTransform(text(appDir, DOMAIN + 'background-task-coordinator.js'), 'setMessageFloor'))
+      }
+    }
     for (const [rel,body] of clientCoreWrites(appDir)) core.set(rel,body)
     for (const [rel, body] of core) {
       const target = inside(appDir, rel)
@@ -353,8 +475,9 @@ export function applyStandardSeams({ appDir, authorVersion, allowRebase = true }
     }
     const after = Object.fromEntries(artifacts(appDir).filter(rel => existsSync(inside(appDir, rel))).map(rel => [rel, hash(readFileSync(inside(appDir, rel)))]))
     const old = previousRecord ? JSON.parse(previousRecord.toString('utf8')) : undefined
+    const runtimeManifest = author.compatible?.mode === 'local-runtime-manifest' ? captureRuntimeManifest(appDir) : old?.runtimeManifest
     // 既有路径保持原样（盲 merge 未改，避免 partial regression）；新首装无旧记录，不涉及此合并。
-    writeFileSync(recordPath, JSON.stringify({ version: 1, authorVersion: author.version, before: old?.before ? { ...before, ...old.before } : before, after }, null, 2) + '\n', 'utf8')
+    writeFileSync(recordPath, JSON.stringify({ version: 1, authorVersion: author.version, before: old?.before ? { ...before, ...old.before } : before, after, ...(runtimeManifest ? { compatibilityMode: 'local-runtime-manifest', runtimeManifest } : {}) }, null, 2) + '\n', 'utf8')
     return { changed: true, ready: true, coverage: 'standard-core', files: [...core.keys()] }
   } catch (error) {
     restore(appDir, before)

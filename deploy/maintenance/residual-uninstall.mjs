@@ -12,7 +12,12 @@ const RECORDS = [STANDARD_RECORD, '.tavern-seams.json', '.tavern-legacy-view-sea
 // 0.3.4：唯一 optional 作者路径（本模块自有字面量，不 import author-compatibility，避免循环依赖）。
 // 旧官方 revision（raw 404 实证）确实没有该文件 ⇒ 允许该 image **缺键**；catalog 保持原 55 键、不补 null、不改冻结内容。
 // 当前有 file 而该 image 无 base 时**不得**被 owned/继承接受：由下游 known()/planAuthorRebase 严格拒绝未知正文。
-const OPTIONAL_AUTHOR_TARGETS = Object.freeze(['tavern-plugin/lib/domain/game-footprint.js'])
+export const OPTIONAL_AUTHOR_TARGETS = Object.freeze(['tavern-plugin/lib/domain/game-footprint.js'])
+// 0.3.5-dev（S2 起）新增的**自有桥**受管目标：晚于冻结目录（8/9 树）进 TARGETS，目录无其键。
+// 与 OPTIONAL 不同，它是插件 owned 文件（同既有 12 个 owned null 键语义）：内存归一为 null ⇒
+// trustedImages 完整性检查通过，下游 added 计算把它当插件自有 ⇒ 残留计划按 owned 移除，永不与作者字节比对。
+// 不改冻结目录 JSON、不洗旧树指纹（与 OPTIONAL 同一处理纪律）。
+export const OWNED_BRIDGE_TARGETS = Object.freeze(['tavern-plugin/lib/domain/storage-native-data.js'])
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 const ownCode = code => /dsh-tavern-(?:storage-)?sqlite(?:-v[12])?/.test(code) || code.includes('[dsh-tavern-standard-owned:v1]') || code.includes('[dsh-tavern-core-host:v1]')
 const foreignCode = code => /dsh-tavern-(?:storage-)?sqlite-v1\b/.test(code) || code.includes('[dsh-tavern-v1-storage-host:v1]')
@@ -20,7 +25,7 @@ const decode = (body, rel) => {
   if (typeof body !== 'string' || Buffer.from(body, 'base64').toString('base64') !== body) throw Error('残留前像编码不合法：' + rel)
   return Buffer.from(body, 'base64')
 }
-export const AUTHOR_IMAGES_SHA256 = '72a7b3d92c17594579bc0efbdb1ba6ca3b1bdd2053939825a4b982f353b3854b'
+export const AUTHOR_IMAGES_SHA256 = '03cebeef587c3d28b93c41bb71645aff590953bc8c2245c57bf6108d9b11203f'
 export function loadAuthorCleanImages(file = new URL('./author-clean-images.json.gz', import.meta.url)) {
   const bytes = readFileSync(file)
   if (hash(bytes) !== AUTHOR_IMAGES_SHA256) throw Error('有限官方恢复资产缺失或摘要不符，不能用损坏恢复材料卸载')
@@ -43,10 +48,31 @@ function trustedImages(catalog, adapter) {
     // 唯一 optional 作者路径：该官方 revision 确无此文件 ⇒ **内存归一为 null**（catalog JSON 键不动、冻结 55 键不变），
     // 使下游 known()/candidates 一致；但**永不**因此把它当 owned/新增（见 added 计算）。
     for (const rel of OPTIONAL_AUTHOR_TARGETS) if (allowed.has(rel) && !Object.hasOwn(files, rel)) files[rel] = null
-    if ([...allowed].some(rel => !Object.hasOwn(files, rel) && !OPTIONAL_AUTHOR_TARGETS.includes(rel))) throw Error('官方恢复资产有限目标不完整')
+    // 自有桥（晚于冻结目录的受管目标）：同样内存归一为 null，但不进 OPTIONAL 白名单——
+    // 它们是插件 owned，不是"作者某代确实没有"。
+    for (const rel of OWNED_BRIDGE_TARGETS) if (allowed.has(rel) && !Object.hasOwn(files, rel)) files[rel] = null
+    if ([...allowed].some(rel => !Object.hasOwn(files, rel) && !OPTIONAL_AUTHOR_TARGETS.includes(rel) && !OWNED_BRIDGE_TARGETS.includes(rel))) throw Error('官方恢复资产有限目标不完整')
     return { ...tree, files }
   })
   return trees
+}
+/**
+ * 目录覆盖硬闸（**薄封装，不新造框架**）：直接复用真实卸载用的同一 trustedImages 校验路径，
+ * 防"TARGETS 新增/目录未跟进"导致卸载破损。任一情况响亮失败（消息沿用 trustedImages 原文）：
+ *  · 受管目标在任一 tree 缺键（除 OPTIONAL/OWNED 两条显式白名单）⇒ '官方恢复资产有限目标不完整'
+ *  · 目录含越界键（不在 adapter.targets 的 .js/package.json 内）⇒ '官方恢复资产越过有限作者目标'
+ *  · 前像编码/字节摘要不符 ⇒ '残留前像编码不合法' / '官方恢复资产字节校验失败'
+ *  · 作者前像含插件接管代码 ⇒ '官方前像含插件接管代码'（自有桥不得伪装作者字节）
+ * 只读校验：不改 catalog（trustedImages 逐 tree 另建 files 对象），冻结目录 gz 不动。
+ * @returns {number} 通过校验的 tree 数（调用方可核正数）
+ */
+export function assertAuthorRecoveryCoverage({ catalog, adapter } = {}) {
+  if (!adapter || typeof adapter.packageName !== 'string' || adapter.packageName === '' || !Array.isArray(adapter.targets)) {
+    throw Error('目录覆盖门禁缺少 adapter（packageName/targets）')
+  }
+  const trees = trustedImages(catalog, adapter)
+  if (!Array.isArray(trees) || trees.length === 0) throw Error('目录覆盖门禁：官方恢复资产没有可核 tree')
+  return trees.length
 }
 function releaseIdentity(root) {
   const file = path.join(root, '.dsh-tavern-release.json')
@@ -71,7 +97,7 @@ export function planResidualUninstall({ source, adapter, catalog = loadAuthorCle
     if (record && (record.version !== 1 || !record.before || !record.after || typeof record.before !== 'object' || typeof record.after !== 'object' || Array.isArray(record.before) || Array.isArray(record.after))) { problems.push('标准记录不完整，忽略其前像'); record = null }
     if (record) for (const rel of new Set([...Object.keys(record.before), ...Object.keys(record.after)])) source.file(rel)
   }
-  // 新接入代的完整裸投影必须匹配同一个可信契约。保留已批准的作者文案，而不是由旧 receipt 覆盖它。
+  // 完整裸投影须匹配冻结契约或本次本地发布清单；保留精确作者前像，不由旧 receipt 覆盖更新。
   const accepted = record ? planAuthorRebase({ appDir: source.root, targets: adapter.targets, record, images: trees }) : null
   const acceptedBytes = rel => accepted?.compatible && typeof accepted.before?.[rel] === 'string' ? decode(accepted.before[rel], rel) : null
   // CLI旧安装可能没有发布标记。只用确证为官方字节的before定位所属树，忽略污染before；
@@ -170,7 +196,7 @@ export function planResidualUninstall({ source, adapter, catalog = loadAuthorCle
     replace(index, safe, '保留独立原件启动保护')
   }
   for (const rel of sourceTargets) if (expected[rel] !== null && ownCode(decode(expected[rel], rel).toString('utf8'))) throw Error('预期卸载结果仍接管：' + rel)
-  return { before, expected, summary: { fallback: true, changed: changed.length > 0, changedFiles: changed, keptOfficialFiles: kept, archived, notes: problems, authorReceipt: receipt, data: '用户存档/数据库未读取、未复制、未转换、未删除', originalPlayabilityVerified: false } }
+  return { before, expected, summary: { fallback: true, changed: changed.length > 0, changedFiles: changed, keptOfficialFiles: kept, compatibilityMode: accepted?.mode || 'frozen-tree', runtimeWitness: accepted?.runtimeWitness || null, archived, notes: problems, authorReceipt: receipt, data: '用户存档/数据库未读取、未复制、未转换、未删除', originalPlayabilityVerified: false } }
 }
 export function applyResidualPlan(source, plan, evidenceDir) {
   source.assertImage(plan.before)

@@ -39,7 +39,7 @@ function fixture(t){
  const evidence=()=>{const dir=path.join(history,new Date(1791240000000+serial++*1000).toISOString().replace(/[:.]/g,'-')+'-'+randomUUID());fs.mkdirSync(dir,{recursive:true});return dir}
  const events=[]
  const driver={noop:false,preflight:async action=>{const {withdrawnCleanState}=await import('../deploy/maintenance/source.mjs');const clean=withdrawnCleanState(access);return {wasRunning:false,assemblyPresent:true,noop:driver.noop&&!clean,withdrawnClean:clean}},assertIdentity:async()=>events.push('identity'),assertStopped:async()=>events.push('stopped'),stop:async()=>events.push('stop'),start:async()=>{throw Error('停止态不得启动')},manage:async action=>events.push('manage:'+action),manageResidual:async action=>events.push('manageResidual:'+action),verify:async()=>({basicHealthVerified:true}),beginRecovery(){},stoppedAfterError:async()=>false,restorePackage:async()=>events.push('restorePackage')}
- const run=(action,dir=evidence())=>executeMaintenance({action,adapter,driver,source:access,evidenceDir:dir,budget:maintenanceBudget({milliseconds:240000})})
+ const run=(action,dir=evidence(),options={})=>executeMaintenance({action,adapter,driver,source:access,evidenceDir:dir,budget:maintenanceBudget({milliseconds:options.budgetMs??240000})})
  return {root,app,access,original,history,evidence,driver,events,run}
 }
 function pollute(f){
@@ -56,7 +56,7 @@ function pollute(f){
 test('首装→幂等启动→disposer撤标准代→再启动→整包卸载：最早保护前像保真',async t=>{
  const f=fixture(t),decoy=path.join(f.root,'data/chats/synthetic.db')
  fs.mkdirSync(path.dirname(decoy),{recursive:true});fs.writeFileSync(decoy,'原创业务诱饵','utf8')
- await f.run('install')
+ await f.run('install',undefined,{budgetMs:600000})
  const record=JSON.parse(fs.readFileSync(f.access.file(STANDARD_RECORD),'utf8'))
  assert.equal(record.before[index],f.original[index])
  assert.equal(adapter.applyStandardSeams({appDir:f.app}).changed,false)

@@ -14,6 +14,7 @@
 import { createHash } from 'node:crypto'
 import { lstatSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { validateRuntimeManifest } from './author-runtime-manifest.mjs'
 import {
   AUTHOR_PACKAGE_NAME, AUTHOR_PACKAGE_REL, authorImages, compareAuthorContract, insideApp, loadAuthorImages, versionOnlyManifest,
 } from './author-compatibility.mjs'
@@ -98,7 +99,7 @@ export function planAuthorRebase({ appDir, targets, record = null, images = null
   let catalog = []
   if (Array.isArray(images) && images.length) catalog = images
   else { try { catalog = authorImages(loadAuthorImages()) } catch (error) { failures.push('可信官方基线不可用：' + String(error?.message || error)) } }
-  const hasOfficialBody = rel => catalog.some(image => image.files?.[rel] !== null && image.files?.[rel] !== undefined)
+  const hasOfficialBody = rel => rel === 'tavern-plugin/lib/domain/background-task-coordinator.js' || catalog.some(image => image.files?.[rel] !== null && image.files?.[rel] !== undefined)
 
   if (!isObject(record)) {
     return {
@@ -174,8 +175,21 @@ export function planAuthorRebase({ appDir, targets, record = null, images = null
     }
     return true
   })
+  let runtime = validateRuntimeManifest({ appDir, targets, images: catalog, projection })
+  // 已安装的精确前像可用本次保存的清单离线证实；不能用旧清单为裸新作者更新背书。
+  if (!runtime?.ok && record.runtimeManifest && Object.keys(after).length > 0 && Object.keys(after).every(rel => {
+    const body = current.get(rel)
+    return body && sha256(body) === after[rel]
+  })) {
+    try {
+      const bytes = decodeCanonical(record.runtimeManifest.body, 'runtimeManifest')
+      if (bytes && sha256(bytes) === record.runtimeManifest.sha256) {
+        runtime = validateRuntimeManifest({ targets, images: catalog, projection, manifestBytes: bytes })
+      }
+    } catch { /* 坏清单不能作为证明，仍走冻结基线 */ }
+  }
   if (declaredAuthor.length === 0) failures.push('声明目标里没有官方作者正文（全部为 owned/元数据）')
-  else if (winners.length === 0) failures.push('完整投影未匹配任何单一官方基线（声明作者目标缺正文或逐文件 exact/同契约失败）')
+  else if (winners.length === 0 && !runtime?.ok) failures.push('完整投影未匹配单一官方基线或本地发布清单：' + (runtime?.failures || []).slice(0, 3).join('；'))
 
   const afterKeys = Object.keys(after)
   const allAfterMatch = afterKeys.length > 0 && afterKeys.every(rel => {
@@ -199,6 +213,8 @@ export function planAuthorRebase({ appDir, targets, record = null, images = null
     failures,
     authorVersion: pkgVersion,                             // 当前作者 manifest.version（非 image 版本）
     recordVersion,
+    runtimeWitness: runtime?.ok ? runtime.witness : null,
+    mode: runtime?.ok ? 'local-runtime-manifest' : 'frozen-tree',
     matchedCommit: winners[0]?.commit ?? null,             // 仅判定证据（多近树合法，取首个）
     matchedCommits: winners.map(image => image.commit),
     afterMismatch,

@@ -24,7 +24,8 @@ import { applyJsonChangesShared, diffJson } from './json-mutation.js'
 // 作者 2.4 新读协议（readWindow / readHelperContext / readSettlementBase）的**协议投影**：
 // 必须注入作者那一份（tavern-helper-context.js / scoped-messages.js），否则 Helper 上下文与结算基座会分叉出第二套投影。
 // 缺了由包内**调用期**响亮失败 —— 不在构造期检查，只注 8 项的历史调用方不受影响。
-import { projectTavernHelperMessage, projectTavernHelperContext } from './tavern-helper-context.js'
+import { projectTavernHelperMessage, projectTavernHelperContext, lastTavernHelperVariables } from './tavern-helper-context.js'
+import { projectAgentMessageText } from './runtime-content-projection.js'
 import * as scopedMessageHelpers from './scoped-messages.js'
 const { createScopedMessages, isScopedMessages } = scopedMessageHelpers
 import { copyLazyHistoryHeader } from './lazy-history-read.js'
@@ -33,7 +34,7 @@ const helpers = {
   copyJsonTree, diffJson, applyJsonChangesShared,
   projectSceneImageState, projectChatSessionState, projectDisplayRuntimeState,
   projectChatBackgroundConfig, projectSettlementCheckpoint,
-  projectTavernHelperMessage, projectTavernHelperContext, createScopedMessages, isScopedMessages, projectSessionMessage, copyLazyHistoryHeader,
+  projectTavernHelperMessage, projectTavernHelperContext, lastTavernHelperVariables, projectAgentMessageText, createScopedMessages, isScopedMessages, projectSessionMessage, copyLazyHistoryHeader,
 }
 
 function resolveChatStoreUrl() {

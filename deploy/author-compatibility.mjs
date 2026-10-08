@@ -16,7 +16,7 @@ import { gunzipSync } from 'node:zlib'
 import path from 'node:path'
 import { protectAuthorStartup } from './maintenance/author-safety.mjs'
 
-export const AUTHOR_IMAGES_SHA256 = '72a7b3d92c17594579bc0efbdb1ba6ca3b1bdd2053939825a4b982f353b3854b'
+export const AUTHOR_IMAGES_SHA256 = '03cebeef587c3d28b93c41bb71645aff590953bc8c2245c57bf6108d9b11203f'
 export const DEFAULT_IMAGES_URL = new URL('./maintenance/author-clean-images.json.gz', import.meta.url)
 export const AUTHOR_PACKAGE_NAME = 'dsh-tavern-plugin'
 export const AUTHOR_PACKAGE_REL = 'tavern-plugin/package.json'

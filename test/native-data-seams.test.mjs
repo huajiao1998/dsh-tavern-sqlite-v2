@@ -1,0 +1,227 @@
+// 新增独占具名断言（S1/S2 装配侧）：标准接缝装卸新桥 storage-native-data.js 并恢复作者字节。
+// 只此一条，不整闸复验旧 db-save-latest-seams 用例；夹具机制沿用该文件：真实随包作者树
+// （loadAuthorCleanImages → 固定提交 B741）复制到自有 tmp，再走真实 apply/check/uninstall。
+// 不读真实档/远端/禁令对象；不提交；合成数据。
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { createHash } from 'node:crypto'
+import { loadAuthorCleanImages } from '../deploy/maintenance/residual-uninstall.mjs'
+import { applyStandardSeams, checkStandardSeams, uninstallStandardSeams } from '../deploy/standard-seams.mjs'
+import { applyNativeDataTransform, isNativeDataApplied } from '../deploy/native-data-transform.mjs'
+import { createChatSqliteStore } from '../chat-sqlite-store.js'
+import { AUTHOR_VERSION } from '../lib/standard-host.js'
+
+// 与 A 闸同机制的真实 helper（作者 2.5 真身 copy/diff/apply ＋ 5 显示投影脱离替身）
+const AUTHOR25 = '../../../tmp/upstream25-author-fixture/src/dsh-tavern-5d2ffacf4231c9f45dc641b9db9e0286c4fa5f60/tavern-plugin/lib/domain/'
+const { copyJsonTree } = await import(new URL(AUTHOR25 + 'copy-json-tree.js', import.meta.url))
+const { diffJson, applyJsonChangesShared } = await import(new URL(AUTHOR25 + 'json-mutation.js', import.meta.url))
+const projUnused = v => (v === undefined ? undefined : structuredClone(v))
+const HELPERS = { copyJsonTree, diffJson, applyJsonChangesShared }
+for (const name of ['projectSceneImageState', 'projectChatSessionState', 'projectDisplayRuntimeState', 'projectChatBackgroundConfig', 'projectSettlementCheckpoint']) HELPERS[name] = projUnused
+
+const TARGET = '68215e47516637e00c75d2b4bba3192679559425'   // 当前目标作者树（旧 B741 无 projectOpeningWindow，不生成新桥）
+const RECORD = '.tavern-standard-seams.json'
+const BRIDGE = 'tavern-plugin/lib/domain/storage-native-data.js'
+const INDEX = 'tavern-plugin/lib/index.js'
+const sha = bytes => createHash('sha256').update(bytes).digest('hex')
+
+/** 真实随包作者树复制到自有 tmp 子目录（只读 catalog → 合成 app 目录）。 */
+function fixture(t, commit = TARGET) {
+  const catalog = loadAuthorCleanImages()
+  const tree = catalog.trees.find(item => item.commit === commit)
+  assert.ok(tree, '缺官方作者树：' + commit)
+  const appDir = mkdtempSync(path.join(tmpdir(), 'native-data-seams-'))
+  t.after(() => rmSync(appDir, { recursive: true, force: true }))     // 只删本夹具自有唯一前缀目录
+  for (const [rel, item] of Object.entries(tree.files)) {
+    if (item === null) continue
+    const file = path.join(appDir, ...rel.split('/'))
+    mkdirSync(path.dirname(file), { recursive: true })
+    writeFileSync(file, Buffer.from(item.body, 'base64'))
+  }
+  return { catalog, tree, appDir }
+}
+
+test('S1 S2标准装卸保持同store能力桥并恢复作者字节', t => {
+  const f = fixture(t)
+  const indexPath = path.join(f.appDir, ...INDEX.split('/'))
+  const indexBefore = readFileSync(indexPath)
+  assert.equal(existsSync(path.join(f.appDir, ...BRIDGE.split('/'))), false, '装配前不应存在该桥（作者树无此文件）')
+
+  // ① 装配：桥写入、记录 before/after、check ready（前置：装配前原字节未应用转换）
+  assert.equal(isNativeDataApplied(indexBefore.toString('utf8')), false, '前置（装配前原字节）：尚未应用 native-data 转换')
+  assert.equal(applyStandardSeams({ appDir: f.appDir, authorVersion: AUTHOR_VERSION }).changed, true)
+  const bridgePath = path.join(f.appDir, ...BRIDGE.split('/'))
+  assert.equal(existsSync(bridgePath), true, '装配后桥必须存在')
+  const bridgeAfter = readFileSync(bridgePath)
+  // 桥是 projector 工厂入口（不是"同 store 摘要"本身）：同 store 的实际证明在 index 的 store 调用
+  assert.match(bridgeAfter.toString('utf8'), /storagePackage\('session-window-projector'\)/, '桥必须接同一 store 能力包（session-window-projector）')
+  assert.match(bridgeAfter.toString('utf8'), /createSessionWindowProjector/, '桥必须暴露 S2 窗口投影工厂')
+  assert.match(bridgeAfter.toString('utf8'), /createActivitySummaryBridge/, '桥必须暴露 S1 活动摘要工厂')
+  // 作者 index 上的 native-data 转换：装配后读**实际** index，必须已应用且真实调用同一 store
+  const indexSeamed = readFileSync(indexPath, 'utf8')
+  assert.equal(isNativeDataApplied(indexSeamed), true, '装配后实际 index 必须已应用 native-data 转换')
+  assert.match(indexSeamed, /chatJournalStore\.readActivitySummary/, 'index 必须真实调用同一 store 的 readActivitySummary')
+  assert.match(indexSeamed, /chatJournalStore\.readOpeningWindow/, 'index 必须真实调用同一 store 的 readOpeningWindow')
+  assert.match(indexSeamed, /storage-native-data\.js/, 'index 必须 import 新桥（projector 工厂）')
+  const record = JSON.parse(readFileSync(path.join(f.appDir, RECORD), 'utf8'))
+  assert.ok(record.before && record.after, '记录必须含 before/after 前像后像')
+  assert.ok(Object.hasOwn(record.after, BRIDGE), '记录 after 必须含新桥：' + BRIDGE)
+  assert.ok(!record.before[BRIDGE] || record.before[BRIDGE] === null, '作者树原无此桥 ⇒ before 应为空/缺失，不得伪造前像')
+  assert.equal(checkStandardSeams({ appDir: f.appDir, authorVersion: AUTHOR_VERSION }).ready, true, '装配后应 ready')
+
+  // ② 卸载：桥移除、记录清理、作者 index 逐字节回原（不残留旧全 timeline 形态）
+  assert.equal(uninstallStandardSeams({ appDir: f.appDir }).changed, true)
+  assert.equal(existsSync(bridgePath), false, '卸载后桥必须移除')
+  assert.equal(existsSync(path.join(f.appDir, RECORD)), false, '卸载后不应残留标准记录')
+  assert.deepEqual(readFileSync(indexPath), indexBefore, '作者 lib/index.js 必须逐字节恢复')
+  const indexAfter = readFileSync(indexPath, 'utf8')
+  assert.equal(/session-window-projector|createActivitySummaryBridge/.test(indexAfter), false, '卸载后 index 不得残留新桥引用')
+})
+
+/** 真实 store 夹具：沿用既有 A 闸机制（8 个真实/脱离 helper ＋ 自有 tmp；与原装卸夹具互不影响）。 */
+function createStoreFixture(t, chatId = 'chat-consumer-fixture') {
+  const root = mkdtempSync(path.join(tmpdir(), 'native-data-consumer-'))
+  mkdirSync(path.join(root, 'chats'), { recursive: true })
+  const store = createChatSqliteStore({ dataRoot: root, legacyData: undefined, helpers: HELPERS })
+  t.after(() => { try { store.dispose?.() } catch { /* 已释放 */ } ; rmSync(root, { recursive: true, force: true }) })
+  return { root, chatId, store }
+}
+
+/** 按真实整行函数声明截取（保留 async；到下一处行首 "  }" 结束，B harness 方法）。 */
+function sliceFunction(text, name) {
+  const lines = text.split('\n')
+  const start = lines.findIndex(line => /^\s*(?:async\s+)?function\s+/.test(line) && line.includes(' ' + name + '('))
+  assert.ok(start >= 0, '源码中缺函数：' + name)
+  for (let i = start + 1; i < lines.length; i++) {
+    if (lines[i] === '  }') return lines.slice(start, i + 1).join('\n')
+  }
+  throw new Error('函数体未闭合：' + name)
+}
+
+/** 只写不跑：query consumer 两链（readOpeningWindow / sessionActivity 走同一真 store，不含 view — scope query consumer）。 */
+test('S1 S2同真store查询消费者走SQL快路径', async t => {
+  const f = createStoreFixture(t)
+  const chatId = f.chatId
+  const sessionId = 'session-consumer-fixture'
+  const chat = {
+    id: chatId, sessionId, mode: 'story', backgroundConfigVersion: 1, conversationFeaturesVersion: 1,
+    _storageRevision: 1, updatedAt: 1,
+    timeline: {
+      schemaVersion: 1, branchId: 'branch-main', revision: 3, participants: {},
+      operations: { 'op-agent-running': { id: 'op-agent-running', kind: 'agent', role: 'background', status: 'running', turn: 7, createdAt: 30, background: { phase: 'running', role: 'background', updatedAt: 31 } } }
+    },
+    messages: Array.from({ length: 90 }, (_v, index) => ({ role: 'index' && index % 2 === 0 ? 'user' : 'assistant', text: 'msg-' + index, turn: Math.floor(index / 2) + 1 }))
+  }
+  await f.store.update(chatId, () => chat)
+  const stored = await f.store.read(chatId)                    // 真 store 读（不是 readChat）
+  // source＝独立装配后的作者 index（由 applyStandardSeams 真正施缝，不自行调 transform、不猜 depsExpression）
+  const seam = fixture(t)
+  assert.equal(applyStandardSeams({ appDir: seam.appDir, authorVersion: AUTHOR_VERSION }).changed, true)
+  const transformed = readFileSync(path.join(seam.appDir, ...INDEX.split('/')), 'utf8')
+  assert.equal(isNativeDataApplied(transformed), true, '装配后 source 必须已应用 native-data 转换')
+  const api = new Function(
+    'readSessionMap', 'str', 'chatJournalStore', 'HELPER_MESSAGE_COLD_WINDOW', 'readRecentWindow',
+    'chatPersistence', 'taskStateReader',
+    'return { readOpeningWindow: ' + sliceFunction(transformed, 'readOpeningWindow') + ',\n' +
+    ' sessionActivity: ' + sliceFunction(transformed, 'sessionActivity') + ' }'
+  )(
+    async () => ({ [sessionId]: chatId }), String, f.store, 24,
+    () => { throw new Error('query consumer 链不应回落 readRecentWindow') },
+    { readWindow: () => { throw new Error('不得回落 chatPersistence.readWindow') } },
+    { forSession: async () => { throw new Error('sessionActivity 不得依赖 taskStateReader') } }
+  )
+  // ① readOpeningWindow：默认历史起点由快路径给出；显式历史 from 原样保留（同真 store）
+  const def = await api.readOpeningWindow(sessionId)
+  assert.equal(def.from, 66, '默认 from 应为 66（limit 24 时的冷窗起点）')
+  assert.equal(def.to, 89)
+  const hist = await api.readOpeningWindow(sessionId, 30)
+  assert.equal(hist.from, 30, '显式历史 from 必须原样保留')
+  // ② sessionActivity：走 SQL 快路径（throwing taskReader 未被调用）⇒ 原状态 running
+  const activity = await api.sessionActivity(sessionId)
+  assert.equal(activity.phase, 'running')
+  assert.equal(activity.busy, true)
+  assert.equal(activity.operationId, 'op-agent-running')
+  // ③ 不存在档：null（不是 throws）
+  assert.equal(f.store.readActivitySummary({ chatId: 'no-such-chat' }), null)
+  assert.equal(stored.messages.length, 90)
+})
+
+/** 只写不跑：第 3 链 projectOpeningWindow（scope＝形状分发＋guard，不装全宿主/page 业务）。 */
+test('S1 S2同真store窗口消费者形状分发与guard', async t => {
+  const f = createStoreFixture(t)
+  const chatId = f.chatId
+  const sessionId = 'session-window-fixture'
+  const chat = {
+    id: chatId, sessionId, mode: 'story', backgroundConfigVersion: 1, conversationFeaturesVersion: 1,
+    _storageRevision: 1, updatedAt: 1,
+    timeline: { schemaVersion: 1, branchId: 'branch-main', revision: 3, participants: {}, operations: {} },
+    messages: Array.from({ length: 90 }, (_v, index) => ({ role: index % 2 === 0 ? 'user' : 'assistant', text: 'msg-' + index, turn: Math.floor(index / 2) + 1 }))
+  }
+  await f.store.update(chatId, () => chat)
+  const seam = fixture(t)
+  assert.equal(applyStandardSeams({ appDir: seam.appDir, authorVersion: AUTHOR_VERSION }).changed, true)
+  const transformed = readFileSync(path.join(seam.appDir, ...INDEX.split('/')), 'utf8')
+  const viewCalls = [], fallbackCalls = [], cardCalls = []
+  let projectorMode = 'native'
+  const capsProjector = {
+    // 真契约：project 收**单个输入对象** { chat, window, activity, card, options, resourceKey }，判据是 input.window.nativeData
+    project: async (input) => {
+      assert.ok(input && typeof input === 'object', 'project 必须收到单个输入对象（真 fastPath 契约）')
+      const win = input.window
+      assert.equal(win && win.nativeData, true, 'project 必须由 nativeData window 触发')
+      assert.equal(input.chat && input.chat.id, chatId, 'project 必须带同一 store 的真 chat')
+      if (projectorMode === 'not-applicable') return { kind: 'not-applicable', reason: 'legacy-body' }
+      if (projectorMode === 'throw') throw new Error('view 不得在 nativeData 分支被调用')
+      if (projectorMode === 'stale') {
+        // guard：pinned 期间真 store 推进 revision ⇒ fastPath 内置 readActivitySummary(pinned) 必须 revision 不匹配
+        await f.store.update(chatId, current => ({ ...current, _storageRevision: Number(current._storageRevision || 1) + 1 }))
+        f.store.readActivitySummary({ chatId, sessionId, revision: win.revision })
+      }
+      return { kind: 'value', view: { chatId }, options: input.options }
+    },
+    finishOpeningWindow: result => result,   // 真投影器为同步函数（fastPath 里 `….finishOpeningWindow(…).view` 无 await）
+  }
+  const api = new Function(
+    'helperHistoryAccess', 'readSessionMap', 'str', 'chatJournalStore', 'HELPER_MESSAGE_COLD_WINDOW',
+    'readRecentWindow', 'chatPersistence', 'sessionWindowProjector', 'createSessionWindowProjector', 'view', 'readChatCard',
+    'return { projectOpeningWindow: ' + sliceFunction(transformed, 'projectOpeningWindow') + ' }'
+  )(
+    { count: async () => 0 },
+    async () => ({ [sessionId]: chatId }),
+    String, f.store, 24,
+    async () => { fallbackCalls.push('readRecentWindow'); return { from: 0, to: 89, messageCount: 90, chat: { messages: [] } } },
+    { readWindow: () => { throw new Error('不得回落 chatPersistence.readWindow') } },
+    capsProjector,                     // 占位：注入体内部会自己构造，遮掉不影响
+    () => capsProjector,               // 真工厂：让注入体构造出的就是本 stub
+    async () => { viewCalls.push('view'); return { chat: { messages: [] } } },
+    async () => ({ id: 'card-fixture', name: 'fixture-card', __mark: cardCalls.push('readChatCard') })
+  )
+  // 真签名：第一参是 window 对象（chat/from/to/messageCount/revision 可选 nativeData）；revision 取 store 当前真值
+  const pinnedRevision = f.store.readActivitySummary({ chatId }).revision
+  const stored = await f.store.read(chatId)
+  const nativeWindow = () => ({ chat: stored, from: 0, to: 89, messageCount: 90, revision: pinnedRevision, nativeData: true, card: { id: 'card-fixture' } })
+  // ① nativeData window ⇒ 走 projector，不调 view；成功时返回 finishOpeningWindow(...).view（非 {kind} 包装）
+  const projected = await api.projectOpeningWindow(nativeWindow())
+  assert.deepEqual(projected, { chatId }, 'fastPath 成功应返回 finishOpeningWindow(...).view')
+  assert.equal(viewCalls.length, 0, 'nativeData 分支不得调用 view')
+  assert.equal(fallbackCalls.length, 0, 'nativeData 分支不得回落 readRecentWindow')
+  // ② guard：projector await 期间真 store 推进 revision ⇒ fastPath 内置 readActivitySummary 抛 revision 不匹配
+  projectorMode = 'stale'
+  await assert.rejects(async () => api.projectOpeningWindow(nativeWindow()), /revision/, 'pinned 期间 revision 变化必须拒绝')
+  assert.equal(viewCalls.length, 0, 'guard 失败不得回落到 view')
+  projectorMode = 'native'
+  // ③ not-applicable ⇒ 落到作者**原体**继续执行（readChatCard＋view 被走到），不返回 projector view
+  projectorMode = 'not-applicable'
+  const cardCallsBefore = cardCalls.length
+  await api.projectOpeningWindow({ chat: stored, from: 0, to: 89, messageCount: 90, revision: pinnedRevision, nativeData: true })
+  assert.equal(cardCalls.length > cardCallsBefore, true, 'not-applicable 必须落作者原体（readChatCard 被调用）')
+  assert.equal(viewCalls.length > 0, true, 'not-applicable 走作者原体（view 被调用）')
+  // ④ 无 nativeData／普通 window 走作者原体（view 可被调用 ⇒ 原路径未被吞）
+  projectorMode = 'native'
+  const viewCallsBefore = viewCalls.length
+  await api.projectOpeningWindow({ chat: stored, from: 0, to: 89, messageCount: 90, revision: pinnedRevision })
+  assert.equal(viewCalls.length > viewCallsBefore, true, '普通窗口必须仍走作者原路径（view 可被调用）')
+})

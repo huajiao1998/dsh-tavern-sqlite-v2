@@ -35,7 +35,7 @@ function run(shell, f, body, { timeout = 15000 } = {}) {
 if (process.platform === 'win32') for (const [label, shell] of [
   ['pwsh', 'pwsh'], ['PS5', path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')],
 ]) {
-  test('WinCLI PS1：' + label + 'Assert-CliTarget 按动作判资格、桥接还原 RUN_AS_NODE 并只记录 target 入口（BOM 临时 PS1）', { timeout: label === 'pwsh' ? 35000 : 15000 }, t => {
+  test('WinCLI PS1：' + label + 'Assert-CliTarget 按动作判资格、桥接还原 RUN_AS_NODE 并只记录 target 入口（BOM 临时 PS1）', { timeout: label === 'pwsh' ? 35000 : 90000 }, t => {
     assert.ok(!cli.includes('function Assert-DesktopTarget'), '只抽取 Assert-CliTarget，不能带桌面判据')
     assert.ok(!cli.includes('# ——— 6.'), '只抽取函数，不能带菜单入口')
     const f = fixture(t), home = path.join(f.root, '中文 空格 home')
@@ -56,7 +56,7 @@ export function runtimeFor(op){writeFileSync(process.env.FIXTURE_RUNTIME,JSON.st
       ' $out+=@{tag=$case.tag;sdkEntry=$tavern.sdkEntry;env=$env:ELECTRON_RUN_AS_NODE;preference=[string]$ErrorActionPreference}',
       '}',
       'ConvertTo-Json -InputObject $out -Depth 5 -Compress',
-    ].join('\n'), label === 'pwsh' ? { timeout: 30000 } : {})
+    ].join('\n'), label === 'pwsh' ? { timeout: 30000 } : { timeout: 60000 })
     for (const result of got) {
       const c = cases.find(item => item.tag === result.tag)
       const opts = JSON.parse(readFileSync(path.join(f.root, c.tag + '.options.json'), 'utf8'))

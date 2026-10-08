@@ -11,6 +11,11 @@ import { revisions as componentRevisions } from './lib/component-revisions.js'
 import { createRollbackWorldbookHistory } from './lib/rollback-worldbook-history.js'
 import { computeTimelinePlan, writeTimelineNodes, verifyTimelineNodes, readTimelineTree, ensureTimelineNodesTable, usesTimelineNodes } from './lib/timeline-nodes.js'
 import { stmt } from './lib/statement-cache.js'
+import { readActivitySummary as queryActivitySummary } from './lib/chat-query-service.js'
+import { writeStatusBarPlacement as commandSetStatusBarPlacement } from './lib/chat-command-service.js'
+import { readStoryInput as queryStoryInput } from './lib/chat-query-service.js'
+import { readCandidateInput as queryCandidateInput, readSettlementInputNative as querySettlementInput, readTemplateWindowNative as queryTemplateWindow } from './lib/chat-query-service.js'
+import { appendMessages as commandAppendMessages, setMessageFloor as commandSetMessageFloor } from './lib/chat-command-service.js'
 
 // 本模块**不再直接 import 作者的三个模块**（copy-json-tree / chat-session-state / json-mutation）：
 // 它们是作者的代码，必须由作者树的「薄垫片」注入（见 deploy/chat-sqlite-store.shim.js）。
@@ -221,6 +226,15 @@ export function createChatSqliteStore(options = {}) {
     try { logger.log('[chat-sqlite-store] 非尾部 splice（中间删改）首次出现：档 ' + id + '，本次 ' + count + ' 处；已按「从 splice 起点起重写剩余楼」处理') } catch { /* logger 不可用则静默 */ }
   }
 
+  // 旧写口追加楼的提交后检查点；S5 窄命令保持原有自动检查点策略，不额外 TRUNCATE。
+  // 只是尽力合并 WAL，不是在线单文件备份保证；busy 退 PASSIVE，失败不掩盖已成功提交。
+  function checkpointMessageAppend(db) {
+    try {
+      const result = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get()
+      if (Number(result?.busy ?? 0) !== 0) db.prepare('PRAGMA wal_checkpoint(PASSIVE)').get()
+    } catch { /* 检查点失败不挡已提交写入 */ }
+  }
+
   /** v3 统一写路径（只写变化的部分）：未变化的键/楼既不序列化也不写库。
    *  changes === null → 全量（首写 / 迁移）；否则为 path 级 op 列表（diffJson 产出，或 patch() 归一化后的列表）。
    *  inTransaction → 由调用方（迁移）自己开事务。
@@ -360,17 +374,10 @@ export function createChatSqliteStore(options = {}) {
       db.prepare(`INSERT INTO archive_head (id, revision, updated_at) VALUES (1, ?, ?)
         ON CONFLICT(id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at`).run(revision, at)
       if (useTransaction) db.exec('COMMIT')
-      // ---- D-3（2026-10-05）：K-1 轮边界检查点扩展到 archive.db ----
-      // 写入含新楼（追加轮次）的批次之后，把 WAL 帧并入主库 → 主库最多落后一轮，
-      // 拷 .db 只丢一轮（与 sessions 线 K-1 同式；有读者占用退 PASSIVE，异常不上抛）。
-      if (touchedIndices.length > 0 && !truncated) {
-        try {
-          const result = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get()
-          if (Number(result?.busy ?? 0) !== 0) {
-            db.prepare('PRAGMA wal_checkpoint(PASSIVE)').get()
-          }
-        } catch { /* 检查点失败不挡写入 */ }
-      }
+      // D-3：楼数增加且本写口已 COMMIT，才尽力合并 WAL；既有楼修改/头写/截断不额外检查点。
+      // 楼追加不是精确的业务轮次；不宣称每轮仅一次，也不保证在线只复制 .db 安全。
+      // 外部事务调用不能在 COMMIT 前检查点；其边界由事务所有者负责。
+      if (useTransaction && messages.length > prevCount) checkpointMessageAppend(db)
       // ---- 修A：按实际改动范围 bump 部件版本（投影缓存据此做选择性失效）----
       // header 变了 = changed 集合非空（头字段有增删改）；messages 变了 = 有楼被写/截断/全量重写。
       // prepared.written 含 K4 修剪改写的楼（可能不在业务 touched 里），必须一起算进 messages。
@@ -1294,6 +1301,258 @@ export function createChatSqliteStore(options = {}) {
     return state === null ? null : memoryReadSource(state)
   }
 
+  /** S1：复用本 store 的连接；原件不触碰同 ID SQL 影子，不物化完整 Chat。 */
+  function readActivitySummary({ chatId, sessionId, revision } = {}) {
+    assertActive()
+    const id = safeChatId(chatId)
+    if (hasLegacyArtifact(id)) return { kind: 'not-applicable', reason: 'legacy-source' }
+    if (!existsSync(dbFile(id))) return null
+    const db = handle(id)
+    if (db === null) return null
+    return queryActivitySummary(db, { chatId: id, sessionId, revision })
+  }
+
+  /** S3：首个数据库原生标量命令（状态栏位置）。同 per-chat 队列 + 事务内 CAS；
+   *  窄读窄写（只动 head_fields 该行 value_json 与 head revision/updated_at），
+   *  提交后 bumpGeneration + 窄投影缓存按 keys 精确失效；**不把局部对象 remember
+   *  成完整态**（§7.3 保守失效：全文缓存让位，下一次读由 materialize 重建）。 */
+  function setStatusBarPlacement(chatId, options = {}) {
+    assertActive()
+    const id = safeChatId(chatId)
+    return serialize(id, () => {
+      assertWritableChat(id)
+      if (hasLegacyArtifact(id)) throw new Error('状态栏命令：本档仍是原件/legacy 源，不接窄写')
+      if (!existsSync(dbFile(id))) throw new Error('状态栏命令：本局没有权威SQL存档')
+      const db = handle(id)
+      if (db === null) throw new Error('状态栏命令：拿不到库句柄')
+      const result = commandSetStatusBarPlacement(db, {
+        chatId: id,
+        sessionId: options.sessionId,
+        placement: options.placement,
+      }, {
+        assertWritableChat,
+        now,
+        onCommitted: ({ revision, keys }) => {
+          bumpGeneration(id)
+          projectionReads.invalidate(id, { revision, keys, timeline: false })
+          forgetState(id)
+        },
+      })
+      const updatedAt = Number(stmt(db, 'SELECT updated_at FROM archive_head WHERE id=1').get()?.updated_at) || 0
+      return { changed: result.changed, statusBarPlacement: result.statusBarPlacement, revision: result.revision, updatedAt }
+    })
+  }
+
+  /** S2：同一快照的窗口输入；timeline 只含展示/状态所需小字段。 */
+  function readOpeningWindow(chatId, options = {}) {
+    assertActive()
+    const id = safeChatId(chatId)
+    const { limit = 48, from: requestedFrom, requirePartial = true, sessionId, revision } = options
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new Error('Invalid history window limit')
+    if (requestedFrom !== undefined && (!Number.isSafeInteger(requestedFrom) || requestedFrom < 0)) throw new Error('Invalid history window cursor')
+    if (hasLegacyArtifact(id)) return { kind: 'not-applicable', reason: 'legacy-source' }
+    if (!existsSync(dbFile(id))) return null
+    const db = handle(id)
+    if (db === null) return null
+    return readSqlSnapshot(db, () => {
+      const summary = queryActivitySummary(db, { chatId: id, sessionId, revision })
+      if (summary === null || summary.kind === 'not-applicable') return summary
+      const source = dbReadSource(id)
+      if (source === null) return null
+      assertPinnedRevision(id, summary.revision, source.revision)
+      const end = source.messageCount
+      const from = Math.min(Math.max(0, end - limit), requestedFrom ?? end)
+      if (requirePartial && from === 0) return null
+      const chat = source.header('opening')
+      if (chat.backgroundConfigVersion !== 1 || chat.conversationFeaturesVersion !== 1
+        || !['story', 'script'].includes(chat.mode || 'story')) {
+        return { kind: 'not-applicable', reason: 'unsupported-mode' }
+      }
+      chat.timeline = summary.timeline
+      chat.messages = source.rows(from, end)
+      if (chat.sessionId !== summary.identity.sessionId) throw new Error('Opening window Session identity changed')
+      // 保留作者开局适用性条件；不把局部旧代输入交给最终投影。
+      if (chat.messages.some(message => message.role === 'assistant' && !Number.isSafeInteger(message.turn))) {
+        return { kind: 'not-applicable', reason: 'legacy-turn' }
+      }
+      const worldMessage = source.worldMessage()
+      assertPinnedRevision(id, summary.revision, source.currentRevision())
+      return { chat, messageCount: end, from, to: end - 1, revision: summary.revision,
+        worldMessage, activity: summary.activity, nativeData: true }
+    })
+  }
+
+  /** S4：前台 story 输入的范围选择＋读取（设计 §6.2）。谓词（enough）与形状
+   *  （createScopedMessages/lastTavernHelperVariables）用作者那一份（协议注入），
+   *  窗口读走本 store 的 readWindow（窄读/缓存/pin 复用）；跨页同 revision 快照，
+   *  不符即 undefined 交宿主显式回落完整档，不静默降级。 */
+  async function readStoryInput(chatId, need = {}) {
+    assertActive()
+    const id = safeChatId(chatId)
+    const createScopedMessages = requireProtocolHelper('readStoryInput', 'createScopedMessages')
+    const lastTavernHelperVariables = requireProtocolHelper('readStoryInput', 'lastTavernHelperVariables')
+    if (hasLegacyArtifact(id)) return undefined
+    if (!existsSync(dbFile(id))) return undefined
+    const db = handle(id)
+    if (db === null) return undefined
+    return queryStoryInput(db, { chatId: id, sessionId: need.sessionId, need }, {
+      readWindow: (target, options) => readWindow(target, options),
+      hasLastVariables: rows => lastTavernHelperVariables(rows) !== undefined,
+      createScopedMessages,
+    })
+  }
+
+  /** S4：候选上下文取数（设计 §6.2）。首窗＋分页走本 store readWindow（同 revision pin），
+   *  timeline 换窄形状（@meta 标量＋operations 小字段 kind/status＋checkpoints=[]）；
+   *  hasText/lastTavernHelperVariables 用作者那一份（协议注入）。undefined 交宿主 readChat 兜底。 */
+  async function readCandidateInput(chatId, options = {}) {
+    assertActive()
+    const id = safeChatId(chatId)
+    const projectAgentMessageText = requireProtocolHelper('readCandidateInput', 'projectAgentMessageText')
+    const lastTavernHelperVariables = requireProtocolHelper('readCandidateInput', 'lastTavernHelperVariables')
+    if (hasLegacyArtifact(id)) return undefined
+    if (!existsSync(dbFile(id))) return undefined
+    const db = handle(id)
+    if (db === null) return undefined
+    return queryCandidateInput(db, { chatId: id }, {
+      readWindow: (target, windowOptions) => readWindow(target, windowOptions),
+      projectAgentMessageText,
+      lastTavernHelperVariables,
+    })
+  }
+
+  /** S4：结算输入取数（设计 §6.2）。门槛走头窄读＋timeline 窄读，200 楼窗内行内定位
+   *  target/previous；命中返回 {kind:'value', chat}，其余 {kind:'fallback', reason}
+   *  交宿主显式回 readChat。scanDepth（函数形）与 scoped 形状用宿主/作者那一份。 */
+  async function readSettlementInput(chatId, options = {}) {
+    assertActive()
+    const id = safeChatId(chatId)
+    const createScopedMessages = requireProtocolHelper('readSettlementInput', 'createScopedMessages')
+    if (hasLegacyArtifact(id)) return { kind: 'fallback', reason: 'legacy-source' }
+    if (!existsSync(dbFile(id))) return { kind: 'fallback', reason: 'no-archive' }
+    const db = handle(id)
+    if (db === null) return { kind: 'fallback', reason: 'no-handle' }
+    const settled = await querySettlementInput(db, { chatId: id }, {
+      readWindow: (target, windowOptions) => readWindow(target, windowOptions),
+      scanDepth: options.scanDepth,
+      createScopedMessages,
+    })
+    // 查询层命中返回裸 chat（与作者同形）；出口统一包 kind:'value'，与宿主接线冻结稿一致。
+    return settled && settled.kind === 'fallback' ? settled : { kind: 'value', chat: settled }
+  }
+
+  /** S4：模板窗口 reader（设计 §6.2）。返回与作者 createTemplateWindowReader 同形的
+   *  `async sessionId => ...`：links 解析、票据签发、游标闭包仍由宿主注入；
+   *  窗口读与扩窗走查询层（同 revision 快照），门槛不符显式 undefined，不静默整档。 */
+  function readTemplateWindowReader({ links, access, historyFrom } = {}) {
+    assertActive()
+    if (typeof links !== 'function') throw new Error('模板 reader 需要 links（session 映射读）')
+    if (!access || typeof access.issue !== 'function') throw new Error('模板 reader 需要 access.issue（票据签发）')
+    if (typeof historyFrom !== 'function') throw new Error('模板 reader 需要 historyFrom（游标闭包）')
+    const issue = input => access.issue(input)
+    return async function resolveNativeTemplateWindow(sessionId) {
+      assertActive()
+      const chatId = (await links())[String(sessionId)]
+      if (!chatId) return undefined
+      const id = safeChatId(chatId)
+      if (hasLegacyArtifact(id)) return undefined
+      if (!existsSync(dbFile(id))) return undefined
+      const db = handle(id)
+      if (db === null) return undefined
+      return queryTemplateWindow(db, { chatId: id, sessionId, from: historyFrom(sessionId) }, {
+        readWindow: (target, windowOptions) => readWindow(target, windowOptions),
+        issue,
+      })
+    }
+  }
+
+  /** S5：追加楼层（纯尾 splice，对应 finalizeAppend 的 patch 形态）。
+   *  零完整态：事务内窄读＋prepareLocalWrite（同 store 变量归档实例）＋行 UPSERT；
+   *  CAS 不符返回 undefined（同 patch:722），不抛。提交完成逻辑与 update/patch 同块。 */
+  async function appendMessages(chatId, expectedRevision, { items, headerSets } = {}, metadata = {}) {
+    return serialize(chatId, async () => {
+      assertActive()
+      assertWritableChat(chatId)
+      assertRollbackChatWritable(undefined, metadata)
+      const id = safeChatId(chatId)
+      if (hasLegacyArtifact(id)) throw new Error('追加命令：原件只读档不接窄命令')
+      if (!existsSync(dbFile(id))) throw new Error('追加命令：目标档不存在（无 archive.db）')
+      const db = handle(id)
+      if (db === null) throw new Error('追加命令：拿不到库句柄')
+      const outcome = commandAppendMessages(db, { chatId: id, sessionId: metadata.sessionId, revision: expectedRevision, items, headerSets }, {
+        assertWritableChat, now,
+        archiveLocalWrite: (targetDb, targetChatId, touchedRows, messageCount, options) =>
+          variables.prepareLocalWrite(targetDb, targetChatId, touchedRows, messageCount, options),
+        applyMessageWrite: ({ revision, keys, messages, timeline, changes }) => {
+          bumpGeneration(id)
+          const compRev = componentRevisions(db)
+          if (keys.length > 0) compRev.header++
+          if (messages) compRev.messages++
+          projectionReads.invalidate(id, { revision, keys, messages, timeline })
+          forgetState(id)
+        },
+      })
+      // CAS 不符＝undefined（零写，钩子未跑）；成功时 recentChanges 保守退场（提交证据无完整态可记）。
+      return outcome === undefined ? undefined : { ...outcome, revision: outcome.revision }
+    })
+  }
+
+  /** S5：单楼 set（深叶子子集，对应 checkpointMessage 的 patch 形态）。CAS 不符返回 undefined。 */
+  async function setMessageFloor(chatId, expectedRevision, index, { changes, headerSets } = {}, metadata = {}) {
+    return serialize(chatId, async () => {
+      assertActive()
+      assertWritableChat(chatId)
+      assertRollbackChatWritable(undefined, metadata)
+      const id = safeChatId(chatId)
+      if (hasLegacyArtifact(id)) throw new Error('单楼命令：原件只读档不接窄命令')
+      if (!existsSync(dbFile(id))) throw new Error('单楼命令：目标档不存在（无 archive.db）')
+      const db = handle(id)
+      if (db === null) throw new Error('单楼命令：拿不到库句柄')
+      // 叶子形态翻译：命令服务要"行内 patch 对象"，宿主给的是 patch changes；此处逐条应用。
+      const patch = {}
+      for (const change of changes ?? []) {
+        if (!change || !Array.isArray(change.path) || change.path[0] !== 'messages' || change.path[1] !== index) {
+          throw new Error('单楼命令：changes 必须全部落在目标楼（messages/' + index + '）')
+        }
+        if (change.op === 'splice') throw new Error('单楼命令不接受数组 splice；数组长度变化请走作者 patch 兜底')
+        const leaf = change.path.slice(2)
+        if (leaf.length === 0) throw new Error('单楼命令：整楼替换请用追加命令的 splice 形态')
+        setPatchLeaf(patch, leaf, change.op === 'delete' ? undefined : change.value)
+      }
+      const outcome = commandSetMessageFloor(db, { chatId: id, sessionId: metadata.sessionId, revision: expectedRevision, index, patch }, {
+        assertWritableChat, now, headerSets,
+        archiveLocalWrite: (targetDb, targetChatId, touchedRows, messageCount, options) =>
+          variables.prepareLocalWrite(targetDb, targetChatId, touchedRows, messageCount, options),
+        applyMessageWrite: ({ revision, keys, messages, timeline, changes: committed }) => {
+          bumpGeneration(id)
+          const compRev = componentRevisions(db)
+          if (keys.length > 0) compRev.header++
+          if (messages) compRev.messages++
+          projectionReads.invalidate(id, { revision, keys, messages, timeline })
+          forgetState(id)
+        },
+      })
+      return outcome === undefined ? undefined : { ...outcome, revision: outcome.revision }
+    })
+  }
+
+  function setPatchLeaf(patch, leaf, value) {
+    let node = patch
+    for (let depth = 0; depth < leaf.length - 1; depth++) {
+      const part = leaf[depth]
+      if (typeof part !== 'string' && (!Number.isSafeInteger(part) || part < 0) || ['__proto__', 'prototype', 'constructor'].includes(part)) {
+        throw new Error('单楼命令：叶子路径含非法键 ' + String(part))
+      }
+      if (node[part] === undefined || node[part] === null || typeof node[part] !== 'object') node[part] = {}
+      node = node[part]
+    }
+    const last = leaf[leaf.length - 1]
+    if (typeof last !== 'string' && (!Number.isSafeInteger(last) || last < 0) || ['__proto__', 'prototype', 'constructor'].includes(last)) {
+      throw new Error('单楼命令：叶子路径含非法键 ' + String(last))
+    }
+    node[last] = value
+  }
+
   /** 真身 native-conversation-storage.js:144-159 的数据库原生版（窗口是分页，不是可写 Chat）。 */
   async function readWindow(chatId, options) {
     const { limit = 48, before, revision, includeCheckpoints = false, requirePartial = false, fields } = options ?? {}
@@ -1443,5 +1702,5 @@ export function createChatSqliteStore(options = {}) {
     variables.dispose()
   }
 
-  return Object.freeze({ dbSaveArchivePath, dbSaveNewArchivePath, rollbackArchivePath: dbFile, detachedUpdate: true, readCurrentRollbackWorldbookRef, readRollbackWorldbook, readCurrentVariableSnapshot, read, readWindow, readHelperContext, readSessionState, readSceneImageState, readSettlementCheckpoint, readBackgroundConfig, readDisplayRuntimeState, readSlice, readSettlementBase, readChangedSlice, readChangedIndices, readViewDelta, patch, readRevision, update, version, remove, variables: variablesApi, dispose })
+  return Object.freeze({ dbSaveArchivePath, dbSaveNewArchivePath, rollbackArchivePath: dbFile, detachedUpdate: true, readCurrentRollbackWorldbookRef, readRollbackWorldbook, readCurrentVariableSnapshot, read, readWindow, readOpeningWindow, readActivitySummary, readStoryInput, readCandidateInput, readSettlementInput, readTemplateWindowReader, setStatusBarPlacement, appendMessages, setMessageFloor, readHelperContext, readSessionState, readSceneImageState, readSettlementCheckpoint, readBackgroundConfig, readDisplayRuntimeState, readSlice, readSettlementBase, readChangedSlice, readChangedIndices, readViewDelta, patch, readRevision, update, version, remove, variables: variablesApi, dispose })
 }

@@ -21,7 +21,16 @@ export function applyBackgroundTaskRollbackTransform(source) {
     await options.recordRollbackBoundary(input, agent.session)
     const progress = createBackgroundProgress(`)
   }
+  // 旧代（≤68215e47）作者形态：单行 catch，无原因无 code。
   const oldCatch = "    catch (error) { throw new Error('后台历史回退失败，本次任务已停止，未基于旧上下文继续执行。', { cause: error }) }"
+  // 新代（3100d223，#164）作者形态：多行 catch 自带 原因+固定 code，但不保留清理层 code、无 traceSessionId。
+  const authorNewCatch = [
+    '    catch (error) {',
+    "      const failure = new Error('后台历史回退失败，本次任务已停止，未基于旧上下文继续执行。原因：' + str(error?.message || error), { cause: error })",
+    "      failure.code = 'BACKGROUND_REWIND_FAILED'",
+    '      throw failure',
+    '    }',
+  ].join('\n')
   const newCatch = `    catch (error) {
       // [dsh-tavern-background-rewind-cause:v1] 保留可定位的清理层与预检code，不吞为泛化失败。
       const code = typeof error?.code === 'string' ? error.code : 'BACKGROUND_REWIND_FAILED'
@@ -30,12 +39,17 @@ export function applyBackgroundTaskRollbackTransform(source) {
       wrapped.traceSessionId = traceSessionId
       throw wrapped
     }`
+  // 3100d223 起 execute 前另有 undoLastTask 用 rewindBackgroundSurface(session, start-1)（保留不动），
+  // 幂等检查必须只盯 execute 路径的 agent.session 形态，不能再用泛化前缀误伤它。
+  const authorTry = '    try { rewindBackgroundSurface(agent.session, input.rewindTo) }'
   if (source.includes(TASK_MARKER)) {
-    if (!source.includes(next) || source.includes('try { rewindBackgroundSurface(')) throw new Error('后台回退标记与消费者不一致')
+    if (!source.includes(next) || source.includes(authorTry)) throw new Error('后台回退标记与消费者不一致')
     if (source.includes(newCatch)) return boundaryAfterRewind(source)
     return boundaryAfterRewind(once(source, oldCatch, newCatch))
   }
-  return boundaryAfterRewind(once(once(source, '    try { rewindBackgroundSurface(agent.session, input.rewindTo) }', next), oldCatch, newCatch))
+  let out = once(source, authorTry, next)
+  out = source.includes(oldCatch) ? once(out, oldCatch, newCatch) : once(out, authorNewCatch, newCatch)
+  return boundaryAfterRewind(out)
 }
 export function applyBackgroundHostRollbackTransform(source) {
   const old = `  ${HOST_MARKER}

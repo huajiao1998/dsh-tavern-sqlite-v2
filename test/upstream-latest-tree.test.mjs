@@ -122,6 +122,9 @@ function runStandardChain(tag, sha, identify) {
       pristine.set(rel, existsSync(abs) ? readFileSync(abs) : null)
     }
     const existed = [...pristine.values()].filter(Boolean).length
+    // S5 受管目标不在 maintenanceTargets 名单内：其"施缝前原像"必须单独取，供精确字节断言。
+    const coordinatorRel = 'tavern-plugin/lib/domain/background-task-coordinator.js'
+    const coordinatorOriginal = existsSync(path.join(app, coordinatorRel)) ? readFileSync(path.join(app, coordinatorRel)) : null
     const absentBefore = [...pristine].filter(([, body]) => body === null).map(([rel]) => rel)
     assert.deepEqual(walkFiles(app).filter(rel => BACKUP_RE.test(rel)), [], tag + ' 夹具副本不应预带接缝备份件')
     assert.equal(pristine.get(KEY_FILES[0]).toString('utf8'), protectedOriginal, '入口基线必须等于 protect 后原像')
@@ -141,11 +144,19 @@ function runStandardChain(tag, sha, identify) {
 
     const recordAbs = path.join(app, RECORD)
     assert.equal(existsSync(recordAbs), true, tag + ' 标准记录缺失')
-    const afterKeys = Object.keys(JSON.parse(readFileSync(recordAbs, 'utf8')).after)
+    const record = JSON.parse(readFileSync(recordAbs, 'utf8'))
+    const afterKeys = Object.keys(record.after)
+    // S5 新增受管目标（background-task-coordinator）是真作者文件、但不在导出的 maintenanceTargets 里：
+    // 必须按"记录 before 是否存在且为 null（＝插件新建）"判新建件，而不是用 targets 名单代理。
+    const COORDINATOR_REL = 'tavern-plugin/lib/domain/background-task-coordinator.js'
+    const coordinatorAbs = path.join(app, COORDINATOR_REL)
+    assert.equal(coordinatorOriginal !== null, true, tag + ' 夹具应预存真作者文件：' + COORDINATOR_REL)
+    assert.equal(Object.hasOwn(record.before, COORDINATOR_REL), true, tag + ' 记录必须为该作者文件留前像键：' + COORDINATOR_REL)
+    assert.equal(typeof record.before[COORDINATOR_REL], 'string', tag + ' 作者文件前像必须是字节（不是 null＝新建）：' + COORDINATOR_REL)
 
     const result = stage(tag, 'uninstallStandardSeams', () => seams.uninstallStandardSeams({ appDir: app }))
     assert.equal(result.changed, true, tag + ' 卸载必须真的撤缝')
-    // 逐字回原像：在场件字节一致 ＋ 施缝新建件全部移除（含记录里事后发现的备份件）。
+    // 逐字回原像：在场件字节一致 ＋ 施缝新建件（记录 before 缺键或显式 null）全部移除（含记录里事后发现的备份件）。
     const drift = [], restored = [], removed = []
     for (const [rel, image] of pristine) {
       const abs = path.join(app, rel), present = existsSync(abs)
@@ -155,8 +166,13 @@ function runStandardChain(tag, sha, identify) {
       else drift.push('字节漂移：' + rel)
     }
     for (const rel of afterKeys) {
-      if (!seams.maintenanceTargets.includes(rel) && existsSync(path.join(app, rel))) drift.push('记录内新建件未移除：' + rel)
+      const hasBefore = Object.hasOwn(record.before, rel)
+      const createdByPlugin = !hasBefore || record.before[rel] === null
+      if (createdByPlugin && existsSync(path.join(app, rel))) drift.push('记录内新建件未移除：' + rel)
     }
+    // 作者文件的精确字节等同（不只是"存在"）：不得因不在 targets 名单就被当新建件或漏还原
+    assert.equal(existsSync(coordinatorAbs), true, tag + ' 作者文件在卸载后应仍在（其前像是作者字节）：' + COORDINATOR_REL)
+    assert.equal(readFileSync(coordinatorAbs).equals(coordinatorOriginal), true, tag + ' 作者文件卸载后必须逐字节等于原件：' + COORDINATOR_REL)
     assert.deepEqual(drift, [], tag + ' 卸载未逐字回原像：' + drift.join('；'))
     assert.equal(readFileSync(indexAbs, 'utf8'), protectedOriginal, tag + ' 入口未逐字节回 protect 后原像')
     assert.equal(readFileSync(indexAbs, 'utf8').includes(CORE_HOST_MARK), false, tag + ' 卸载后入口仍含核心接缝')

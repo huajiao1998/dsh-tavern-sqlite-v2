@@ -18,7 +18,8 @@ fs.mkdirSync(out, { recursive: true })
 const packRoot = path.join(out, 'package'); fs.mkdirSync(packRoot)
 const { packageFiles } = await import('../deploy/maintenance/runner.mjs')
 const { assertPackageDependencies } = await import('../deploy/maintenance/driver.mjs')
-const { loadAuthorCleanImages } = await import('../deploy/maintenance/residual-uninstall.mjs')
+const { loadAuthorCleanImages, assertAuthorRecoveryCoverage } = await import('../deploy/maintenance/residual-uninstall.mjs')
+const { maintenanceTargets } = await import('../deploy/standard-seams.mjs')
 const { RELEASE_GUIDE, releaseManifestJson } = await import('./release-manifest.mjs')
 const packFilter = rel => rel !== 'README.md' && rel !== 'INSTALL.zh-CN.md' && rel !== '安装指南.md' && rel !== 'install.log' && !rel.endsWith(path.sep + 'install.log') && !rel.startsWith('test' + path.sep)
 for (const rel of packageFiles(root).filter(packFilter)) {
@@ -41,7 +42,11 @@ fs.writeFileSync(path.join(packRoot, RELEASE_GUIDE), fs.readFileSync(path.join(r
   const missing = expected.filter(rel => !actual.includes(rel))
   if (missing.length) throw Error('发行包不完整：缺少 ' + missing.length + ' 个文件（例：' + missing.slice(0, 3).join('、') + '）；拒绝出包')
   assertPackageDependencies(JSON.parse(fs.readFileSync(path.join(packRoot, 'package.json'), 'utf8')), packRoot)
-  loadAuthorCleanImages(path.join(packRoot, 'deploy', 'maintenance', 'author-clean-images.json.gz'))
+  // —— 目录覆盖硬闸（防 TARGETS 新增后卸载破损）：与真实卸载同一 trustedImages 校验路径 ——
+  // 受管目标在任一随包 tree 缺键（除 OPTIONAL/OWNED 显式白名单）、越界键、字节/摘要不符、前像含插件代码
+  // 都在这里直接 fail，拒绝出包。adapter 用本包名＋真实维护目标集，不导入 CLI。
+  const catalog = loadAuthorCleanImages(path.join(packRoot, 'deploy', 'maintenance', 'author-clean-images.json.gz'))
+  assertAuthorRecoveryCoverage({ catalog, adapter: { packageName: pkg.name, targets: maintenanceTargets } })
   for (const required of ['deploy/maintenance/residual-uninstall.mjs', 'deploy/maintenance/residual-assembly.mjs']) {
     if (!fs.existsSync(path.join(packRoot, required))) throw Error('发行包缺兜底卸载模块：' + required)
   }

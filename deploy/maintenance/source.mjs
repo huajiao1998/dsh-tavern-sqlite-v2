@@ -12,6 +12,9 @@ const backup=/\.(?:pre-seams-[\w-]+\.bak|legacy-view-seams\.backup|save-ui[^/]*\
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex')
 export function sourceAccess(appDir,targets){
  const root=path.resolve(appDir),fixed=new Set([...targets,STANDARD_RECORD,'tavern-plugin/package.json'])
+ // 标准装配已按存在性接入的作者协调器：有限路径显式承认，不把记录中的原件误拒为越界。
+ const coordinator='tavern-plugin/lib/domain/background-task-coordinator.js'
+ fixed.add(coordinator)
  if(!fixed.has('tavern-plugin/lib/index.js')||!records.every(rel=>fixed.has(rel)))throw new Error('版本适配器有限目标清单不完整')
  if([...fixed].some(rel=>![...records,STANDARD_RECORD,'tavern-plugin/package.json'].includes(rel)&&(!rel.startsWith('tavern-plugin/lib/')&&!rel.startsWith('tavern-plugin/src/client/'))))throw new Error('版本目标不是有限作者源码')
  function file(rel){
