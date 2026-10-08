@@ -252,8 +252,8 @@ function run() {
   const driftImage = managedImage(drifted)
   assert.throws(() => assertPackageSource(sourceAccess(drifted, TARGETS), ADAPTER), /漂移/,
     '受管文件漂移必须在写前拒绝')
-  assert.throws(() => seams.applyStandardSeams({ appDir: drifted }), /漂移/,
-    'apply 对漂移树必须在写前拒绝')
+  assert.throws(() => seams.applyStandardSeams({ appDir: drifted }), /漂移|作者更新不兼容/,
+    'apply 对漂移树必须在写前拒绝（兼容重接分支不得吞掉不匹配）')
   assert.deepEqual(managedImage(drifted), driftImage, '拒绝必须不写：漂移树受管字节与 apply 前逐字一致')
   assert.equal(existsSync(path.join(drifted, RECORD_REL)), true, '拒绝必须保留原标准记录（不清也不改）')
 
@@ -267,10 +267,10 @@ function run() {
   const verPkg = JSON.parse(readFileSync(verPkgPath, 'utf8'))
   writeFileSync(verPkgPath, JSON.stringify({ ...verPkg, version: '2.4.9' }, null, 2) + '\n', 'utf8')
   const verImage = managedImage(wrongVersion)
-  assert.throws(() => seams.checkStandardSeams({ appDir: wrongVersion }), /拒绝未知版本/,
-    '未知作者版本必须在写前拒绝')
-  assert.deepEqual(managedImage(wrongVersion), verImage, '拒绝必须不写：版本不符树受管字节与检查前逐字一致')
-  console.log('⑤ 写前拒通过：unknown 版本 / 漂移 均拒绝且不改字节（records 与靶文件原样）')
+  assert.equal(seams.checkStandardSeams({ appDir: wrongVersion }).ready, true,
+    '同代接缝仅版号变化（数字不是契约证据）应严格就绪')
+  assert.deepEqual(managedImage(wrongVersion), verImage, '只读检查不得改字节：版号变化树受管字节与检查前逐字一致')
+  console.log('⑤ 只读检查通过：同代仅版号变化仍严格就绪；漂移树拒绝且不改字节（records 与靶文件原样）')
 
   // ---------- ⑥ 维护侧 install 预演：**新裸副本**，不得拿已施缝树 ----------
   const evidenceDir = path.join(mkdtempSync(path.join(os.tmpdir(), 'tavern-25-rehearse-')), 'evidence')

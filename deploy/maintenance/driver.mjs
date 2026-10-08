@@ -340,7 +340,12 @@ function createStoppedDriver(op, adapter, packageRoot, evidence, budget, { mode,
       }))
       for (const name of family) if (name !== adapter.packageName && (prior.deps[name] || prior.bundles.includes(name))) throw Error('另一版本线已安装，先用所属包卸载')
       const author = json(path.join(op.app, 'tavern-plugin', 'package.json'))
-      if (author.name !== 'dsh-tavern-plugin' || (!cleanResidual && author.version !== AUTHOR_VERSION)) throw Error('作者版本未适配')
+      if (author.name !== 'dsh-tavern-plugin') throw Error('作者版本未适配')
+      if (!cleanResidual && author.version !== AUTHOR_VERSION) {
+        // 作者版本变化不再直接拒：用共享**只读计划**判定“契约等价/已施缝同代”（不写盘、不 import 作者）。
+        const plan = typeof adapter.inspectStandardSeamsPlan === 'function' ? adapter.inspectStandardSeamsPlan({ appDir: op.app, authorVersion: author.version }) : null
+        if (!plan || (plan.ready !== true && plan.compatible?.ok !== true)) throw Error('作者版本未适配且契约不等价：' + author.version)
+      }
       const patch = cleanResidual ? '' : readFileSync(path.join(op.profileDir, 'cordis.patch.yml'), 'utf8').replace(/^\s*#.*$/gm, '').trim()
       if (!cleanResidual && patch !== '[]' && patch !== '') throw Error('profile自定义patch非空，请先核冲突；不覆盖用户配置')
       if (cleanResidual) {
@@ -594,7 +599,12 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { platf
       // family含旧三线与新v1/v2：写前阻止旧线/新线共装。
       for (const name of family) if (name !== adapter.packageName && (prior.deps[name] || prior.bundles.includes(name))) throw Error('另一版本线已安装，先用所属包卸载')
       const author = json(path.join(op.app, 'tavern-plugin', 'package.json'))
-      if (author.name !== 'dsh-tavern-plugin' || (!cleanResidual && author.version !== AUTHOR_VERSION)) throw Error('作者版本未适配')
+      if (author.name !== 'dsh-tavern-plugin') throw Error('作者版本未适配')
+      if (!cleanResidual && author.version !== AUTHOR_VERSION) {
+        // 作者版本变化不再直接拒：用共享**只读计划**判定“契约等价/已施缝同代”（不写盘、不 import 作者）。
+        const plan = typeof adapter.inspectStandardSeamsPlan === 'function' ? adapter.inspectStandardSeamsPlan({ appDir: op.app, authorVersion: author.version }) : null
+        if (!plan || (plan.ready !== true && plan.compatible?.ok !== true)) throw Error('作者版本未适配且契约不等价：' + author.version)
+      }
       const patch = cleanResidual ? '' : readFileSync(path.join(op.profileDir, 'cordis.patch.yml'), 'utf8').replace(/^\s*#.*$/gm, '').trim()
       if (!cleanResidual && patch !== '[]' && patch !== '') throw Error('profile自定义patch非空，请先核冲突；不覆盖用户配置')
       original = processFinder(context)

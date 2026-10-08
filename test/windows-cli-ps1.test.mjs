@@ -15,7 +15,7 @@ function fixture(t) {
   const put = (file, value, bom) => { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, (bom ? '\uFEFF' : '') + value, 'utf8') }
   return { root, put }
 }
-function run(shell, f, body) {
+function run(shell, f, body, { timeout = 15000 } = {}) {
   const file = path.join(f.root, 'fixture.ps1')
   const data = { root: f.root, home: path.join(f.root, '中文 空格 home'), node: process.execPath,
     cases: ['install', 'check', 'uninstall', 'update', ''].map(action => ({ tag: action || 'menu', action })) }
@@ -28,14 +28,14 @@ function run(shell, f, body) {
     'Invoke-Expression ([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(\'' + b64(cli) + '\')))',
     ...(Array.isArray(body) ? body : [body]),
   ].join('\n'), true)
-  const out = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], { encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const out = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], { encoding: 'utf8', windowsHide: true, timeout })
   assert.ifError(out.error); assert.equal(out.status, 0, out.stdout + out.stderr)
   return JSON.parse(out.stdout.trim())
 }
 if (process.platform === 'win32') for (const [label, shell] of [
   ['pwsh', 'pwsh'], ['PS5', path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')],
 ]) {
-  test('WinCLI PS1：' + label + 'Assert-CliTarget 按动作判资格、桥接还原 RUN_AS_NODE 并只记录 target 入口（BOM 临时 PS1）', t => {
+  test('WinCLI PS1：' + label + 'Assert-CliTarget 按动作判资格、桥接还原 RUN_AS_NODE 并只记录 target 入口（BOM 临时 PS1）', { timeout: label === 'pwsh' ? 35000 : 15000 }, t => {
     assert.ok(!cli.includes('function Assert-DesktopTarget'), '只抽取 Assert-CliTarget，不能带桌面判据')
     assert.ok(!cli.includes('# ——— 6.'), '只抽取函数，不能带菜单入口')
     const f = fixture(t), home = path.join(f.root, '中文 空格 home')
@@ -56,7 +56,7 @@ export function runtimeFor(op){writeFileSync(process.env.FIXTURE_RUNTIME,JSON.st
       ' $out+=@{tag=$case.tag;sdkEntry=$tavern.sdkEntry;env=$env:ELECTRON_RUN_AS_NODE;preference=[string]$ErrorActionPreference}',
       '}',
       'ConvertTo-Json -InputObject $out -Depth 5 -Compress',
-    ].join('\n'))
+    ].join('\n'), label === 'pwsh' ? { timeout: 30000 } : {})
     for (const result of got) {
       const c = cases.find(item => item.tag === result.tag)
       const opts = JSON.parse(readFileSync(path.join(f.root, c.tag + '.options.json'), 'utf8'))

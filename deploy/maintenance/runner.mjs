@@ -51,11 +51,16 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
     if (prepareEnv) await step('环境预修：systemd单元VM旗标（显式--prepare-env，备份可回滚）', () => driver.prepareEnvironment(action))
     if (action === 'uninstall') return await executeResidualUninstall({ adapter, driver, source, evidenceDir, progress, budget })
     state = await step('预检目标/本地运行时/装配（不复制依赖或存档、不认证）', () => driver.preflight(action))
-    assertPackageSource(source, adapter)
+    assertPackageSource(source, adapter, { allowRebase: action === 'install' })
+    // 同包已装但接缝需重接（作者新版本/文案更新/原样重装）：只修源码，不重装包。
+    if (action === 'install' && state.noop) {
+      const plan = adapter.inspectStandardSeamsPlan?.({ appDir: source.root })
+      if (plan?.needsReapply === true && plan.compatible?.ok === true) state = { ...state, noop: false, compatRefresh: true }
+    }
     // 旧代维护残留备份：仅对非noop的install构成障碍（uninstall/noop时它们是当前安装的自管产物，
     // 卸载由"确切备份归档"收口）——无授权即拒（列清单），有授权隔离到证据目录（只移不删）。
     const leftovers = findLegacyLeftovers(source.root)
-    const decision = leftoverDecision({ action, noop: state.noop, prepareEnv, found: leftovers.length })
+    const decision = leftoverDecision({ action, noop: state.noop || state.compatRefresh === true, prepareEnv, found: leftovers.length })
     if (decision === 'refuse') throw Error('目标树存在旧代维护备份（' + leftovers.length + ' 个，如 ' + leftovers[0] + '）：拒绝猜测覆盖；加 --prepare-env 可自动隔离到维护证据目录（只移动不删除）')
     if (decision === 'quarantine') {
       const moved = quarantineLeftovers(source.root, path.join(evidenceDir, 'leftovers'))
@@ -99,10 +104,11 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
       safeToRestore = true
     })
     if (action === 'install') {
-      await step('目标profile官方离线装包/回读', () => driver.manage('install'))
+      if (!state.compatRefresh) await step('目标profile官方离线装包/回读', () => driver.manage('install'))
+      else await step('同包已装且需重接：跳过重装，只修源码接缝', async () => {})
       await step('作者未加载时接入插件接缝', async () => {
         if (driver.runtime?.windowsCli) await driver.assertStopped()
-        source.protect(); adapter.applyStandardSeams({ appDir: source.root })
+        source.protect(); adapter.applyStandardSeams({ appDir: source.root, allowRebase: true })
         if (!adapter.checkStandardSeams({ appDir: source.root }).ready) throw Error('接缝未ready')
       })
     } else if (state.withdrawnClean) {
@@ -160,12 +166,14 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
 // CLI 与回归共用同一只读检查分支：证据副本可写，目标源码/profile不写。
 export async function checkMaintenance({ action, adapter, driver, source, evidenceDir, budget = maintenanceBudget() }) {
   if (action === 'uninstall') return executeResidualUninstall({ adapter, driver, source, evidenceDir, budget, check: true })
-  const state = await driver.preflight(action); assertPackageSource(source, adapter)
+  const state = await driver.preflight(action); assertPackageSource(source, adapter, { allowRebase: action === 'install' })
+  // 只读计划：同包已装但需重接时如实标记（不写源码、不重装包）。
+  const compatPlan = action === 'install' && state.noop ? adapter.inspectStandardSeamsPlan?.({ appDir: source.root }) : null
   if (state.noop && action === 'uninstall') assertSourceUninstalled(source)
   const inspection = state.noop && action === 'uninstall' ? null
     : state.withdrawnClean && action === 'uninstall' ? { result: { withdrawnClean: true, note: '宿主退出已撤缝：源码即作者原像，卸载仅移除装配' } }
-    : rehearseSource(state.noop ? 'uninstall' : action, source, adapter, evidenceDir, () => budget.remaining())
-  const result = { initialState: state.wasRunning ? 'running' : 'stopped', ...(inspection?.result || {}), ...(inspection?.recovery ? { repairAvailable: true, targetModified: false } : {}), leftovers: findLegacyLeftovers(source.root), elapsedMs: Math.round(budget.elapsed()), check: true, changed: false }
+    : rehearseSource(state.noop && !(compatPlan?.needsReapply === true && compatPlan.compatible?.ok === true) ? 'uninstall' : action, source, adapter, evidenceDir, () => budget.remaining())
+  const result = { initialState: state.wasRunning ? 'running' : 'stopped', ...(compatPlan?.needsReapply === true && compatPlan.compatible?.ok === true ? { compatRefresh: true, repairAvailable: true, targetModified: false } : {}), ...(inspection?.result || {}), ...(inspection?.recovery ? { repairAvailable: true, targetModified: false } : {}), leftovers: findLegacyLeftovers(source.root), elapsedMs: Math.round(budget.elapsed()), check: true, changed: false }
   budget.remaining()
   return result
 }

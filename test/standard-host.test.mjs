@@ -193,16 +193,16 @@ ok('常量与导出（id/inject/runtime 版本/默认放行名单）')
   ok('原行缺失 / name 不符 ⇒ 拒绝')
 }
 
-// 5) 作者版本门禁：仅已适配2.5.0；旧2.4和未知补丁版均写前拒绝。
+// 5) 作者版本门禁：默认只校身份（结构兼容由 prepare 判定）；**显式 pin** 时才拒绝不匹配版本。
 {
   assert.equal(AUTHOR_VERSION, '2.5.0')
   for (const version of ['2.4.0', '2.5.1']) {
-    const { args, calls, order } = baseArgs({ author: { packageJson: { name: ORIGINAL_ROW_NAME, version }, version } })
+    const { args, calls, order } = baseArgs({ author: { packageJson: { name: ORIGINAL_ROW_NAME, version }, version }, args: { expectedVersion: AUTHOR_VERSION } })
     await expectThrow(() => startStandardHost(args), /版本不符/)
     assert.equal(calls.create.length, 0)
     assert.deepEqual(order, [])
   }
-  ok('作者仅2.5.0；旧2.4与未知版本均在施缝前拒绝')
+  ok('显式固定作者版本时拒绝不匹配；默认兼容由 prepare')
 }
 
 // 6) runtime exact 门禁：dsh / boot 路径都要对得上，且早期拒绝（不施缝不建行）
@@ -406,9 +406,10 @@ ok('常量与导出（id/inject/runtime 版本/默认放行名单）')
   assert.match(bad.reason, /tavern-plugin/)
   assert.deepEqual(assertAuthorManifest(AUTHOR_PKG), AUTHOR_PKG)
   await expectThrow(() => assertAuthorManifest({ name: 'x', version: AUTHOR_VERSION }), /包名不符/)
-  await expectThrow(() => assertAuthorManifest({ name: ORIGINAL_ROW_NAME, version: '9.9.9' }), /版本不符/)
+  await expectThrow(() => assertAuthorManifest({ name: ORIGINAL_ROW_NAME, version: '9.9.9' }, { version: AUTHOR_VERSION }), /版本不符/)
+  assert.deepEqual(assertAuthorManifest({ name: ORIGINAL_ROW_NAME, version: '9.9.9' }), { name: ORIGINAL_ROW_NAME, version: '9.9.9' })
   await expectThrow(() => assertAuthorManifest(undefined), /无法解析/)
-  ok('deriveAppDir（三层 dirname）与 manifest 门禁为纯函数')
+  ok('deriveAppDir（三层 dirname）与 manifest 门禁为纯函数；默认只校身份，显式 pin 才拒版本')
 }
 
 // 15) resolveAuthorEntry：path-like 直接用；profile 锚兜底；全失败列 attempts；不用 cwd

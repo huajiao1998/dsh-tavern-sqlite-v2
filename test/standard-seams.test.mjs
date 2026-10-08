@@ -216,7 +216,7 @@ function run() {
     ['apply', () => applyStandardSeams({ appDir: app })],
     ['uninstall', () => uninstallStandardSeams({ appDir: app })],
   ]) {
-    assert.throws(attempt, /漂移/, label + ' 必须在漂移时响亮拒绝')
+    assert.throws(attempt, /漂移|作者更新不兼容/, label + ' 必须在漂移时响亮拒绝（兼容重接分支不得吞掉不匹配）')
   }
   writeFileSync(path.join(app, ROUND_HISTORY_REL), appliedBytes[ROUND_HISTORY_REL], 'utf8')
   assert.equal(checkStandardSeams({ appDir: app }).ready, true, '把漂移字节放回后必须重新 ready')

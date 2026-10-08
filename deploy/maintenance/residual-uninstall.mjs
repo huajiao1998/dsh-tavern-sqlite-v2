@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto'
 import { gunzipSync } from 'node:zlib'
 import { protectAuthorStartup } from './author-safety.mjs'
 import { STANDARD_RECORD } from './source.mjs'
+import { planAuthorRebase } from '../author-rebase-plan.mjs'
 
 const RECORDS = [STANDARD_RECORD, '.tavern-seams.json', '.tavern-legacy-view-seams.json', '.tavern-save-ui-seam.json']
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -63,6 +64,9 @@ export function planResidualUninstall({ source, adapter, catalog = loadAuthorCle
     if (record && (record.version !== 1 || !record.before || !record.after || typeof record.before !== 'object' || typeof record.after !== 'object' || Array.isArray(record.before) || Array.isArray(record.after))) { problems.push('标准记录不完整，忽略其前像'); record = null }
     if (record) for (const rel of new Set([...Object.keys(record.before), ...Object.keys(record.after)])) source.file(rel)
   }
+  // 新接入代的完整裸投影必须匹配同一个可信契约。保留已批准的作者文案，而不是由旧 receipt 覆盖它。
+  const accepted = record ? planAuthorRebase({ appDir: source.root, targets: adapter.targets, record, images: trees }) : null
+  const acceptedBytes = rel => accepted?.compatible && typeof accepted.before?.[rel] === 'string' ? decode(accepted.before[rel], rel) : null
   // CLI旧安装可能没有发布标记。只用确证为官方字节的before定位所属树，忽略污染before；
   // 此推断仅给仍明确属于本插件的目标恢复，不能据它覆盖零标记的未知升级文件。
   if (!receipt) {
@@ -99,6 +103,8 @@ export function planResidualUninstall({ source, adapter, catalog = loadAuthorCle
   }
   for (const rel of sourceTargets) {
     const current = before[rel] === null ? null : decode(before[rel], rel)
+    const acceptedOriginal = acceptedBytes(rel)
+    if (acceptedOriginal && current?.equals(acceptedOriginal)) { kept.push(rel); continue }
     if (known(rel, current) || protectedKnown(rel, current)) { kept.push(rel); continue }
     const images = trees.map(tree => tree.files[rel])
     const added = images.every(bytes => bytes === null)
@@ -115,8 +121,8 @@ export function planResidualUninstall({ source, adapter, catalog = loadAuthorCle
     if (current === null && !selected?.files[rel] && !record?.after?.[rel] && !Object.hasOwn(record?.before || {}, rel)) continue
     if (current !== null && foreignCode(current.toString('utf8'))) throw Error('作者目标含另一产品线代码：' + rel)
     // 未修改作者文件不因为“没有标记”就宣称干净。已装前像若为可信官方原像才能采用。
-    let clean = null
-    if (installedHash && typeof record?.before?.[rel] === 'string') {
+    let clean = installedHash ? acceptedOriginal : null
+    if (!clean && installedHash && typeof record?.before?.[rel] === 'string') {
       try {
         const bytes = decode(record.before[rel], rel)
         if (known(rel, bytes) || protectedKnown(rel, bytes)) clean = selected?.files[rel] || bytes

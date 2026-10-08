@@ -85,12 +85,12 @@ for (const host of ['cli', 'desktop']) {
     assert.equal(existsSync(path.join(f.app, STANDARD_RECORD)), false)
     assert.equal(existsSync(path.join(f.evidence, 'rehearsal', STANDARD_RECORD)), true, '真正接缝预演必须在证据目录发生')
   })
-  test('8480f7de ' + host + '：未知作者版本仍拒绝且目标零改', async t => {
+  test('8480f7de ' + host + '：未知作者契约仍拒绝且目标零改', async t => {
     const f = fixture(t, host), file = path.join(f.app, 'tavern-plugin', 'package.json')
-    const pkg = JSON.parse(readFileSync(file, 'utf8')); pkg.version = '2.6.0'
+    const pkg = JSON.parse(readFileSync(file, 'utf8')); pkg.version = '9.9.9'; pkg.main = './unknown-contract.js'
     writeFileSync(file, JSON.stringify(pkg) + '\n', 'utf8')
     const before = f.capture()
-    await assert.rejects(f.run(), /作者版本未适配/)
+    await assert.rejects(f.run(), /与可信基线不兼容|作者版本未适配/)
     assert.deepEqual(f.capture(), before)
   })
   test('8480f7de ' + host + '：不同代明确是插件0.2.2与待装包差异，仍拒覆盖且目标零改', async t => {

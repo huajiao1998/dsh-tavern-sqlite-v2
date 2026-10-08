@@ -4,7 +4,6 @@ import path from 'node:path'
 import {createHash} from 'node:crypto'
 import {spawnSync} from 'node:child_process'
 import {protectAuthorStartup} from './author-safety.mjs'
-import {AUTHOR_VERSION} from '../../lib/standard-host.js'
 import {recoverSourcePreimage} from './preimage-recovery.mjs'
 export const STANDARD_RECORD='.tavern-standard-seams.json'
 const records=['.tavern-seams.json','.tavern-legacy-view-seams.json','.tavern-save-ui-seam.json']
@@ -43,21 +42,23 @@ export function sourceAccess(appDir,targets){
  function syntax(){const result=spawnSync(process.execPath,['--check',file('tavern-plugin/lib/index.js')],{stdio:'inherit',timeout:8000,windowsHide:true});if(result.error||result.status!==0)throw new Error('作者保护主入口语法/有界检查拒绝')}
  return {root,file,capture,restore,assertImage,protect,syntax}
 }
-export function assertPackageSource(access,adapter){
+export function assertPackageSource(access,adapter,{allowRebase=false}={}){
  const index=readFileSync(access.file('tavern-plugin/lib/index.js'),'utf8')
  if(index.includes(adapter.otherHostMarker))throw new Error('另一功能线接缝不能直接覆盖，请先标准卸载')
  if(existsSync(access.file(STANDARD_RECORD))){
   const record=JSON.parse(readFileSync(access.file(STANDARD_RECORD),'utf8'))
-  if(record.version!==1||record.authorVersion!==AUTHOR_VERSION||!record.before||!record.after)throw new Error('标准记录格式/作者版本不匹配')
+  if(record.version!==1||!record.before||!record.after)throw new Error('标准记录格式不匹配')
+  if(typeof record.authorVersion!=='string'||!record.authorVersion.trim())throw new Error('标准记录作者版本字段不合法')
+  const plan=allowRebase?adapter.inspectStandardSeamsPlan?.({appDir:access.root}):null
+  const compatibleRefresh=plan?.needsReapply===true&&plan.compatible?.ok===true
   for(const rel of [...adapter.targets,'tavern-plugin/lib/index.js'])if(!Object.hasOwn(record.before,rel)){
    // 旧内联代不存在新增拆分模块，可以按自己的确切记录卸；有文件却无前像仍拒绝。
    const added=/\/hooks\/turn-lifecycle\.js$|\/features\/(?:play-controls|turn-history)\.js$|\/ui\/error-center\.js$|\/runtime\/helper-script-runtime\.js$|\/domain\/card-summary-cache\.js$/.test(rel)
    if(!added||existsSync(access.file(rel))||Object.hasOwn(record.after,rel))throw new Error('标准记录缺源码前像：'+rel)
   }
   for(const [rel,body]of Object.entries(record.before)){access.file(rel);if(body!==null&&(typeof body!=='string'||Buffer.from(body,'base64').toString('base64')!==body))throw new Error('标准前像不是规范base64：'+rel);if(records.includes(rel)&&body!==null)assertHistoryManifest(access,JSON.parse(Buffer.from(body,'base64').toString('utf8')))}
-  for(const [rel,hash]of Object.entries(record.after))if(digest(readFileSync(access.file(rel)))!==hash)throw new Error('标准代源码漂移：'+rel)
-  const shim=readFileSync(access.file('tavern-plugin/lib/domain/storage-package.js'),'utf8')
-  if(!shim.includes(adapter.packageName))throw new Error('标准代属于另一包，不允许跨版本线恢复')
+  for(const [rel,hash]of Object.entries(record.after)){const file=access.file(rel);if(!/^[a-f0-9]{64}$/.test(hash))throw Error('标准后像摘要非法：'+rel);if((!existsSync(file)||digest(readFileSync(file))!==hash)&&!compatibleRefresh)throw new Error('标准代源码漂移：'+rel)}
+  if(!compatibleRefresh){const shim=readFileSync(access.file('tavern-plugin/lib/domain/storage-package.js'),'utf8');if(!shim.includes(adapter.packageName))throw new Error('标准代属于另一包，不允许跨版本线恢复')}
  }
  for(const name of records)if(existsSync(access.file(name))){const data=JSON.parse(readFileSync(access.file(name),'utf8'));assertHistoryManifest(access,data);if(data.package&&data.package!==adapter.packageName)throw new Error('历史接缝属于另一包：'+data.package)}
 }
@@ -117,10 +118,11 @@ export function finishRecoveredSourceUninstall(access,adapter,stopRecord,rehears
 export function rehearseSource(action,access,adapter,evidenceDir,checkBudget=()=>{}){
  if(action==='uninstall')assertPackageSource(access,adapter)
  const before=access.capture(),app=path.join(evidenceDir,'rehearsal'),test=sourceAccess(app,adapter.targets);test.restore(before)
- if(action==='install'&&records.some(name=>before[name]!==null))throw new Error('首装前历史记录仍在，先用所属包完整卸载；不复用危险历史前像')
+ const refresh=action==='install'?adapter.inspectStandardSeamsPlan?.({appDir:access.root}):null
+  if(action==='install'&&records.some(name=>before[name]!==null)&&!(refresh?.needsReapply===true&&refresh.compatible?.ok===true))throw new Error('首装前历史记录仍在，先用所属包完整卸载；不复用危险历史前像')
  // 历史主manifest里app只是展示字段，卸载实际路径由调用的appDir限定。
  let result
- if(action==='install'){test.protect();test.syntax();result=adapter.applyStandardSeams({appDir:app});if(!adapter.checkStandardSeams({appDir:app}).ready)throw new Error('安装副本预检未ready')}
+ if(action==='install'){test.protect();test.syntax();result=adapter.applyStandardSeams({appDir:app,allowRebase:true});if(!adapter.checkStandardSeams({appDir:app}).ready)throw new Error('安装副本预检未ready')}
  else{
   const raw=before[STANDARD_RECORD];if(raw==null)throw new Error('卸载缺标准记录，先诊断不猜')
   try{result=finishSourceUninstall(test,adapter,JSON.parse(Buffer.from(raw,'base64')),path.join(evidenceDir,'rehearsal-archives'))}

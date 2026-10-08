@@ -1,5 +1,6 @@
 // 标准启动唯一接入入口；作者模块尚未import时执行，绝不访问用户数据库。
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, lstatSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, lstatSync, mkdtempSync, rmSync } from 'node:fs'
+import os from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
@@ -39,6 +40,8 @@ import { applyCurrentResourceAccessTransform, applyCurrentResourceHostTransform 
 import { AUTHOR_VERSION } from '../lib/standard-host.js'
 import { clientCoreWrites } from './client-seams.mjs'
 import { applyForkHistoryTransform } from './fork-history-transform.mjs'
+import { classifyAuthorCompatibility, loadAuthorImages, authorImages } from './author-compatibility.mjs'
+import { planAuthorRebase } from './author-rebase-plan.mjs'
 
 const RECORD = '.tavern-standard-seams.json'
 const DOMAIN = 'tavern-plugin/lib/domain/'
@@ -93,12 +96,69 @@ function restore(appDir, before, owned = artifacts(appDir)) {
     else { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, Buffer.from(body, 'base64')) }
   }
 }
-function requireAuthor(appDir, authorVersion) {
-  const pkg = JSON.parse(readFileSync(inside(appDir, 'tavern-plugin/package.json'), 'utf8'))
-  if (pkg.name !== 'dsh-tavern-plugin' || pkg.version !== AUTHOR_VERSION || (authorVersion && authorVersion !== pkg.version)) {
-    throw new Error('标准接入仅支持已适配作者' + AUTHOR_VERSION + '，拒绝未知版本')
+let cachedImages = null
+function trustedAuthorImages() {
+  if (cachedImages === null) cachedImages = authorImages(loadAuthorImages())
+  return cachedImages
+}
+function readStandardRecord(appDir) {
+  artifacts(appDir) // 读取记录及其目标之前先拒绝有限目录中的外部链接。
+  const file = inside(appDir, RECORD)
+  if (existsSync(file) && lstatSync(file).isSymbolicLink()) throw Error('标准记录不是普通文件')
+  if (!existsSync(file)) return null
+  const record = JSON.parse(readFileSync(file, 'utf8'))
+  const object = value => value && typeof value === 'object' && !Array.isArray(value)
+  if (record.version !== 1 || typeof record.authorVersion !== 'string' || !record.authorVersion.trim() || !object(record.before) || !object(record.after) || !Object.keys(record.after).length) throw Error('标准接入记录格式未知')
+  const allowed = rel => TARGETS.includes(rel) || (DIRS.includes(path.posix.dirname(rel)) && /\.(?:pre-seams-[\w-]+\.bak|legacy-view-seams\.backup|save-ui[^/]*\.backup)$/.test(path.posix.basename(rel)))
+  if (!Object.hasOwn(record.after, 'tavern-plugin/lib/index.js') || !Object.hasOwn(record.before, 'tavern-plugin/lib/index.js')) throw Error('标准记录缺少作者入口归属')
+  for (const rel of new Set([...Object.keys(record.before), ...Object.keys(record.after)])) {
+    if (!allowed(rel)) throw Error('标准记录越过有限源码目标：' + rel)
+    const target = inside(appDir, rel)
+    if (existsSync(target) && (!lstatSync(target).isFile() || lstatSync(target).isSymbolicLink())) throw Error('标准目标不是普通文件：' + rel)
   }
-  return pkg
+  for (const [rel, body] of Object.entries(record.before)) if (body !== null && (typeof body !== 'string' || Buffer.from(body, 'base64').toString('base64') !== body)) throw Error('标准前像编码不合法：' + rel)
+  for (const [rel, digest] of Object.entries(record.after)) if (!/^[a-f0-9]{64}$/.test(digest)) throw Error('标准后像摘要不合法：' + rel)
+  return record
+}
+/** 只读投影：旧 before 仅用于还原已核 after 的文件，最终必须匹配同一可信作者契约。 */
+function compatibleAuthorVerdict(appDir) {
+  const record = readStandardRecord(appDir)
+  if (!record) return classifyAuthorCompatibility({ appDir, targets: TARGETS, images: trustedAuthorImages() })
+  const plan = planAuthorRebase({ appDir, targets: TARGETS, record, images: trustedAuthorImages() })
+  return { ...plan, ok: plan.compatible }
+}
+function authorManifest(appDir) {
+  return JSON.parse(readFileSync(inside(appDir, 'tavern-plugin/package.json'), 'utf8'))
+}
+/** 已施缝同代：标准记录 schema 合法且 record.after 与当前文件逐一相符（记录 CAS 即“本次已接受”的证明）。 */
+function appliedRecordIntact(appDir) {
+  const recordFile = inside(appDir, RECORD)
+  if (!existsSync(recordFile)) return null
+  try {
+    const record = readStandardRecord(appDir)
+    const intact = Object.entries(record.after).every(([rel, expected]) => {
+      const target = inside(appDir, rel)
+      return existsSync(target) && hash(readFileSync(target)) === expected
+    })
+    return intact ? record : null
+  } catch { return null }
+}
+/**
+ * 作者门禁：同版走原有严格路径；**仅当 allowRebase**（install/apply/运行时 initial prepare）且版本不同时，
+ * 才用共享兼容判定（单一共同基线覆盖全部作者目标）放行；uninstall/dispose 永不传 allowRebase。
+ */
+function requireAuthor(appDir, authorVersion, { allowRebase = false } = {}) {
+  const pkg = authorManifest(appDir)
+  if (pkg.name !== 'dsh-tavern-plugin') throw new Error('标准接入仅支持作者包 dsh-tavern-plugin，拒绝未知包名')
+  if (typeof pkg.version !== 'string' || !pkg.version.trim()) throw Error('作者版本字段不合法')
+  if (authorVersion !== undefined && authorVersion !== pkg.version) throw Error('作者版本与解析所得版本不一致')
+  if (pkg.version === AUTHOR_VERSION) return pkg
+  // 已施缝同代（record.after 全等）无需 rebase 也无需资产比对：记录 CAS 即证明；结构由严格 transform 检查兜底。
+  if (appliedRecordIntact(appDir)) return { ...pkg, compatible: { ok: true, mode: 'applied', matchedCommit: null, skippedOwned: [], failures: [] } }
+  if (!allowRebase) throw new Error('标准接入仅支持已适配作者' + AUTHOR_VERSION + '，拒绝未知版本')
+  const verdict = compatibleAuthorVerdict(appDir)
+  if (!verdict.ok) throw new Error('作者版本 ' + pkg.version + ' 与可信基线不兼容：' + verdict.failures.slice(0, 5).join('；'))
+  return { ...pkg, compatible: verdict }
 }
 function text(appDir, rel) { return readFileSync(inside(appDir, rel), 'utf8') }
 const RESOLVER = `// [dsh-tavern-standard-owned:v1]
@@ -183,24 +243,78 @@ function buildCore(appDir) {
   write.set(DOMAIN + 'chat-sqlite-store.js', readFileSync(new URL('./chat-sqlite-store.shim.js', import.meta.url), 'utf8'))
   return write
 }
-export function checkStandardSeams({ appDir, authorVersion } = {}) {
-  requireAuthor(appDir, authorVersion)
+export function checkStandardSeams({ appDir, authorVersion, allowRebase = false } = {}) {
+  const author = requireAuthor(appDir, authorVersion, { allowRebase })
   const file = inside(appDir, RECORD)
   if (!existsSync(file)) return { ready: false, coverage: 'standard-core', reason: '尚未标准接入' }
-  const record = JSON.parse(readFileSync(file, 'utf8'))
-  if (record.version !== 1 || record.authorVersion !== AUTHOR_VERSION) throw new Error('标准接入记录版本未知')
+  const record = readStandardRecord(appDir)
+  // 作者版本用于诊断；已接入态的真正判据是全部 after 摘要和消费者复检。
+  const drifted = []
   for (const [rel, expected] of Object.entries(record.after)) {
     const target = inside(appDir, rel)
-    if (!existsSync(target) || hash(readFileSync(target)) !== expected) throw new Error('标准接入文件发生漂移，拒绝旧原像覆盖更新：' + rel)
+    if (!existsSync(target) || hash(readFileSync(target)) !== expected) drifted.push(rel)
+  }
+  if (drifted.length > 0) {
+    if (!allowRebase) throw new Error('标准接入文件发生漂移，拒绝旧原像覆盖更新：' + drifted[0])
+    const compatible = compatibleAuthorVerdict(appDir)
+    if (!compatible.ok) throw Error('作者更新不兼容，保留现场：' + compatible.failures.slice(0, 5).join('；'))
+    return { ready: false, coverage: 'standard-core', pending: [], drifted, needsReapply: true, compatible }
   }
   const core = buildCore(appDir)
   const pending = [...core].filter(([rel, body]) => text(appDir, rel) !== body).map(([rel]) => rel)
-  return { ready: checkAllSeams({ appDir }).ready && pending.length === 0, coverage: 'standard-core', pending }
+  return { ready: checkAllSeams({ appDir }).ready && pending.length === 0, coverage: 'standard-core', pending, drifted }
 }
-export function applyStandardSeams({ appDir, authorVersion } = {}) {
-  requireAuthor(appDir, authorVersion)
-  const state = checkStandardSeams({ appDir, authorVersion })
+function applyCompatibleRebase(appDir, plan) {
+  if (!plan?.ok || !plan.before) throw Error('兼容重接缺少已证明的作者前像')
+  const original = snapshot(appDir), recordFile = inside(appDir, RECORD), oldRecord = readFileSync(recordFile)
+  let writeStarted = false
+  const stage = mkdtempSync(path.join(os.tmpdir(), 'dsh-author-rebase-'))
+  try {
+    // 副本只包含有限程序源码，旧自有记录/备份归零，重新生成正确的新作者恢复链。
+    for (const [rel, body] of Object.entries(plan.before)) if (body !== null) {
+      const target = inside(stage, rel)
+      mkdirSync(path.dirname(target), { recursive: true }); writeFileSync(target, Buffer.from(body, 'base64'))
+    }
+    const result = applyStandardSeams({ appDir: stage, allowRebase: true })
+    if (!checkStandardSeams({ appDir: stage }).ready) throw Error('兼容重接副本未就绪')
+    // 展示字段使用真实应用根；重新计算记录摘要，不篡改旧记录来假称一致。
+    for (const rel of ['.tavern-seams.json', '.tavern-legacy-view-seams.json', '.tavern-save-ui-seam.json']) {
+      const file = inside(stage, rel)
+      if (existsSync(file)) { const metadata = JSON.parse(readFileSync(file, 'utf8')); if (Object.hasOwn(metadata, 'app')) metadata.app = path.resolve(appDir); writeFileSync(file, JSON.stringify(metadata, null, 2) + '\n', 'utf8') }
+    }
+    const freshFile = inside(stage, RECORD), fresh = JSON.parse(readFileSync(freshFile, 'utf8'))
+    const image = snapshot(stage)
+    fresh.after = Object.fromEntries(Object.entries(image).filter(([, body]) => body !== null).map(([rel, body]) => [rel, hash(Buffer.from(body, 'base64'))]))
+    writeFileSync(freshFile, JSON.stringify(fresh, null, 2) + '\n', 'utf8')
+    const previous = JSON.parse(oldRecord.toString('utf8'))
+    for (const [rel, body] of Object.entries(image)) if (body !== null && !TARGETS.includes(rel) && original[rel] !== undefined && original[rel] !== null && !Object.hasOwn(previous.after, rel)) throw Error('新备份与未知现场文件冲突，拒绝覆盖：' + rel)
+    // 写前比较有限现场和标准记录；不在副本预演期间覆盖外部更新。
+    const now = snapshot(appDir)
+    if (JSON.stringify(now) !== JSON.stringify(original) || !readFileSync(recordFile).equals(oldRecord)) throw Error('兼容预演期间作者树发生变化，拒绝覆盖')
+    // 仅撤当前记录已经证明归属的自有文件；未列入旧记录的额外备份保持不动。
+    writeStarted = true
+    for (const rel of plan.ownedCleanup) if (!Object.hasOwn(image, rel) || image[rel] === null) {
+      const target = inside(appDir, rel); if (existsSync(target)) unlinkSync(target)
+    }
+    for (const [rel, body] of Object.entries(image)) if (body !== null) {
+      const target = inside(appDir, rel); mkdirSync(path.dirname(target), { recursive: true }); writeFileSync(target, Buffer.from(body, 'base64'))
+    }
+    writeFileSync(recordFile, readFileSync(freshFile))
+    if (!checkStandardSeams({ appDir }).ready) throw Error('兼容重接后严格检查未就绪')
+    return { ...result, authorRebased: true, authorVersion: plan.authorVersion }
+  } catch (error) {
+    if (writeStarted) { restore(appDir, original); writeFileSync(recordFile, oldRecord) }
+    throw new Error(writeStarted ? '兼容重接失败，已恢复本次现场' : '兼容预演失败，目标未写入', { cause: error })
+  } finally {
+    if (path.dirname(stage) !== path.resolve(os.tmpdir()) || !path.basename(stage).startsWith('dsh-author-rebase-')) throw Error('临时源码副本路径不符，拒绝清理')
+    rmSync(stage, { recursive: true, force: true })
+  }
+}
+export function applyStandardSeams({ appDir, authorVersion, allowRebase = true } = {}) {
+  const author = requireAuthor(appDir, authorVersion, { allowRebase })
+  const state = checkStandardSeams({ appDir, authorVersion, allowRebase })
   if (state.ready) return { changed: false, ...state }
+  if (state.needsReapply) return applyCompatibleRebase(appDir, state.compatible)
   // 所有核心锚点先算；版本不符、必要锚点缺失/重复或既有受管文件漂移时写前拒绝。
   const core = buildCore(appDir)
   const before = snapshot(appDir), recordPath = inside(appDir, RECORD)
@@ -235,7 +349,8 @@ export function applyStandardSeams({ appDir, authorVersion } = {}) {
     }
     const after = Object.fromEntries(artifacts(appDir).filter(rel => existsSync(inside(appDir, rel))).map(rel => [rel, hash(readFileSync(inside(appDir, rel)))]))
     const old = previousRecord ? JSON.parse(previousRecord.toString('utf8')) : undefined
-    writeFileSync(recordPath, JSON.stringify({ version: 1, authorVersion: AUTHOR_VERSION, before: old?.before ? { ...before, ...old.before } : before, after }, null, 2) + '\n', 'utf8')
+    // 既有路径保持原样（盲 merge 未改，避免 partial regression）；新首装无旧记录，不涉及此合并。
+    writeFileSync(recordPath, JSON.stringify({ version: 1, authorVersion: author.version, before: old?.before ? { ...before, ...old.before } : before, after }, null, 2) + '\n', 'utf8')
     return { changed: true, ready: true, coverage: 'standard-core', files: [...core.keys()] }
   } catch (error) {
     restore(appDir, before)
@@ -265,5 +380,24 @@ export function uninstallStandardSeams({ appDir } = {}) {
   } catch (error) {
     restore(appDir, current); writeFileSync(file, recordBytes)
     throw new Error('标准卸缝失败，已恢复源码当前代；不承诺热切回文件后端', { cause: error })
+  }
+}
+
+/**
+ * 只读计划（供维护 adapter/check 报告；**不写盘、不改树**）：
+ * 返回就绪状态、待施缝文件、记录身份与（仅 allowRebase 时）兼容判定；uninstall 不调用本函数。
+ */
+export function inspectStandardSeamsPlan({ appDir, authorVersion, allowRebase = true } = {}) {
+  const author = requireAuthor(appDir, authorVersion, { allowRebase })
+  const file = inside(appDir, RECORD)
+  const record = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : null
+  const identity = record ? { version: record.version, authorVersion: record.authorVersion } : null
+  // 无记录的新版本首装：requireAuthor 的能力判定结果必须透传（否则 driver 会把 fresh 新版本误拒）。
+  const capability = author.compatible || null
+  try {
+    const state = checkStandardSeams({ appDir, authorVersion, allowRebase })
+    return { ready: state.ready, needsReapply: state.needsReapply === true, reason: state.ready ? 'ready' : (state.reason || 'needs-reapply'), pending: state.pending || [], drifted: state.drifted || [], compatible: state.compatible || capability, authorVersion: author.version, record: identity }
+  } catch (error) {
+    return { ready: false, reason: error.message, pending: [], drifted: [], compatible: null, authorVersion: author.version, record: identity }
   }
 }
