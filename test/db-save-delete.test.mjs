@@ -1,7 +1,7 @@
 // 只验删局扁平足迹预检（backend 源码截取 + 合成 SQLite 目标）：不加载SDK/业务、不执行真实删除、不改源字节。
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -112,4 +112,123 @@ test('DB删局扁平足迹预检只读且活动句柄归属不符拒绝', async 
   assert.deepEqual(trace, ['prepare', 'registryRemove', 'defer', 'removeLeftovers'])
   assert.deepEqual(alive.defer.map(item => item.path), ['sessions/x.db'], 'live agent 的扁平项应走 defer')
   assert.equal(alive.leftovers.items.some(item => item.path === 'sessions/x.db'), false)
+})
+
+// ===== 普通新建、未绑定（meta.rollback_archive=NULL）的删局必须只读核 Chat 档 header 归属 =====
+// 契约：missing binding 仅当目标 id === 前台 id、native `sessions.id` 吻合、且 Chat 档 `archive_head_fields` 的
+// `id`/`sessionId`（scalar JSON string；`archive_head.id` 恒为 singleton=1）等于 chatId/前台时才放行；非前台仍 fail-closed。
+// 构造走真实写路径：Chat 档 `restoreDatabase(...,'archive',...)`，native `SqliteSessionStore.materializeSession`（不手工写绑定）。
+import { SqliteSessionStore } from '../store.js'
+
+const ARCHIVE_TABLES = (chatId, sessionId) => ({
+  archive_head: [{ id: 1, revision: 1, updated_at: 1 }],
+  archive_head_fields: [
+    { key: 'id', ord: 0, kind: 0, value_json: JSON.stringify(chatId) },
+    { key: 'sessionId', ord: 1, kind: 0, value_json: JSON.stringify(sessionId) },
+    { key: 'messages', ord: 2, kind: 1, value_json: null },
+  ],
+  archive_messages: [{ message_index: 0, message_json: JSON.stringify({ role: 'assistant', mes: '正文' }) }],
+  archive_timeline_nodes: [],
+  variable_snapshots: [],
+  variable_state: [],
+  archive_worldbook_history: [],
+})
+
+function nativeFixture(t) {
+  const root = mkdtempSync(path.join(tmpdir(), 'dsh-db-delete-native-'))
+  const dbs = new Map(), closed = [], handles = []
+  t.after(() => {
+    for (const entry of dbs.values()) { try { entry.close() } catch { /* 已关闭 */ } }
+    dbs.clear()
+    rmSync(root, { recursive: true, force: true })
+  })
+  const chatId = 'chat-native-fg', FG = 'session-native-fg', BG = 'session-native-bg', X = 'session-native-x', BAD = 'session-native-bad'
+  const chatsRoot = path.join(root, 'chats'), sessionsRoot = path.join(root, 'sessions')
+  mkdirSync(chatsRoot, { recursive: true }); mkdirSync(sessionsRoot, { recursive: true })
+  const archiveFor = chat => path.join(chatsRoot, chat, 'archive.db')
+  const pathOf = id => path.join(sessionsRoot, id + '.db')
+  const store = new SqliteSessionStore(sessionsRoot)
+  const host = { store: { exists: id => existsSync(pathOf(id)), pathOf, dbs }, tracker: { openHandles: handles }, assertWritable(id) { if (!existsSync(pathOf(id))) throw Error('原件只读') } }
+  return {
+    root, chatId, FG, BG, X, BAD, archiveFor, pathOf, store, dbs, closed, handles, host,
+    validate: makeDelete(DatabaseSync, path),
+    /** 普通创建写路径（无 rollback_archive ⇒ 该 meta 为 NULL）；closeAll 避免缓存句柄占住后续文件操作 */
+    materialize(id, events = []) { store.materializeSession({ id, version: 1, createdAt: 1 }, 0, events); store.closeAll() },
+    /** dirChat＝落盘目录名（= 目标 chatId），headerChat/headerSession＝档内自述身份；重建前只清本 fixture 的该档文件 */
+    makeArchive(dirChat, headerChat = dirChat, headerSession) {
+      const target = archiveFor(dirChat)
+      for (const suffix of ['', '-wal', '-shm']) rmSync(target + suffix, { force: true })
+      mkdirSync(path.dirname(target), { recursive: true })
+      restoreDatabase(target, 'archive', ARCHIVE_TABLES(headerChat, headerSession))
+    },
+    archiveMeta(id) { const db = new DatabaseSync(pathOf(id), { readOnly: true }); try { return db.prepare("SELECT value FROM meta WHERE key='rollback_archive'").get()?.value ?? null } finally { db.close() } },
+    /** 复用已缓存条目：覆盖 Map 而不关旧句柄会在 Windows 清理时 EPERM */
+    cache(id) { if (dbs.has(id)) return; const db = new DatabaseSync(pathOf(id), { readOnly: true }); dbs.set(id, { db, close() { closed.push(id); db.close() } }) },
+    /** 显式关闭本 fixture 的全部缓存句柄（Windows 下保证 t.after 的 rm 不被句柄占用） */
+    closeAll() { for (const entry of dbs.values()) { try { entry.close() } catch { /* 已关闭 */ } } dbs.clear() },
+  }
+}
+
+test('普通新建未绑定DB删局核Chat归属且拒外档', async t => {
+  const f = nativeFixture(t)
+  // ① 真实普通创建：FG 未绑定 ⇒ meta.rollback_archive 为 NULL（复现上报状态）
+  f.materialize(f.FG)
+  assert.equal(f.archiveMeta(f.FG), null, '普通创建不得自带 rollback_archive 绑定')
+  f.makeArchive(f.chatId, f.chatId, f.FG)
+  const archiveSha = readFileSync(f.archiveFor(f.chatId))
+  // ② 同档、未绑定的普通前台 ⇒ 允许（只读核 Chat 档 header 归属；无需回填 DB 绑定）；全部校验后才关缓存
+  f.cache(f.FG)
+  const items = f.validate.call(f.host, f.chatId, [f.FG], f.archiveFor(f.chatId))
+  assert.deepEqual(items.map(item => item.path), [f.pathOf(f.FG), f.pathOf(f.FG) + '-wal', f.pathOf(f.FG) + '-shm'])
+  assert.deepEqual(f.closed, [f.FG], '全部校验通过后才关闭缓存')
+  assert.equal(f.archiveMeta(f.FG), null, '不得为通过校验而回填 rollback_archive')
+  assert.deepEqual(readFileSync(f.archiveFor(f.chatId)), archiveSha, 'Chat 档字节不得被改写')
+  // ③ 档内 header 属别档（写在当前正确路径）⇒ 拒归属
+  f.materialize(f.BG)
+  f.makeArchive(f.chatId, 'chat-other', f.BG)
+  assert.throws(() => f.validate.call(f.host, f.chatId, [f.FG], f.archiveFor(f.chatId)), /DB删局目标归属不符/)
+  // ④ 未绑定但档内 header.sessionId 非本前台 ⇒ 仍拒
+  f.makeArchive(f.chatId, f.chatId, f.BG)
+  assert.throws(() => f.validate.call(f.host, f.chatId, [f.FG], f.archiveFor(f.chatId)), /DB删局目标归属不符/)
+  // ⑤ 集合内先 FG 合法、随后未绑定后台（id !== 前台）⇒ fail-closed，且不得关掉 FG 缓存
+  f.materialize(f.FG); f.materialize(f.BG); f.makeArchive(f.chatId, f.chatId, f.FG)
+  const closedBeforeBg = f.closed.length
+  f.cache(f.FG)
+  assert.throws(() => f.validate.call(f.host, f.chatId, [f.FG, f.BG], f.archiveFor(f.chatId)), /DB删局/, 'missing binding 的非前台必须拒绝')
+  assert.equal(f.closed.length, closedBeforeBg, '拒绝时不得关闭已缓存 FG')
+  assert.equal(f.dbs.has(f.FG), true, 'FG 缓存必须保留')
+  // ⑥ native 身份不符（库内 sessions.id ≠ 目标 id）⇒ 拒（先释放本 fixture 的 FG 缓存句柄，再只清 FG 库文件重建）
+  f.dbs.get(f.FG)?.close(); f.dbs.delete(f.FG)
+  f.materialize(f.X)
+  for (const suffix of ['', '-wal', '-shm']) rmSync(f.pathOf(f.FG) + suffix, { force: true })
+  writeFileSync(f.pathOf(f.FG), readFileSync(f.pathOf(f.X)))
+  f.makeArchive(f.chatId, f.chatId, f.FG)
+  assert.throws(() => f.validate.call(f.host, f.chatId, [f.FG], f.archiveFor(f.chatId)), /DB删局目标身份不符/)
+  // ⑦ 活动句柄 ⇒ 拒且不关任何缓存（先精确重建 FG 库，避免沿用 ⑥ 里被替换成的 X 身份）
+  for (const suffix of ['', '-wal', '-shm']) rmSync(f.pathOf(f.FG) + suffix, { force: true })
+  f.materialize(f.FG); f.makeArchive(f.chatId, f.chatId, f.FG)
+  assert.equal(f.archiveMeta(f.FG), null, '重建后的 FG 仍应为未绑定普通新建')
+  const closedBeforeHandle = f.closed.length
+  f.cache(f.FG); f.handles.push({ id: f.FG })
+  assert.throws(() => f.validate.call(f.host, f.chatId, [f.FG], f.archiveFor(f.chatId)), /DB删局目标仍有活动句柄/)
+  assert.equal(f.closed.length, closedBeforeHandle, '活动句柄拒绝时不得关闭缓存')
+  f.handles.length = 0
+  // ⑧ Chat 档缺失（**正确路径**但文件不存在）⇒ 精准拒绝，且不得为校验造库
+  const archivePath = f.archiveFor(f.chatId)
+  for (const suffix of ['', '-wal', '-shm']) rmSync(archivePath + suffix, { force: true })
+  assert.equal(existsSync(archivePath), false, '夹具应先精确移除本 chat 档')
+  assert.throws(() => f.validate.call(f.host, f.chatId, [f.FG], archivePath), /DB删局/, '缺 Chat 档不得放行')
+  assert.equal(existsSync(archivePath), false, '缺档校验不得创建 Chat 档')
+  // ⑨ Chat 档 header 元数据损坏（native FG 仍为 missing row）⇒ 归属判定精准拒绝且不关缓存
+  f.materialize(f.FG)
+  assert.equal(f.archiveMeta(f.FG), null, '⑨ 前置：FG 仍为未绑定')
+  f.makeArchive(f.chatId, f.chatId, f.FG)
+  const fix = new DatabaseSync(f.archiveFor(f.chatId))
+  fix.prepare("UPDATE archive_head_fields SET value_json='{not json' WHERE key='sessionId'").run()
+  fix.close()
+  const closedBeforeBad = f.closed.length
+  f.cache(f.FG)
+  assert.throws(() => f.validate.call(f.host, f.chatId, [f.FG], f.archiveFor(f.chatId)), /DB删局目标归属不符/, '档内身份元数据损坏必须按归属拒绝')
+  assert.equal(f.closed.length, closedBeforeBad, '损坏元数据拒绝时不得关闭缓存')
+  f.closeAll()
 })

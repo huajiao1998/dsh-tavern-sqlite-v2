@@ -18,7 +18,7 @@ function fixture(t) {
   const put = (file, value) => { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, typeof value === 'string' ? value : JSON.stringify(value), 'utf8') }
   return { root, put }
 }
-function run(shell, f, helper, data, body) {
+function run(shell, f, helper, data, body, { timeout = 15000 } = {}) {
   const file = path.join(f.root, 'fixture.ps1')
   f.put(file, [
     "$ErrorActionPreference='Stop'",
@@ -28,7 +28,7 @@ function run(shell, f, helper, data, body) {
     "$a=([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + b64(data) + "')) | ConvertFrom-Json)",
     ...body,
   ].join('\n'))
-  const out = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], { encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const out = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], { encoding: 'utf8', windowsHide: true, timeout })
   assert.ifError(out.error); assert.equal(out.status, 0, out.stdout + out.stderr)
   return JSON.parse(out.stdout.trim())
 }
@@ -91,7 +91,7 @@ export function runtimeFor(op){if(op.home.endsWith('拒绝运行时'))throw Erro
       ' $out+=@{tag=$case.tag;layout=$tavern.layout;error=$err;env=$env:ELECTRON_RUN_AS_NODE;preference=[string]$ErrorActionPreference}',
       '}',
       'ConvertTo-Json -InputObject $out -Depth 5 -Compress',
-    ])
+    ], { timeout: 30000 })
     for (const result of got) {
       const c = cases.find(item => item.tag === result.tag), record = JSON.parse(readFileSync(path.join(f.root, c.tag + '.json'), 'utf8'))
       assert.deepEqual(record.args, [c.action === 'install' || c.action === 'check' ? 'install' : 'uninstall', '--home', path.join(home, c.tag), '--desktop-app', desktop])

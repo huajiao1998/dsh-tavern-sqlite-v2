@@ -441,7 +441,22 @@ export default class TavernSessionPersistence extends JsonlSessionPersistence {
 				binding = read.prepare("SELECT value FROM meta WHERE key='rollback_archive'").get()?.value
 				sessionId = read.prepare('SELECT id FROM sessions').get()?.id
 			} finally { if (!cached) read.close() }
-			if (binding !== archive) throw Error('DB删局目标归属不符：' + id)
+			if (binding !== archive) {
+				// 普通新建库没有回退绑定（meta 无 rollback_archive 行）：此时**只用该 chat archive 的只读头部元数据**互证归属，
+				// 且仅前台 id 可走此路——绝不因“自身 sessions.id==id”就放行外来/背景库。
+				if (binding !== undefined && binding !== null) throw Error('DB删局目标归属不符：' + id)
+				if (id !== foregroundId) throw Error('DB删局目标归属不符：' + id)
+				let owner
+				try {
+					const chatRead = new DatabaseSync(archive, { readOnly: true, allowExtension: false })
+					try {
+						const sessionField = chatRead.prepare("SELECT value_json FROM archive_head_fields WHERE key='sessionId'").get()?.value_json
+						const chatField = chatRead.prepare("SELECT value_json FROM archive_head_fields WHERE key='id'").get()?.value_json
+						owner = { sessionId: sessionField == null ? undefined : JSON.parse(sessionField), chatId: chatField == null ? undefined : JSON.parse(chatField) }
+					} finally { chatRead.close() }
+				} catch { owner = undefined }
+				if (!owner || owner.chatId !== chatId || owner.sessionId !== id) throw Error('DB删局目标归属不符：' + id)
+			}
 			if (sessionId !== id) throw Error('DB删局目标身份不符：' + id)
 			prepared.push({ id, file })
 		}

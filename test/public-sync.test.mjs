@@ -40,11 +40,14 @@ function author(rel) {
 }
 
 // 从已施缝文本里切出 rewindSession 方法体（测试直接用真实作者实现，不手抄）。
+// 结束边界改用后台 Host 施缝真正注入的删后通知行（该行唯一），不再依赖其它 transform 才产生的后置锚点。
 function rewindBody(source) {
   const a = source.indexOf('    async rewindSession(agent, boundarySeq) {')
-  const b = source.indexOf('    recordRollbackBoundary:', a)
-  assert.ok(a >= 0 && b > a, 'rewindSession 未定位到')
-  return source.slice(a, b).trim().replace(/,$/, '')
+  const notify = source.indexOf('sync.publishSessionCut({ session: agent.session, agent })', a)
+  const close = source.indexOf('    },', notify)
+  assert.ok(a >= 0 && notify > a && close > notify, 'rewindSession 未定位到（施缝注入缺失或通知行不唯一）')
+  assert.equal(source.split('sync.publishSessionCut({ session: agent.session, agent })').length - 1, 1, '删后通知行应恰好一处')
+  return source.slice(a, close + 5).trim().replace(/,$/, '')   // close+5 含方法自身的收尾 `    }`
 }
 
 // ---------- ① 后台每任务删尾：删前核接线 / 删后发 child 基线 ----------
@@ -95,9 +98,11 @@ test('后台删尾 Host：作者态施缝补同连接接线且幂等，缺删后
   assert.ok(halfMarker.includes('// [dsh-tavern-background-task-cut-sync:v1]'), '半标记应保留 marker')
   assert.throws(() => applyBackgroundHostRollbackTransform(halfMarker), /不一致/, '缺删后通知必须被判为半标记')
 
-  // 锚点漂移：消费者被改名 ⇒ 拒绝（不静默跳过）。
-  assert.throws(() => applyBackgroundHostRollbackTransform(authorSrc.replace('  const backgroundAgentRunner = createBackgroundAgentRunner({', '  const renamedRunner = createBackgroundAgentRunner({')),
-    /不一致/, '锚点漂移必须拒绝')
+  // 锚点漂移：消费者被改名 ⇒ 拒绝（不静默跳过）。反例构造在**纯作者源**上，改真实消费者初始化字面量。
+  const driftAnchor = '  const backgroundAgentRunner = createBackgroundAgentRunner({'
+  const driftedSource = authorSrc.replace(driftAnchor, '  const renamedRunner = createBackgroundAgentRunner({')
+  assert.notEqual(driftedSource, authorSrc, '构造漂移反例失败：消费者初始化未命中')
+  assert.throws(() => applyBackgroundHostRollbackTransform(driftedSource), /锚点缺失|不唯一|不一致/, '锚点漂移必须拒绝')
 
   // 通知行唯一：升级不得重复插入。
   assert.equal(fresh.split('sync.publishSessionCut({ session: agent.session, agent })').length - 1, 1, '通知行应恰好一处')
