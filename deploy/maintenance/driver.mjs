@@ -347,7 +347,7 @@ function createStoppedDriver(op, adapter, packageRoot, evidence, budget, { mode,
         if (!plan || (plan.ready !== true && plan.compatible?.ok !== true)) throw Error('作者版本未适配且契约不等价：' + author.version)
       }
       const patch = cleanResidual ? '' : readFileSync(path.join(op.profileDir, 'cordis.patch.yml'), 'utf8').replace(/^\s*#.*$/gm, '').trim()
-      if (!cleanResidual && patch !== '[]' && patch !== '') throw Error('profile自定义patch非空，请先核冲突；不覆盖用户配置')
+      if (!cleanResidual && patch !== '[]' && patch !== '') throw Error(describeProfilePatchConflict(op.profileDir, patch))
       if (cleanResidual) {
         if (action !== 'uninstall') throw Error('兜底残留路径仅用于卸载')
         residual = residualAssembly({ home: op.home, profileDir: op.profileDir, packageName: adapter.packageName, evidence })
@@ -609,7 +609,7 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { platf
         if (!plan || (plan.ready !== true && plan.compatible?.ok !== true)) throw Error('作者版本未适配且契约不等价：' + author.version)
       }
       const patch = cleanResidual ? '' : readFileSync(path.join(op.profileDir, 'cordis.patch.yml'), 'utf8').replace(/^\s*#.*$/gm, '').trim()
-      if (!cleanResidual && patch !== '[]' && patch !== '') throw Error('profile自定义patch非空，请先核冲突；不覆盖用户配置')
+      if (!cleanResidual && patch !== '[]' && patch !== '') throw Error(describeProfilePatchConflict(op.profileDir, patch))
       original = processFinder(context)
       if (original) {
         assertTargetAllowed({ ...op, port: original.port })
@@ -804,4 +804,41 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { platf
     async verifyRecovery(target) { return driver.verify(prior.deps[adapter.packageName] ? 'install' : 'uninstall', adapter, { process: target }) },
   }
   return driver
+}
+
+/**
+ * profile 用户层 cordis.patch.yml 非空时，把"怎么办"写进错误里。
+ *
+ * 用户层覆盖是 profile 的正常用法 —— Tavern 自己生成的 bundle patch 注释里就写着
+ * 「此文件只保留用户覆盖」，所以撞上它并不代表用户做错了什么，只是本次维护要求
+ * 该文件为空。原来的提示只有"请先核冲突"，用户既不知道要核什么，也不知道怎么让路。
+ *
+ * 本函数只读文件、拼一段可操作的说明，不改任何东西。
+ */
+function describeProfilePatchConflict(profileDir, patch) {
+  const file = path.join(profileDir, 'cordis.patch.yml')
+  let raw = patch
+  try { raw = readFileSync(file, 'utf8') } catch { /* 读不到就用已经剥过注释的那份 */ }
+  const lines = raw.split(/\r?\n/).filter(line => line.trim() && !line.trim().startsWith('#'))
+  const shown = lines.slice(0, 8)
+  const out = [
+    'profile 用户层 cordis.patch.yml 非空，为避免覆盖你的配置，维护已停止。',
+    '',
+    `  文件     : ${file}`,
+    `  生效行数 : ${lines.length}`,
+    '  内容（已去掉注释行，前几行）：',
+  ]
+  for (const line of shown) out.push('    ' + line)
+  if (lines.length > shown.length) out.push(`    …（还有 ${lines.length - shown.length} 行）`)
+  out.push(
+    '',
+    '  两种处理方式（维护不会替你改这个文件）：',
+    '    1) 临时让路：把它另存为 cordis.patch.yml.bak-<时间戳>，把本文件内容改成 []，',
+    '       维护完成后再把备份还原回来 —— 这样你自己的覆盖一条都不会丢；',
+    '    2) 不再需要：如果这些覆盖已经用不上，直接把内容改成 []。',
+    '',
+    '  注：用户层覆盖是 profile 的正常用法，撞到这里不代表你的配置有问题，',
+    '      只是本次维护要求该文件为空。',
+  )
+  return out.join('\n')
 }
