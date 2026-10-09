@@ -1383,8 +1383,11 @@ export function createChatSqliteStore(options = {}) {
       assertPinnedRevision(id, summary.revision, source.currentRevision())
       // 失败清理摘要：同快照内服务端判定“最新失败轮可否干净清理”，随窗口带回供 UI 接线（不恢复整档）。
       const failureCleanup = queryFailureCleanup(db, { revision: summary.revision, timeline: summary.timeline })
+      // 窄 timeline 不装载 checkpoints；纯原生错误仍须按同快照的检查点尾号拒绝覆盖成功轮。
+      const nativeFailureCheckpointTurn = Number(stmt(db, `SELECT MAX(CAST(json_extract(value_json,'$.turn') AS INTEGER)) AS turn
+        FROM archive_timeline_nodes WHERE node_key LIKE 'checkpoints#%'`).get()?.turn) || 0
       return { chat, messageCount: end, from, to: end - 1, revision: summary.revision,
-        worldMessage, activity: summary.activity, failureCleanup, nativeData: true }
+        worldMessage, activity: summary.activity, failureCleanup, nativeFailureCheckpointTurn, nativeData: true }
     })
   }
 

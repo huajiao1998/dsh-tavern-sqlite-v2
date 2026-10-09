@@ -182,6 +182,7 @@ export const DEFAULT_DEPS_EXPRESSION = `{
     get sessionResources() { return sessionResources },
     get projectTavernHelperContext() { return projectTavernHelperContext },
     get sessionDebugEvidence() { return sessionDebugEvidence },
+    get readFailureEvidence() { return readFailureEvidence },
     get rollbackViewFields() { return rollbackViewFields },
     get cardViewOf() { return cardViewOf },
     get readChatCard() { return readChatCard },
