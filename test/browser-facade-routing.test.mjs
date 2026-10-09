@@ -90,7 +90,7 @@ test('生命周期仍要求派发浏览器facade脚本；仅脚本级动态标�
 })
 
 test('标准安装最终生成shim转发真实dispatchDeps，不以备用shim替代生产证据', () => {
-  const source = readFileSync(new URL('../deploy/standard-seams.mjs', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../deploy/standard-seam-transforms.mjs', import.meta.url), 'utf8')
   const match = source.match(/write\.set\(DOMAIN \+ 'storage-server-execution\.js', shim\(("(?:\\.|[^"\\])*")\)\)/)
   assert.ok(match, '最终buildCore的生产写口必须存在')
   const body = JSON.parse(match[1])

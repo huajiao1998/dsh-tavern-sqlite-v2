@@ -140,7 +140,8 @@ test('WinCLI driver: 目标运行或身份不明时写前拒绝，check 如实 r
   const state = await driver.preflight('install') // check 分支：只读预检，允许开着酒馆
   assert.equal(state.runningNow, true, 'check 必须如实报 running，不当停止态')
   assert.equal(state.host, 'cli')
-  assert.equal(state.noop, true, '已装且带标准记录 ⇒ 幂等路径，仍须在写前拒绝')
+  assert.equal(state.noop, false, '新机制：源码干净态（withdrawnClean）按首装重建，不再判 noop')
+  assert.equal(state.withdrawnClean, true, '无旧记录无块 ⇒ withdrawnClean')
   await assert.rejects(driver.assertIdentity(), /正在运行/, '运行中写前必须拒绝（含 noop 路径）')
   assert.deepEqual(image(f.app), appBefore); assert.deepEqual(read(f.profileFile), profileBefore)
   assert.equal(existsSync(path.join(f.home, 'plugins', adapter.packageName)), false, '拒绝时不得写私有包目录')

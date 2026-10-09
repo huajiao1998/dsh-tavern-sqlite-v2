@@ -52,6 +52,15 @@ function fixture(t, options = {}) {
   const source = {
     root: app,
     file,
+    // 新契约（assertPackageSource 2026-10-09 版）：targets/inspect/旧记录与接管闸都按最小桩提供——
+    // inspect 只做行注释收集（本文件夹具的标记都在行注释里），其余闸在桩语义下恒为干净。
+    targets: [...activeAdapter.targets],
+    inspect(rel) { const target = file(rel); if (!fs.existsSync(target)) return null; const text = fs.readFileSync(target, 'utf8'); return { lineComments: text.split('\n').filter(line => line.trimStart().startsWith('//')).map(line => line.trim()) } },
+    assertNoOldRecords() {},
+    readRecord() { return null },
+    blockPresence() { return [] },
+    takeoverPresence() { return [] },
+    cleanState() { return true },
     capture() { events.push('source:capture'); if (options.captureError) throw options.captureError; return image() },
     restore(value) {
       events.push('source:restore'); restores.push(value)
@@ -137,9 +146,10 @@ test('stop 部分失败但桩已停：不写源码装配，只恢复原应运行
   const f = fixture(t, { withdrawnClean: true, stopError: error }), before=f.source.capture()
   let thrown
   await assert.rejects(f.run('uninstall'), value => { thrown = value; return true })
-  assert.equal(thrown,error,'原始失败不得被伪成功返回或丢失')
+  assert.equal(thrown.cause, error, '原始失败不得被伪成功返回或丢失（经 cause 保留初因身份）')
+  assert.ok(thrown.message.includes('已恢复原装配及原运行状态') && thrown.message.includes('原代停止未完成'), '包装信息必须含恢复事实与初因')
   assert.equal(f.driver.calls.stop,1)
-  assert.equal(f.driver.calls.stoppedAfterError,0,'共用路由用assertStopped核恢复资格，不借旧补证覆盖未改源码')
+  assert.equal(f.driver.calls.stoppedAfterError,1,'停止失败后由 stoppedAfterError 补证"确实已停"才允许恢复（runner 停止核验路由）')
   assert.ok(!f.events.includes('stopIfAlive'),'未启动新进程，不停第二实例')
   assert.ok(f.events.includes('stopFailedStart'))
   assert.ok(!f.events.some(name=>name.startsWith('manageResidual:')||name==='restorePackage'||name==='source:restore'))
@@ -155,12 +165,13 @@ test('既有失败路径（stop 已成功、残留装配失败）：回滚源码
   const f = fixture(t, { withdrawnClean: true, manageError: error }), before=f.source.capture()
   let thrown
   await assert.rejects(f.run('uninstall'), value => { thrown = value; return true })
-  assert.equal(thrown,error,'原始失败不得吞掉')
-  assert.equal(f.driver.calls.stop,1);assert.equal(f.driver.calls.stoppedAfterError,0)
+  assert.equal(thrown.cause, error, '原始失败不得吞掉（经 cause 保留初因身份）')
+  assert.ok(thrown.message.includes('已恢复原装配及原运行状态') && thrown.message.includes('残留装配归档失败'), '包装信息必须含恢复事实与初因')
+  assert.equal(f.driver.calls.stop,1);assert.equal(f.driver.calls.stoppedAfterError,0,'stop 已成功：无需停止补证')
   const at=name=>f.events.indexOf(name)
-  assert.ok(at('manageResidual:uninstall')>=0&&at('manageResidual:uninstall')<at('manageResidual:restore'),'实际失败后才恢复装配')
-  assert.ok(at('manageResidual:restore')<at('start')&&at('start')<at('verifyRecovery'),'恢复装配后启动并验恢复')
+  assert.ok(at('manage:uninstall')>=0&&at('manage:uninstall')<at('restorePackage'),'实际失败后才恢复装配')
+  assert.ok(at('restorePackage')<at('start')&&at('start')<at('verifyRecovery'),'恢复装配后启动并验恢复')
   assert.equal(f.startCalls.length,1);assert.equal(f.startCalls[0].recovery,true)
   assert.deepEqual(f.source.capture(),before,'包括原入口字节在内，有限源码全部回滚')
-  assert.ok(fs.existsSync(path.join(f.evidenceDir,'residual-source-before.json')),'恢复材料必须保存')
+  assert.ok(fs.existsSync(path.join(f.evidenceDir,'source-before.json')),'恢复材料必须保存')
 })

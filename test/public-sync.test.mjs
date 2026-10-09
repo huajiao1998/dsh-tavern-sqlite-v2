@@ -338,18 +338,15 @@ test('资源路由：200/403 同带 no-store，403 只给安全原因码', () =>
 
 test('标准预检与 applyAll 后置重算两处都挂退役/current/route；UI 寿命令 V2 只 copy 不套 official loader', () => {
   const standard = readFileSync(new URL('../deploy/standard-seams.mjs', import.meta.url), 'utf8')
+  const transforms = readFileSync(new URL('../deploy/standard-seam-transforms.mjs', import.meta.url), 'utf8')
 
-  // 预检（buildCore）与 applyAll 后置重算两处都必须有 current + retirement 组合。
-  const preflight = "write.set('tavern-plugin/lib/index.js', applyCurrentResourceHostTransform(applyBackgroundRetirementHostTransform(write.get('tavern-plugin/lib/index.js'))))"
-  const applyAll = "core.set('tavern-plugin/lib/index.js', applyCurrentResourceHostTransform(applyBackgroundRetirementHostTransform(applyForkHistoryTransform(core.get('tavern-plugin/lib/index.js')))))"
-  assert.ok(standard.includes(preflight), '预检处缺 current+retirement 挂点')
-  assert.ok(standard.includes(applyAll), 'applyAll 后置重算处缺 current+retirement 挂点')
-  // route 与两个新 domain 目标都要进 build 与 TARGETS。
-  assert.ok(standard.includes("write.set('tavern-plugin/lib/http/routes.js', applySessionResourceRouteTransform(text(appDir, 'tavern-plugin/lib/http/routes.js')))"), 'route 转换未挂')
-  assert.ok(standard.includes("'background-session-retirement.js'") && standard.includes("'session-resource-access.js'"), '新旧 domain 目标未进 TARGETS')
-  for (const rel of ['tavern-plugin/lib/http/routes.js', 'tavern-plugin/lib/index.js']) {
-    assert.ok(standard.includes("'" + rel + "'"), '目标清单缺 ' + rel)
-  }
+  // index 写口（预检与 applyAll 后置重算合并后的单一挂点）必须保留 current+retirement（含 forkHistory）。
+  const compose = "write.set('tavern-plugin/lib/index.js', applyCurrentResourceHostTransform(applyBackgroundRetirementHostTransform(applyForkHistoryTransform(write.get('tavern-plugin/lib/index.js')))))"
+  assert.ok(transforms.includes(compose), 'index 写口缺 current+retirement 挂点')
+  // route 转换仍挂；新旧 domain 目标都要进 DOMAINS/HOST 清单。
+  assert.ok(transforms.includes("write.set('tavern-plugin/lib/http/routes.js', applySessionResourceRouteTransform(text(appDir, 'tavern-plugin/lib/http/routes.js')))"), 'route 转换未挂')
+  assert.ok(standard.includes("'background-session-retirement.js'") && standard.includes("'session-resource-access.js'"), '新旧 domain 目标未进 DOMAINS')
+  assert.ok(standard.includes("'index.js'") && standard.includes("'http/routes.js'"), 'HOST 清单缺 index/routes')
 
   // UI 寿命：V2 仍 iframe ⇒ copy bootstrap/runtime（不发明新挂点）；
   // official loader 在 V2 **不跑**（标准装配不传该转换）⇒ 不得给官方 bundle 套 jQuery Proxy 包装。

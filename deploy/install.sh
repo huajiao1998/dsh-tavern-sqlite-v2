@@ -3,7 +3,7 @@
 set -eu
 RELEASE_URL='__DSH_RELEASE_URL__'
 RELEASE_SHA256='__DSH_RELEASE_SHA256__'
-VERSION='0.3.0'
+VERSION='0.3.8'
 SCRIPT_DIR=''
 case "$0" in
   *install.sh) SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) ;;
@@ -24,8 +24,8 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 const NAME = 'dsh-tavern-sqlite-v2'
 const MAX = 16 * 1024 * 1024
-// 供应链口径与维护入口 driver.mjs 同表：零运行时依赖 + vendor 账本 + 四个入口文件。
-const VENDOR_ENTRIES = { lodash: 'lib/vendor/lodash/lodash.min.js', json5: 'lib/vendor/json5/index.mjs', jsonrepair: 'lib/vendor/jsonrepair/esm/index.js', yaml: 'lib/vendor/yaml/dist/index.js' }
+// 供应链口径与维护入口 driver.mjs 同表：零运行时依赖 + vendor 台账 + 五个入口文件。
+const VENDOR_ENTRIES = { lodash: 'lib/vendor/lodash/lodash.min.js', json5: 'lib/vendor/json5/index.mjs', jsonrepair: 'lib/vendor/jsonrepair/esm/index.js', yaml: 'lib/vendor/yaml/dist/index.js', acorn: 'lib/vendor/acorn/acorn.mjs' }
 // 别的版本线一律不碰：既不自动迁移/共装，也不替它们卸载。
 const OTHER_LINES = ['dsh-tavern-storage-sqlite', 'dsh-tavern-storage-sqlite-v1', 'dsh-tavern-storage-sqlite-v2', 'dsh-tavern-sqlite-v1']
 export function bootstrapOptions(args) {
@@ -101,7 +101,7 @@ export function validatePackage(root) {
   const declared = Object.keys(manifest.dependencies || {})
   // 零运行时依赖：lodash/yaml/json5/jsonrepair 已 vendor 进包内，任何声明依赖都拒绝（供应链政策不放宽）。
   if (manifest.name !== NAME || declared.length > 0 || !Array.isArray(manifest.files)) throw Error('不是完整V2包或声明了未知运行依赖：' + [manifest.name !== NAME ? '包名 ' + manifest.name : '', declared.length ? '依赖 ' + declared.join('、') : '', Array.isArray(manifest.files) ? '' : '缺files声明'].filter(Boolean).join('；') + '；本包要求零运行时依赖（解析器已 vendor 进包内）')
-  // vendor 账本 + 四个入口：与维护入口 driver.mjs 同一道护栏，缺件不联网替换损坏包。
+  // vendor 台账 + 五个入口：与维护入口 driver.mjs 同一道护栏，缺件不联网替换损坏包。
   const ledger = path.join(root, 'lib', 'vendor', 'manifest.json')
   if (!fs.existsSync(ledger)) throw Error('缺少 vendor 账本 lib/vendor/manifest.json；不联网替换损坏包')
   let record

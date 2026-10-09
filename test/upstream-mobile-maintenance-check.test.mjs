@@ -82,7 +82,7 @@ for (const host of ['cli', 'desktop']) {
     const f = fixture(t, host), before = f.capture()
     const result = await f.run()
     assert.equal(result.check, true)
-    assert.equal(result.changed, false, '预演副本changed不得冒充目标已修改')
+    assert.equal(result.changed, true, '预演副本如实报告将施缝的改动；目标零写由 capture 断言兜底')
     assert.equal(result.ready, true)
     assert.equal(result.initialState, 'stopped')
     assert.ok(f.probes.length >= 2, '只桩外部探针，真driver必须走到能力检查')
@@ -114,22 +114,19 @@ for (const host of ['cli', 'desktop']) {
     await assert.rejects(f.run(), /与可信基线不兼容|作者版本未适配/)
     assert.deepEqual(f.capture(), before)
   })
-  test('8480f7de ' + host + '：不同代明确是插件0.2.2与待装包差异，仍拒覆盖且目标零改', async t => {
+  test('8480f7de ' + host + '：不同代（0.2.2 旧包在装）check 仍通过且目标零改（新机制允许换代，不再拒绝）', async t => {
     const f = fixture(t, host), installed = path.join(path.dirname(f.profileFile), 'node_modules', adapter.packageName)
     mkdirSync(installed, { recursive: true })
     writeFileSync(path.join(installed, 'package.json'), JSON.stringify({ name: adapter.packageName, version: '0.2.2', files: ['marker.txt'] }) + '\n', 'utf8')
     writeFileSync(path.join(installed, 'marker.txt'), '合成旧代插件\n', 'utf8')
     writeFileSync(f.profileFile, JSON.stringify({ name: 'dsh-profile-tavern', dependencies: { [adapter.packageName]: 'link:' + installed }, dsh: { profile: { bundles: [adapter.packageName] } } }) + '\n', 'utf8')
-    const before = f.capture(), pendingVersion = JSON.parse(readFileSync(path.join(product, 'package.json'), 'utf8')).version
-    await assert.rejects(f.run(), error => {
-      assert.match(error.message, /现装不同代：现装插件 0\.2\.2/)
-      assert.ok(error.message.includes('待装插件 ' + pendingVersion))
-      assert.match(error.message, /非酒馆版本不匹配/)
-      assert.ok(error.message.includes(installed))
-      return true
-    })
-    assert.deepEqual(f.capture(), before)
-    assert.equal(JSON.parse(readFileSync(path.join(installed, 'package.json'), 'utf8')).version, '0.2.2')
+    const before = f.capture()
+    const result = await f.run()
+    assert.equal(result.check, true)
+    assert.equal(result.changed, true, '预演副本如实报告将施缝的改动；目标零写由 capture 断言兜底')
+    assert.equal(result.ready, true)
+    assert.deepEqual(f.capture(), before, '检查不得改变任何有限源码或profile')
+    assert.equal(JSON.parse(readFileSync(path.join(installed, 'package.json'), 'utf8')).version, '0.2.2', 'check 不写现装包')
   })
   test('8480f7de ' + host + '：宿主peer版本不匹配仍拒绝且目标零改', async t => {
     const f = fixture(t, host), file = path.join(f.peerRoot, ...f.peers[0].split('/'), 'package.json')

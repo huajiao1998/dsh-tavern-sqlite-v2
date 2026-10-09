@@ -1,4 +1,4 @@
-// bootstrap兜底定向验证（2026-10-07）：零deps+vendor四入口；缺vendor拒；卸载半装/无包不absent早退；
+// bootstrap兜底定向验证（2026-10-07）：零deps+vendor五入口；缺vendor拒；卸载半装/无包不absent早退；
 // 安装半装严格拒；悬空链接容忍；foreign family保拒。全部原创微型替身，不联网、不读真实档。
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -8,7 +8,7 @@ import path from 'node:path'
 import { bootstrapOptions, installedPackage, validatePackage, selectLocal, bootstrap } from '../deploy/bootstrap.mjs'
 
 const NAME = 'dsh-tavern-sqlite-v2'
-const VENDOR = ['lib/vendor/lodash/lodash.min.js', 'lib/vendor/json5/index.mjs', 'lib/vendor/jsonrepair/esm/index.js', 'lib/vendor/yaml/dist/index.js']
+const VENDOR = ['lib/vendor/lodash/lodash.min.js', 'lib/vendor/json5/index.mjs', 'lib/vendor/jsonrepair/esm/index.js', 'lib/vendor/yaml/dist/index.js', 'lib/vendor/acorn/acorn.mjs']
 const FILES = ['deploy/maintenance.mjs', 'deploy/maintenance/runner.mjs', 'deploy/maintenance/source.mjs', 'deploy/maintenance/driver.mjs', 'index.js', 'cordis.patch.yml']
 const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'bootstrap-residual-'))
 const drop = root => { assert.ok(root.startsWith(path.join(os.tmpdir(), 'bootstrap-residual-')), '只清理本次自建临时目录'); fs.rmSync(root, { recursive: true, force: true }) }
@@ -22,13 +22,13 @@ const maintenanceSource = ({ asset = null, module = null } = {}) => [
   asset ? "export const asset = new URL('./" + asset + "', import.meta.url)" : '',
   'export const fixture = true',
 ].filter(Boolean).join('\n') + '\n'
-/** 微型完整包：零运行时依赖 + vendor账本四入口 + 维护链（asset为随包资产，module为被引用模块）。 */
+/** 微型完整包：零运行时依赖 + vendor账本五入口 + 维护链（asset为随包资产，module为被引用模块）。 */
 function tinyPackage(dir, { version = '0.2.8', asset = null, module = null, extra = {} } = {}) {
   fs.mkdirSync(dir, { recursive: true })
   for (const rel of FILES) write(path.join(dir, rel))
   write(path.join(dir, 'deploy', 'maintenance', 'runner.mjs'), maintenanceSource({ asset, module }))
   for (const rel of VENDOR) write(path.join(dir, rel))
-  write(path.join(dir, 'lib', 'vendor', 'manifest.json'), JSON.stringify({ packages: { lodash: { version: '1.0.0' }, json5: { version: '1.0.0' }, jsonrepair: { version: '1.0.0' }, yaml: { version: '1.0.0' } } }))
+  write(path.join(dir, 'lib', 'vendor', 'manifest.json'), JSON.stringify({ packages: { lodash: { version: '1.0.0' }, json5: { version: '1.0.0' }, jsonrepair: { version: '1.0.0' }, yaml: { version: '1.0.0' }, acorn: { version: '1.0.0' } } }))
   write(path.join(dir, 'package.json'), JSON.stringify({ name: NAME, version, dependencies: {}, files: FILES, ...extra }))
   return dir
 }
@@ -47,7 +47,7 @@ function captureLog() {
   return { lines, restore: () => { console.log = original } }
 }
 
-test('①validatePackage：零deps+vendor四入口+维护链资产齐备即通过；缺vendor/声明依赖保拒', () => {
+test('①validatePackage：零deps+vendor五入口+维护链资产齐备即通过；缺vendor/声明依赖保拒', () => {
   const root = temp()
   try {
     const full = tinyPackage(path.join(root, 'full'))

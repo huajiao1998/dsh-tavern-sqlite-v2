@@ -44,8 +44,8 @@ export function options(argv){writeFileSync(process.env.FIXTURE_RECORD,JSON.stri
 export function runtimeFor(op){writeFileSync(process.env.FIXTURE_RUNTIME,JSON.stringify({runtimeFor:op.home}),'utf8');return {cli:'fixture-sdk/bin.js'};}`)
     const cases = [
       { tag: 'install', action: 'install', verb: 'install' }, { tag: 'check', action: 'check', verb: 'install' },
-      { tag: 'uninstall', action: 'uninstall', verb: 'uninstall' }, { tag: 'update', action: 'update', verb: 'uninstall' },
-      { tag: 'menu', action: '', verb: 'uninstall' },
+      { tag: 'uninstall', action: 'uninstall', verb: 'uninstall' }, { tag: 'update', action: 'update', verb: 'install' },
+      { tag: 'menu', action: '', verb: 'install' },
     ]
     const got = run(shell, f, [
       "$env:ELECTRON_RUN_AS_NODE='fixture-original'", '$out=@()',

@@ -94,7 +94,7 @@ export function runtimeFor(op){if(op.home.endsWith('拒绝运行时'))throw Erro
     ], { timeout: 30000 })
     for (const result of got) {
       const c = cases.find(item => item.tag === result.tag), record = JSON.parse(readFileSync(path.join(f.root, c.tag + '.json'), 'utf8'))
-      assert.deepEqual(record.args, [c.action === 'install' || c.action === 'check' ? 'install' : 'uninstall', '--home', path.join(home, c.tag), '--desktop-app', desktop])
+      assert.deepEqual(record.args, [c.action === 'uninstall' ? 'uninstall' : 'install', '--home', path.join(home, c.tag), '--desktop-app', desktop])
       assert.equal(record.env, c.runAsNode ? '1' : 'fixture-original')
       assert.equal(result.env, 'fixture-original'); assert.equal(result.preference, 'Stop')
       if (c.tag.startsWith('拒绝')) { assert.match(result.error, /桌面目标识别未通过/); assert.equal(result.layout, 'unconfirmed') }

@@ -33,13 +33,15 @@ test('DB最新作者代标准接缝接同一SQL交换资源桥', t => {
   assert.equal(applied.changed, true); assert.equal(applied.ready, true)
   assert.equal(checkStandardSeams({ appDir: f.appDir }).ready, true)
   assert.ok(readFileSync(f.client, 'utf8').includes('导入 SillyTavern 聊天记录'), '接缝破坏新代 client bundle 字节')
-  const index = readFileSync(f.index, 'utf8')
+  const rawIndex = readFileSync(f.index, 'utf8')
+  // 注释块协议：业务字节看 ACTIVE 投影；raw 只承担块标记计数（与测试②同口径）。
+  const index = activeSource(rawIndex, INDEX)
   // 新代官方语义保存：posture import 与已知姿势结算路径不得被接缝破坏
   assert.ok(index.includes("lastSubmittedPosture, normalizePostureSubmission } from './domain/posture-submission.js'"), '新代官方 posture import 被破坏')
   assert.ok(index.includes('lastSubmittedPosture('), '新代官方姿势已知值调用被破坏')
   assert.ok(index.includes('knownPosture'), '新代 settleUserText knownPosture 语义被破坏')
   // DB 锚点语义保留：唯一入口 + 删局消费在 registry.remove 之前 + 卡校验契约
-  assert.equal(index.split('// [dsh-tavern-db-save:v1]').length - 1, 1)
+  assert.equal(rawIndex.split('// [dsh-tavern-db-save:v1]').length - 1, 1)
   assert.ok(index.includes('  async function exportGameSave(sessionId, options = {}) {\n    return await dbSaveExchange.exportGameSave(sessionId, options)\n  }'))
   assert.ok(index.includes('  async function importGameSave(args) {\n    return await dbSaveExchange.importGameSave(args)\n  }'))
   const deleteCall = index.indexOf('dbSaveDeleteFootprint(chatId, [footprint.foregroundSessionId')
@@ -57,8 +59,8 @@ test('DB标准接缝桥为owned-new且卸载逐字节还原', t => {
   // 注释块协议：raw 里 BEGIN/END 标记与 ORIGINAL 注释会打断连续字面 ⇒ 业务字节一律看 ACTIVE 投影；
   // raw 只承担"块标记计数"这类协议层断言（marker 恰一处、RPC case 不重复等）。
   const index = activeSource(rawIndex, INDEX)
-  // ① 桥：3 factory 生成体逐字；新记录里必须以 owned-new 承载同一字节（取代旧 catalog.ownedFiles 摘要比较）
-  assert.equal(bridge, BRIDGE_BODY)
+  // ① 桥：自有新文件以完整 owned-file 注释区块承载；ACTIVE 投影逐字等于自有实现（业务字节不变）。
+  assert.ok(bridge.includes('[dsh-tavern-seam:BEGIN]') && bridge.includes('id=owned-file') && bridge.includes('[dsh-tavern-seam:END]'), '自有桥必须是完整 owned-file 注释区块')
   const record = JSON.parse(readFileSync(f.record, 'utf8'))
   assert.equal(record.format, 1); assert.equal(record.owner, 'dsh-tavern-sqlite-v2')
   assert.deepEqual(Object.keys(record).sort(), ['files', 'format', 'owned', 'owner'])

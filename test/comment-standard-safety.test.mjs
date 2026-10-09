@@ -41,6 +41,7 @@ test('块产品3 旧接管伪标记自有记录归属与外来区块边界', asy
   else {
     // case3（新契约）：记录里的 mode 元数据错了也**不阻**按现场解除 —— 现场自有块才是证据
     record.owned[ownedRel].mode = 'insert'
+    const ownedFile = src.file(ownedRel)
     fs.writeFileSync(src.file(STANDARD_RECORD), JSON.stringify(record, null, 2) + '\n')
     assert.equal(checkStandardSeams({ appDir: tree.appDir }).ready, true, '记录 mode 错不该影响 ready（按现场块判定）')
     const off = uninstallStandardSeams({ appDir: tree.appDir, assertStopped: noProcess })

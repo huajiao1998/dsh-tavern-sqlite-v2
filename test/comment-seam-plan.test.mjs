@@ -73,21 +73,21 @@ test('记录护栏：坏记录不阻现场按块卸载、ACTIVE 改动可撤、�
   const result = apply(source)
   // ① 坏 record（错 owner/rel/format/空 blocks/伪造块）一律不影响按现场块卸载
   for (const patch of [{owner:'wrong'}, {rel:'wrong.js'}, {format:2}, {blocks:[]}, 'not-a-record']) {
-    assert.equal(planSeamUninstall(result.source, { rel, owner, record: patch }).source, source, '坏 record 不得阻卸载')
+    assert.equal(uninstall(result.source, { rel, owner, record: patch }).source, source, '坏 record 不得阻卸载')
   }
   // ② 无 record 也必须能卸载（现场块自描述）
-  assert.equal(planSeamUninstall(result.source, { rel, owner, record: null }).source, source)
+  assert.equal(uninstall(result.source, { rel, owner, record: null }).source, source)
   // ③ ACTIVE 区被改（插件实现变了）⇒ 仍可撤块还原 ORIGINAL
   const activeEdited = result.source.replace('plugin.prepare()', 'plugin.changed()')
   assert.notEqual(activeEdited, result.source)
-  assert.equal(planSeamUninstall(activeEdited, { rel, owner }).source, source, 'ACTIVE 改动不阻撤块')
+  assert.equal(uninstall(activeEdited, { rel, owner }).source, source, 'ACTIVE 改动不阻撤块')
   // ④ 块完全消失 ⇒ 零写（不回写任何 before）
   const gone = source
-  const off = planSeamUninstall(gone, { rel, owner })
+  const off = uninstall(gone, { rel, owner })
   assert.equal(off.changed, false)
   assert.equal(off.source, gone)
   // ⑤ revision 换代：新 descriptors 在旧现场上允许重装（不比较历史 body/实现代）
-  const next = planSeamInstall(result.source, { rel, owner, descriptors: [descriptor({ revision: 2, body: 'const result = plugin.prepareV2();\n' })] })
+  const next = install(result.source, { rel, owner, descriptors: [descriptor({ revision: 2, body: 'const result = plugin.prepareV2();\n' })] })
   assert.equal(next.changed, true)
   assert.match(next.source, /plugin\.prepareV2/)
 })

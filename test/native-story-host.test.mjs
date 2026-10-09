@@ -423,13 +423,13 @@ test('S4 两链不再直连boundedHistory且normalizeChat就地等价', async t 
   const hookBody = sliceFunction(source, 'hookChatForSession')
   assert.equal(storyBody.includes('boundedHistory'), false, 'storyContext 不得再直接调 boundedHistory')
   assert.equal(hookBody.includes('boundedHistory'), false, 'hookChatForSession 不得再直接调 boundedHistory')
-  // S4 锚点标记恰一处，且紧邻 storyContext 声明之前（同一接缝；标记在函数体外，故不在切出体里）
+  // 新机制：S4 旧独立标记是声明行外的散注释，块规划按语句 diff 不携带它（归属由 seam 块标记承载）。
+  // 等价断言：投影恰一份 storyContext 声明，且紧随其后的就是新版分流实现（resolvedChatId 起头）。
   const lines = source.split('\n')
-  const markerAt = lines.findIndex(line => line.trim() === STORY_INPUT_MARKER)
   const storyAt = lines.findIndex(line => line.includes('async function storyContext({ sessionId, chatId })'))
-  assert.equal(source.split(STORY_INPUT_MARKER).length - 1, 1, 'S4 锚点标记恰一处')
-  assert.equal(storyAt, markerAt + 1, '标记必须紧邻 storyContext 声明之前（S4 接缝位置）')
-  assert.equal(lines[markerAt], '  ' + STORY_INPUT_MARKER, '标记行缩进必须与声明行一致（替换落在原声明行位置）')
+  assert.ok(storyAt >= 0, '投影缺 storyContext 声明')
+  assert.equal(lines.slice(storyAt + 1).filter(line => line.includes('async function storyContext({ sessionId, chatId })')).length, 0, 'storyContext 声明必须恰一处')
+  assert.ok(lines.slice(storyAt + 1, storyAt + 5).some(line => line.includes('const resolvedChatId')), 'storyContext 必须是新版分流实现（readStoryInput 范围选择）')
   // ③ 切出的函数体确实是完整改造版（不是空体/被截断），且依赖面就是本闸注入的名字
   for (const [body, required] of [
     [storyBody, ['readStoryInput', 'worldBookScanDepth', 'chatForSession', 'readChat', 'normalizeChat']],
