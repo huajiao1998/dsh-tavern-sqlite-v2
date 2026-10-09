@@ -101,9 +101,39 @@ export function planResidualUninstall({ source, adapter, catalog = loadAuthorCle
     if (record) for (const rel of new Set([...Object.keys(record.before), ...Object.keys(record.after)])) source.file(rel)
   }
   // 有有效记录时按真实前像归约，不要求用户字节匹配发行清单或冻结树。
+  const withdrawnRecord = record?.withdrawn === true
   const completeRecord = record && Object.hasOwn(record.before, 'tavern-plugin/lib/index.js') && Object.hasOwn(record.after, 'tavern-plugin/lib/index.js') && adapter.targets.every(rel => Object.hasOwn(record.before, rel))
-  const accepted = completeRecord ? planAuthorRebase({ appDir: source.root, targets: [...new Set([...adapter.targets, ...sourceTargets])], record, images: trees }) : null
-  if (completeRecord && !accepted?.compatible) throw Error('当前接缝不能按完整记录归约，保留用户现场：' + (accepted?.failures || []).slice(0, 3).join('；'))
+  // withdrawn 记录表示标准host已经按真实 before 撤缝；正式卸载只清记录/装配，
+  // 不再把 withdrawn 源码交给普通 rebase 归约，也不触发作者漂移保护。
+  const accepted = completeRecord && !withdrawnRecord ? planAuthorRebase({ appDir: source.root, targets: [...new Set([...adapter.targets, ...sourceTargets])], record, images: trees }) : null
+  if (completeRecord && !withdrawnRecord && !accepted?.compatible) {
+    // 历史污染 before 不得回盖，但活动 after 全匹配时仍可使用下方有限官方恢复兜底。
+    // 任一并发漂移/路径归属/其他记录错误均不得借此绕过归约拒绝。
+    const pollutedOnly = accepted?.failures?.length > 0 && accepted.failures.every(message => message.includes('记录前像含我方接缝标记'))
+    const intactAfter = Object.entries(record.after).every(([rel, digest]) => typeof before[rel] === 'string' && /^[a-f0-9]{64}$/.test(digest) && hash(decode(before[rel], rel)) === digest)
+    if (!pollutedOnly || !intactAfter) throw Error('当前接缝不能按完整记录归约，保留用户现场：' + (accepted?.failures || []).slice(0, 3).join('；') + '。需要当前酒馆准确官方源码，不能强盖未知漂移')
+    problems.push('标准前像污染：不采用污染字节，仅按有限官方恢复材料逐文件证明')
+  }
+  // 运行时撤缝已把源码回到记录 before。正式卸载保留源码字节，
+  // 标准记录的删除仍纳入同一计划、归档、CAS 与失败撤销。
+  if (withdrawnRecord && completeRecord) {
+    const mismatches = []
+    for (const rel of sourceTargets) {
+      const recorded = Object.hasOwn(record.before, rel) ? record.before[rel] : null
+      const current = Object.hasOwn(before, rel) ? before[rel] : null
+      if ((Object.hasOwn(record.before, rel) || Object.hasOwn(record.after, rel)) && current !== recorded) mismatches.push(rel)
+      if (typeof current === 'string') {
+        const text = decode(current, rel).toString('utf8')
+        if (ownCode(text) || foreignCode(text)) mismatches.push(rel + '（仍接管）')
+      }
+    }
+    if (mismatches.length) throw Error('撤缝保留态源码漂移，拒绝当已净卸载：' + mismatches.slice(0, 3).join('；'))
+    // 仍有历史接缝记录时，不冒称整包已净；交给后续有限恢复链处理。
+    if (RECORDS.slice(1).every(rel => before[rel] === null)) {
+      expected[STANDARD_RECORD] = null
+      return { before, expected, summary: { fallback: true, changed: true, changedFiles: [{ relative: STANDARD_RECORD, reason: '归档运行时撤缝保留记录', beforeSha256: hash(decode(before[STANDARD_RECORD], STANDARD_RECORD)), afterSha256: null }], keptOfficialFiles: [...sourceTargets], compatibilityMode: 'withdrawn-clean', runtimeWitness: null, archived: [STANDARD_RECORD], notes: problems, authorReceipt: receipt, data: '用户存档/数据库未读取、未复制、未转换、未删除', originalPlayabilityVerified: false } }
+    }
+  }
   const acceptedBytes = rel => accepted?.compatible && typeof accepted.before?.[rel] === 'string' ? decode(accepted.before[rel], rel) : null
   // CLI旧安装可能没有发布标记。只用确证为官方字节的before定位所属树，忽略污染before；
   // 此推断仅给仍明确属于本插件的目标恢复，不能据它覆盖零标记的未知升级文件。
@@ -137,12 +167,27 @@ export function planResidualUninstall({ source, adapter, catalog = loadAuthorCle
   }
   const replace = (rel, bytes, reason) => {
     expected[rel] = bytes === null ? null : bytes.toString('base64')
-    if (expected[rel] !== before[rel]) changed.push({ relative: rel, reason, beforeSha256: before[rel] === null ? null : hash(decode(before[rel], rel)), afterSha256: bytes === null ? null : hash(bytes) })
+    if (expected[rel] !== before[rel]) {
+      const item = { relative: rel, reason, beforeSha256: before[rel] === null ? null : hash(decode(before[rel], rel)), afterSha256: bytes === null ? null : hash(bytes) }
+      changed.push(item)
+    }
   }
   for (const rel of sourceTargets) {
     const current = before[rel] === null ? null : decode(before[rel], rel)
     const acceptedOriginal = acceptedBytes(rel)
     if (acceptedOriginal && current?.equals(acceptedOriginal)) { kept.push(rel); continue }
+    // 失败回滚/运行时撤缝后，源码已等于记录 before，但 after 不再匹配。
+    // 必须先证当前字节不含本包或他包接管代码，再与记录比对；
+    // 否则"污染 before + 污染当前"自恰，也会被当成已干净。
+    if (current !== null && ownCode(current.toString('utf8')) === false && foreignCode(current.toString('utf8')) === false && typeof record?.before?.[rel] === 'string') {
+      try {
+        const recordedBefore = decode(record.before[rel], rel)
+        if (current.equals(recordedBefore) && !ownCode(recordedBefore.toString('utf8')) && !foreignCode(recordedBefore.toString('utf8'))) {
+          kept.push(rel)
+          continue
+        }
+      } catch { /* 损坏前像不在此短路，交给下方既有恢复链 */ }
+    }
     if (known(rel, current) || protectedKnown(rel, current)) { kept.push(rel); continue }
     const images = trees.map(tree => tree.files[rel])
     // 唯一 optional 作者路径**永不算 added/owned**：否则受限 catalog（只含旧树）会把它当“插件新建”而误删未知同名文件。
@@ -157,7 +202,7 @@ export function planResidualUninstall({ source, adapter, catalog = loadAuthorCle
       if (installedHash || recognizedOwned || managedCreated || (record?.before?.[rel] === null && ownCode(current.toString('utf8')))) { replace(rel, null, '归档本插件新建模块'); continue }
       throw Error('新增同名文件归属不能确认，保留且拒绝假报卸净：' + rel)
     }
-    if (current === null && !selected?.files[rel] && !record?.after?.[rel] && !Object.hasOwn(record?.before || {}, rel)) continue
+    if (current === null && !selected?.files[rel] && !record?.after?.[rel] && (!Object.hasOwn(record?.before || {}, rel) || record.before[rel] === null)) continue
     // 0.3.4 窄修：唯一 optional 作者路径的**真实缺席**——当前无该文件、记录 before 显式 null 且 after **无合法 sha**
     // （＝该目标从未被施缝安装过，record 只统一登记了 before:null 键）⇒ 作者树原本就没有它，保持缺席。
     // 绝不从较新 candidate 嫁接官方新 body（否则旧树卸载后应 absent 却 exists）；仅在 current===null 成立，

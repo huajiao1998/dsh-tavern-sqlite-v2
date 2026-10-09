@@ -60,7 +60,9 @@ export function assertPackageSource(access,adapter,{allowRebase=false}={}){
    if(!added||existsSync(access.file(rel))||Object.hasOwn(record.after,rel))throw new Error('标准记录缺源码前像：'+rel)
   }
   for(const [rel,body]of Object.entries(record.before)){access.file(rel);if(body!==null&&(typeof body!=='string'||Buffer.from(body,'base64').toString('base64')!==body))throw new Error('标准前像不是规范base64：'+rel);if(records.includes(rel)&&body!==null)assertHistoryManifest(access,JSON.parse(Buffer.from(body,'base64').toString('utf8')))}
-  for(const [rel,hash]of Object.entries(record.after)){const file=access.file(rel);if(!/^[a-f0-9]{64}$/.test(hash))throw Error('标准后像摘要非法：'+rel);if((!existsSync(file)||digest(readFileSync(file))!==hash)&&!compatibleRefresh)throw new Error('标准代源码漂移：'+rel)}
+  if(record.withdrawn===true){// 撤缝保留态：after是施缝代摘要，源码等于before即干净，不再按after全等检查
+   for(const rel of Object.keys(record.after)){const file=access.file(rel);const body=record.before?.[rel]??null;if(body===null){if(existsSync(file))throw new Error('撤缝保留态异常：'+rel)}else if(!existsSync(file)||!readFileSync(file).equals(Buffer.from(body,'base64')))throw new Error('撤缝保留态源码漂移：'+rel)}
+  }else for(const [rel,hash]of Object.entries(record.after)){const file=access.file(rel);if(!/^[a-f0-9]{64}$/.test(hash))throw Error('标准后像摘要非法：'+rel);if((!existsSync(file)||digest(readFileSync(file))!==hash)&&!compatibleRefresh)throw new Error('标准代源码漂移：'+rel)}
   if(!compatibleRefresh){const shim=readFileSync(access.file('tavern-plugin/lib/domain/storage-package.js'),'utf8');if(!shim.includes(adapter.packageName))throw new Error('标准代属于另一包，不允许跨版本线恢复')}
  }
  for(const name of records)if(existsSync(access.file(name))){const data=JSON.parse(readFileSync(access.file(name),'utf8'));assertHistoryManifest(access,data);if(data.package&&data.package!==adapter.packageName)throw new Error('历史接缝属于另一包：'+data.package)}
@@ -70,7 +72,9 @@ function assertHistoryManifest(access,data){
  for(const entry of data.entries){const rel=entry.rel||entry.relative;if(typeof rel!=='string'||!rel.startsWith('tavern-plugin/')||!rel.endsWith('.js')||backup.test(rel))throw new Error('历史manifest目标不是作者有限源码');access.file(rel);if(entry.backup){access.file(entry.backup);if(!backup.test(entry.backup))throw new Error('历史manifest备份不是所属接缝备份')}else if(!entry.created)throw new Error('历史manifest缺前像恢复材料')}
 }
 export function finishSourceUninstall(access,adapter,stopRecord,archiveDir){
- if(existsSync(access.file(STANDARD_RECORD)))adapter.uninstallStandardSeams({appDir:access.root})
+ if(existsSync(access.file(STANDARD_RECORD))){const record=JSON.parse(readFileSync(access.file(STANDARD_RECORD),'utf8'));
+  // 撤缝保留态：源码已等于before，不再跑标准卸缝的after漂移检查；直接清历史缝并归档。
+  if(record.withdrawn===true){access.assertImage(Object.fromEntries(Object.keys(record.after).map(rel=>[rel,record.before?.[rel]??null])))}else adapter.uninstallStandardSeams({appDir:access.root})}
  else if(stopRecord){for(const name of records)if(!Object.hasOwn(stopRecord.before,name))throw new Error('停前标准记录不完整');access.assertImage(stopRecord.before)}
  else throw new Error('缺停前标准记录，不猜整包已卸载')
  const backups=[]
@@ -82,6 +86,8 @@ export function finishSourceUninstall(access,adapter,stopRecord,archiveDir){
   const hash=digest(readFileSync(src));renameSync(src,dst);if(digest(readFileSync(dst))!==hash)throw new Error('归档回读不一致');archived.push({relative:rel,sha256:hash})
  }
  access.protect();access.syntax()
+ // 正式卸载完成源码恢复后，清掉运行时撤缝保留的标准记录。
+ if(existsSync(access.file(STANDARD_RECORD)))unlinkSync(access.file(STANDARD_RECORD))
  assertSourceUninstalled(access)
  return {outcome,archived,data:'用户数据未访问、未删除、未转换',protection:'独立原件保护保留'}
 }
@@ -91,11 +97,16 @@ export function assertSourceUninstalled(access){
   const code=Buffer.from(body,'base64').toString('utf8');if(/dsh-tavern-(?:storage-)?sqlite(?:-v[12])?/.test(code)||code.includes('[dsh-tavern-standard-owned:v1]'))throw new Error('活动源码仍接管：'+rel)
  }
 }
-// 宿主正常退出时标准host disposer会撤缝并删标准记录，profile装配完整保留——"退出撤缝态"。
+// 宿主正常退出时标准host disposer会撤缝并保留withdrawn记录，profile装配完整保留——"退出撤缝态"。
 // 源码此时即作者原像：install可按首装重建接缝与记录，uninstall只卸装配。仍要求
-// assertSourceUninstalled全绿（无任何记录、活动源码零接管标记）；半撤/脏树不认，维持原拒绝。
+// 源码零接管标记；无记录视为历史干净态，withdrawn记录视为撤净态；半撤/脏树不认，维持原拒绝。
 export function withdrawnCleanState(access){
- if(existsSync(access.file(STANDARD_RECORD)))return false
+ if(existsSync(access.file(STANDARD_RECORD))){
+  try{const record=JSON.parse(readFileSync(access.file(STANDARD_RECORD),'utf8'));if(record.withdrawn!==true)return false}catch{return false}
+  for(const name of records)if(existsSync(access.file(name)))return false
+  try{for(const [rel,body]of Object.entries(access.capture()))if(body!==null&&/\.js$/.test(rel)){const code=Buffer.from(body,'base64').toString('utf8');if(/dsh-tavern-(?:storage-)?sqlite(?:-v[12])?/.test(code)||code.includes('[dsh-tavern-standard-owned:v1]'))return false}}catch{return false}
+  return true
+ }
  try{assertSourceUninstalled(access)}catch{return false}
  return true
 }

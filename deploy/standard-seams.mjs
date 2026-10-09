@@ -463,7 +463,7 @@ function applyStandardSeamsDirect({ appDir, authorVersion, allowRebase = true } 
     throw new Error('标准接入失败，已恢复本次源码前像', { cause: error })
   }
 }
-export function uninstallStandardSeams({ appDir } = {}) {
+export function uninstallStandardSeams({ appDir, reason } = {}) {
   const file = inside(appDir, RECORD)
   if (!existsSync(file)) return { changed: false }
   checkStandardSeams({ appDir }) // 有漂移则不写：不能把旧作者源码覆盖到新版本。
@@ -478,8 +478,17 @@ export function uninstallStandardSeams({ appDir } = {}) {
     restore(appDir, record.before, Object.keys(record.after))
     // 只恢复本标准代拥有的升级前像；预先存在的历史接缝不冒认、不猜测撤除。
     // 裸作者首装的before就是裸源码；旧已施缝树恢复为其升级前代，整包移除仍须历史记录维护。
-    unlinkSync(file)
-    return { changed: true, requiresRestart: true, restored: 'standard-generation-before-image',
+    // 源码已回到 before 时**保留记录**：失败回滚/运行时撤缝后，正式卸载仍能按真实 before/after 收口，
+    // 不再因记录丢失转去冻结目录，把最新作者源码误判成不可恢复漂移。
+    const withdrawn = snapshot(appDir)
+    const sourceMatchesBefore = Object.keys(record.after).every(rel => withdrawn[rel] === record.before[rel])
+    const keepRecord = sourceMatchesBefore && typeof reason === 'string' && reason !== ''
+    if (keepRecord) {
+      writeFileSync(file, JSON.stringify({ ...record, withdrawn: true, withdrawnAt: new Date().toISOString() }, null, 2) + '\n', 'utf8')
+    } else {
+      unlinkSync(file)
+    }
+    return { changed: true, requiresRestart: true, restored: 'standard-generation-before-image', recordKept: keepRecord,
       legacySeamsRemain: ['.tavern-seams.json', '.tavern-legacy-view-seams.json', '.tavern-save-ui-seam.json'].some(rel => existsSync(inside(appDir, rel))) }
   } catch (error) {
     restore(appDir, current); writeFileSync(file, recordBytes)
@@ -501,7 +510,7 @@ export function inspectStandardSeamsPlan({ appDir, authorVersion, allowRebase = 
     // 否则 driver 会在未知版本上拿到假的可用结论。预演只写 os.tmpdir 的 stage，不碰现场。
     const rehearsal = preflightAnchorOnlyInstall({ appDir, authorVersion })
     return {
-      ready: rehearsal.ok, needsReapply: false, preflight: rehearsal.ok ? 'passed' : 'failed',
+      ready: false, needsReapply: false, preflight: rehearsal.ok ? 'passed' : 'failed',
       reason: rehearsal.ok ? 'ready' : (rehearsal.failures[0] || '隔离预演未通过'),
       pending: [], drifted: [],
       compatible: { ok: rehearsal.ok, mode: 'anchor-only', matchedCommit: null, skippedOwned: [], failures: rehearsal.failures },

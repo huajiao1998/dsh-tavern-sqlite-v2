@@ -33,7 +33,10 @@ test('WinCLI runner: 默认Node无旗标选择既有Worker且真实ESM及宿主�
   `
   const env = { ...process.env }
   for (const key of Object.keys(env)) if (['node_options', 'electron_run_as_node'].includes(key.toLowerCase())) delete env[key]
-  const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], { cwd: root, env, windowsHide: true, encoding: 'utf8', timeout: 7000 })
+  // 外层只给"进程整体"一个有界上限（测试侧 30s）：业务超时仍是上面 runtime 的 timeoutMs:4000，
+  // 不随本行移动。原 7s 只比内部 4s 多 3s，冷启动＋并行下不足以跑完 worker ESM 探针，
+  // 会以 ETIMEDOUT 把机器负载误报成业务失败（2026-10-09 全量实测 7083ms 超时）。
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], { cwd: root, env, windowsHide: true, encoding: 'utf8', timeout: 30000 })
   assert.ifError(result.error)
   assert.equal(result.status, 0, result.stderr + result.stdout)
   assert.deepEqual(JSON.parse(result.stdout.trim()), { host: 'worker', hp: 11 })

@@ -30,6 +30,11 @@ for (const [rel, hash] of Object.entries(pins)) {
   assert.equal(digest(readFileSync(file)), hash, '8480f7de夹具字节错代：' + rel)
 }
 
+// 测试总窗口：真实 adapter + 真实 performance.now，只用**显式、仅测试**的 milliseconds 给本次运行一个有界的
+// 总窗口。生产预算仍由 budget.mjs 决定（successBudgetMs：CLI 60s / desktop 240s，一字不改），本行的
+// 600000 **不构成生产预算已验证**，也不得据它声称成功路径在生产预算内可达：它只吸收全量并发/杀软下
+// 逐文件 node --check 子进程 spawn 成本的机器级膨胀（2026-10-09 全量并发下同相位曾达 319s）。
+const TEST_WINDOW_MS = 600000
 function fixture(t, host) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'v2-mobile-check-'))
   t.after(() => { assert.ok(path.basename(root).startsWith('v2-mobile-check-')); rmSync(root, { recursive: true, force: true }) })
@@ -54,7 +59,7 @@ function fixture(t, host) {
   const evidence = path.join(home, 'maintenance', adapter.packageName, 'check-1')
   mkdirSync(evidence, { recursive: true })
   const op = { home, app, profile: 'tavern', profileDir, host, port: '3081', check: true }
-  const budget = maintenanceBudget({ milliseconds: 240000 }), probes = []
+  const budget = maintenanceBudget({ milliseconds: TEST_WINDOW_MS }), probes = []
   const runPackage = async (exe, args) => { probes.push({ exe, args }); return '' }
   const cli = path.join(home, 'runtime', 'bin', 'dsh')
   const driver = host === 'desktop'
@@ -84,12 +89,28 @@ for (const host of ['cli', 'desktop']) {
     assert.deepEqual(f.capture(), before, '检查不得改变任何有限源码或profile')
     assert.equal(existsSync(path.join(f.app, STANDARD_RECORD)), false)
     assert.equal(existsSync(path.join(f.evidence, 'rehearsal', STANDARD_RECORD)), true, '真正接缝预演必须在证据目录发生')
+    // 真实时钟下的总耗时必须是正数（该结果来自真 performance.now，不做任何相位扣除）。
+    assert.ok(result.elapsedMs > 0, '检查必须报告真实耗时：' + result.elapsedMs)
   })
   test('8480f7de ' + host + '：未知作者契约仍拒绝且目标零改', async t => {
     const f = fixture(t, host), file = path.join(f.app, 'tavern-plugin', 'package.json')
     const pkg = JSON.parse(readFileSync(file, 'utf8')); pkg.version = '9.9.9'; pkg.main = './unknown-contract.js'
     writeFileSync(file, JSON.stringify(pkg) + '\n', 'utf8')
+    // 锚点-only 准入下，仅改 version/main（semver 与入口字段）不再单独拒绝——负例必须真正损坏**必需锚点**。
+    // 锚点文本取自作者真实入口（不猜空白、不用带上行号/前缀的输出猜），并先断言夹具里恰出现一次（一处 exact）。
+    const indexFile = path.join(f.app, 'tavern-plugin', 'lib', 'index.js')
+    const indexText = readFileSync(indexFile, 'utf8')
+    const openingAnchor = 'createOpeningPreparation({ readCard, worldBooks, extensionSettings:'
+    assert.equal(indexText.split(openingAnchor).length, 2, '夹具作者入口必须恰含一次开局动态分类宿主锚点')
+    writeFileSync(indexFile, indexText.replace(openingAnchor, 'createOpeningPreparation({ readCard, worldBooks, extensionSettingsRenamed:'), 'utf8')
     const before = f.capture()
+    // 预演层结论：未知版本首装的隔离完整施缝预演失败，且失败原因就是这个必需锚点（不是版本号/入口字段）。
+    const plan = adapter.inspectStandardSeamsPlan({ appDir: f.app, authorVersion: '9.9.9' })
+    assert.equal(plan.ready, false)
+    assert.equal(plan.preflight, 'failed', '未知版本首装必须走隔离完整预演并失败')
+    assert.ok(plan.compatible.failures.some(message => /开局动态分类宿主锚点缺失\/重复/.test(message)),
+      '预演失败原因必须是必需锚点损坏：' + JSON.stringify(plan.compatible.failures))
+    // 消费者层结论：维护 check/install 预检拒绝，且目标源码与profile一字未改。
     await assert.rejects(f.run(), /与可信基线不兼容|作者版本未适配/)
     assert.deepEqual(f.capture(), before)
   })

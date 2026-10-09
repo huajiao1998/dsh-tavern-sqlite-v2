@@ -124,10 +124,19 @@ export function buildDeps(fixture) {
   return deps
 }
 
-test('S2-1 缺依赖构造期拒绝且列出缺口（不产半 view）', () => {
-  assert.throws(() => createSessionWindowProjector({}), /缺少必需依赖/)
+test('S2-1 缺依赖首次project拒绝且列出缺口（不产半 view）', async () => {
+  const empty = createSessionWindowProjector({})
+  await assert.rejects(() => empty.project({ chat: { id: 'x' }, window: { from: 0, to: 0, messageCount: 0, revision: 1 } }), /缺少必需依赖/)
   assert.ok(REQUIRED_FUNCTIONS.length >= 40)
   assert.ok(REQUIRED_VALUES.includes('OFFICIAL_MVU_VERSION'))
+})
+
+test('S2-1b 构造期不读deps：后声明const经getter延迟取值不受TDZ影响', () => {
+  const projector = createSessionWindowProjector({ get manualLedger() { return manualLedger } })
+  assert.ok(projector, '构造必须成功')
+  const manualLedger = { project: () => null }
+  assert.equal(typeof projector, 'object')
+  void manualLedger
 })
 
 test('S2-2 not-applicable 分流：card / legacy-body / 版本不符', async () => {
@@ -337,3 +346,22 @@ test('S1宿主活动RPC快路径不调用taskStateReader', async () => {
 
 // TODO（真实 helper 门）：把 projectTavernHelperContext / mvu receipt / incremental regex 换成作者 domain 模块真实 import 后重跑 S2-3；
 // 在此之前 S2-3 只声明「装配等价」，不声明真实 helper 语义等价。实时 Session 跨库、外部 resources 每次重算，均不作跨库快照声明。
+
+// 冷窗口作用域（2026-10-09）：只有 `options.skeletonUntil === true` 才真按 helperMessageColdWindow 读冷窗口边界；
+// 只传 deferResources 不构成覆盖。此处显式 coldWindow=1 + skeletonUntil:true，捕获传给作者
+// projectTavernHelperContext 的 skeletonUntil，必须等于 max(0, chat.messages.length - coldWindow)，且真实 project 产出 kind=value。
+test('冷窗口：skeletonUntil真值与coldWindow边界一致且真实project产出kind=value', async () => {
+  const fixture = buildFixture()
+  const deps = buildDeps(fixture)
+  deps.helperMessageColdWindow = 1
+  let captured = null
+  let capturedIndexed = null
+  const baseProject = deps.projectTavernHelperContext
+  deps.projectTavernHelperContext = async (chat, options) => { captured = options?.skeletonUntil; capturedIndexed = options?.indexed; return await baseProject(chat, options) }
+  const projector = createSessionWindowProjector(deps)
+  const projected = await projector.project({ chat: fixture.chat, window: fixture.window, activity: fixture.activity, card: fixture.card, options: { skeletonUntil: true } })
+  assert.equal(projected.kind, 'value', '真实 project 必须产出 kind=value')
+  assert.equal(deps.__calls.includes('projectTavernHelperContext'), true, '前置：本次 project 必须真的走到作者 helper 上下文投影')
+  assert.equal(capturedIndexed, true, 'projectTavernHelperContext 必须以 indexed:true 调用')
+  assert.equal(captured, Math.max(0, fixture.chat.messages.length - 1), 'skeletonUntil 必须＝max(0, messages.length - helperMessageColdWindow)')
+})

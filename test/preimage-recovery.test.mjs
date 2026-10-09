@@ -71,6 +71,37 @@ test('首装→幂等启动→disposer撤标准代→再启动→整包卸载：
  assert.ok(!f.events.includes('stop'))
 })
 
+test('撤缝保留记录→正式卸载成功：源码逐字等于before，装配可清',async t=>{
+ const f=fixture(t)
+ await f.run('install')
+ adapter.uninstallStandardSeams({appDir:f.app,reason:'dispose'})
+ const kept=JSON.parse(fs.readFileSync(f.access.file(STANDARD_RECORD),'utf8'))
+ assert.equal(kept.withdrawn,true,'源码已回before时必须保留withdrawn记录')
+ for(const rel of Object.keys(kept.after))assert.equal(f.access.capture()[rel],kept.before[rel],'撤缝后源码须逐字等于before：'+rel)
+ await f.run('uninstall');f.access.assertImage(f.original)
+ assert.ok(!f.events.includes('stop'))
+})
+
+test('withdrawn装配卸载失败：记录与源码按CAS完整恢复',async t=>{
+ const f=fixture(t)
+ await f.run('install')
+ adapter.uninstallStandardSeams({appDir:f.app,reason:'dispose'})
+ const baseline=f.access.capture()
+ f.driver.manageResidual=async action=>{if(action==='uninstall')throw Error('合成装配卸载失败');f.events.push('manageResidual:'+action)}
+ await assert.rejects(()=>f.run('uninstall'),/合成装配卸载失败/)
+ assert.deepEqual(f.access.capture(),baseline,'必须恢复withdrawn记录和全部源码，不留无恢复依据状态')
+ assert.ok(f.events.includes('manageResidual:restore'))
+})
+
+test('污染before不在撤缝保留短路：撤缝写前仍拒绝',async t=>{
+ const f=fixture(t)
+ await f.run('install')
+ pollute(f)
+ const baseline=f.access.capture()
+ assert.throws(()=>adapter.uninstallStandardSeams({appDir:f.app}),/前像污染/)
+ assert.deepEqual(f.access.capture(),baseline,'污染撤缝写前拒绝')
+})
+
 test('历史坏前像：check不改目标→同版install自动修元数据且after不变→uninstall成功',async t=>{
  const f=fixture(t),installedEvidence=f.evidence()
  await f.run('install',installedEvidence)
@@ -92,6 +123,39 @@ test('历史坏前像：check不改目标→同版install自动修元数据且af
  for(const rel of adapter.targets.filter(value=>value.endsWith('.js')))assert.equal(f.access.capture()[rel],baseline[rel],'活动源码保持逐字节：'+rel)
  f.driver.noop=false
  await f.run('uninstall');f.access.assertImage(f.original)
+})
+
+// 协调器是"标准记录/捕获覆盖、却不在 adapter.targets、冻结目录也无官方字节"的固定受管文件（source.mjs:16-17）：
+// 历史坏前像恢复必须带它的作者真字节并对当前现场重放证明，不能因候选缺键把它洗成 null。
+test('协调器在场：历史坏前像恢复必须重放证明协调器作者真字节，不得缺键洗成null',async t=>{
+ const f=fixture(t),coordinator='tavern-plugin/lib/domain/background-task-coordinator.js'
+ const author=process.env.TAVERN_LATEST_AUTHOR_ROOT||path.join(f.root,'unpack','dsh-tavern-'+authorSha)
+ const source=path.join(author,coordinator)
+ assert.ok(fs.existsSync(source),'固定作者2.5.0树必须含协调器文件，不SKIP或冒称通过')
+ const pristine=fs.readFileSync(source)
+ fs.mkdirSync(path.dirname(f.access.file(coordinator)),{recursive:true});fs.writeFileSync(f.access.file(coordinator),pristine)
+ const installedEvidence=f.evidence()
+ await f.run('install',installedEvidence)
+ const installed=JSON.parse(fs.readFileSync(f.access.file(STANDARD_RECORD),'utf8'))
+ assert.equal(installed.before[coordinator],pristine.toString('base64'),'首装记录须捕获协调器作者前像')
+ assert.ok(/^[a-f0-9]{64}$/.test(installed.after[coordinator]||''),'协调器须进标准记录after（受记录覆盖⇒恢复必须带键并重放相等）')
+ const polluted=pollute(f),baseline=f.access.capture()
+ f.driver.noop=true;f.events.length=0
+ const repaired=await f.run('install')
+ assert.equal(repaired.sourceMetadataRepaired,true)
+ const corrected=JSON.parse(fs.readFileSync(f.access.file(STANDARD_RECORD),'utf8'))
+ assert.equal(corrected.before[coordinator],pristine.toString('base64'),'恢复before必须保留协调器作者真字节（缺键/null即本次回归）')
+ assert.ok(Buffer.from(corrected.before[coordinator],'base64').equals(pristine),'恢复before须逐字节等于作者原文')
+ assert.equal(corrected.before[index],f.original[index])
+ assert.deepEqual(corrected.after,polluted.after,'恢复不得改after')
+ assert.equal(f.access.capture()[coordinator],baseline[coordinator],'修复不写活动协调器源码')
+ // 重放相等必须真的挡人：活动协调器重放不出来时候选即被拒（不得因不在targets或缺键静默放行）。
+ const {recoverSourcePreimage}=await import('../deploy/maintenance/preimage-recovery.mjs')
+ fs.appendFileSync(f.access.file(coordinator),'\n// 合成协调器漂移\n','utf8')
+ const refusedDir=f.evidence()
+ assert.throws(()=>recoverSourcePreimage({access:f.access,adapter,evidenceDir:refusedDir,before:f.access.capture()}),/没有可重放证明当前源码/)
+ const attempts=JSON.parse(fs.readFileSync(path.join(refusedDir,'preimage-attempts.json'),'utf8'))
+ assert.ok(attempts.some(item=>/候选重放与当前活动源码不一致.*background-task-coordinator\.js/.test(item.reason||'')),'拒绝原因须落在协调器重放不一致：'+JSON.stringify(attempts))
 })
 
 test('受管备份污染：不能删除旧备份再复制当前缝合态重建',async t=>{
@@ -148,19 +212,24 @@ test('缺本地旧前像可用官方材料兜底；未知新版/错误候选/不
 test('宿主退出已撤缝（包在/记录无/源码净）：uninstall仅卸装配不重放恢复，install重建接缝与记录',async t=>{
  const f=fixture(t)
  await f.run('install')
- // 模拟宿主正常退出：标准host disposer按官方卸缝API撤缝并删记录，装配保留。
- adapter.uninstallStandardSeams({appDir:f.app})
- assert.ok(!fs.existsSync(f.access.file(STANDARD_RECORD)),'退出撤缝后标准记录应不存在')
+ // 模拟宿主正常退出：标准host disposer按运行时卸缝API撤缝并保留withdrawn记录，装配保留。
+ adapter.uninstallStandardSeams({appDir:f.app,reason:'dispose'})
+ assert.equal(JSON.parse(fs.readFileSync(f.access.file(STANDARD_RECORD),'utf8')).withdrawn,true,'退出撤缝后应保留withdrawn记录')
  const withdrawn=f.access.capture()
  // 退出撤缝态uninstall：无恢复材料可演，源码保持作者原像，仅走装配卸载。
  f.events.length=0
  const removed=await f.run('uninstall')
  assert.equal(removed.changed,true)
  assert.equal(removed.fallback,true,'退出撤缝态同样进入共用卸载')
- assert.equal(removed.changedFiles.length,0,'已净源码不重放或改写')
+ assert.deepEqual(removed.changedFiles.map(item=>item.relative),[STANDARD_RECORD],'只清运行时保留记录，已净源码不重放或改写')
  assert.ok(f.events.includes('manageResidual:uninstall'),'装配卸载必须执行')
  assert.ok(!f.events.includes('restorePackage'),'无失败恢复')
- f.access.assertImage(withdrawn,'源码保持作者原像不动')
+ assert.equal(fs.existsSync(f.access.file(STANDARD_RECORD)),false,'正式卸载必须清掉withdrawn记录')
+ const after=f.access.capture()
+ for(const [rel,body] of Object.entries(withdrawn)){
+  if(rel===STANDARD_RECORD) continue
+  assert.equal(after[rel],body,'源码保持作者原像不动：'+rel)
+ }
  // 退出撤缝态install：按首装重建接缝与标准记录。
  f.events.length=0
  const reinstalled=await f.run('install')
@@ -168,4 +237,28 @@ test('宿主退出已撤缝（包在/记录无/源码净）：uninstall仅卸装
  assert.ok(fs.existsSync(f.access.file(STANDARD_RECORD)),'install必须重建标准记录')
  assert.equal(adapter.checkStandardSeams({appDir:f.app}).ready,true)
  assert.equal(JSON.parse(fs.readFileSync(f.access.file(STANDARD_RECORD),'utf8')).before[index],f.original[index],'重建记录的前像必须是真实作者原像')
+})
+
+// 新增实际防护（2026-10-09）：withdrawn 检查扫描所有 sourceTargets，**未被记录逐字节覆盖的额外源码同样不得含接管代码**。
+// 真实 install→dispose 后，在明确受管路径（coordinator）写入带我方标记的残留模块 ⇒ 正式卸载必须写前拒绝、
+// 现场字节不变、不执行装配卸载、不停服务、不走失败恢复，且保留 withdrawn 记录。
+test('withdrawn未知接管残留写前拒绝',async t=>{
+ const f=fixture(t)
+ await f.run('install')
+ adapter.uninstallStandardSeams({appDir:f.app,reason:'dispose'})
+ assert.equal(JSON.parse(fs.readFileSync(f.access.file(STANDARD_RECORD),'utf8')).withdrawn,true,'前置：必须是撤缝保留态（withdrawn）')
+ const residue='tavern-plugin/lib/domain/background-task-coordinator.js'
+ const residueFile=f.access.file(residue)
+ fs.mkdirSync(path.dirname(residueFile),{recursive:true})
+ fs.writeFileSync(residueFile,'// [dsh-tavern-standard-owned:v1]\nexport const residualTakeover = true\n','utf8')
+ const polluted=f.access.capture()
+ assert.equal(polluted[residue],Buffer.from(fs.readFileSync(residueFile)).toString('base64'),'前置：capture 必须覆盖该受管路径当前字节')
+ f.events.length=0
+ await assert.rejects(()=>f.run('uninstall'),/接管|拒绝/,'withdrawn态发现未记录接管残留必须写前拒绝')
+ const after=f.access.capture()
+ for(const [rel,body] of Object.entries(polluted)) assert.equal(after[rel],body,'被拒后不得改动任何源码/记录：'+rel)
+ assert.ok(!f.events.includes('manageResidual'),'被拒时不得执行装配卸载')
+ assert.ok(!f.events.includes('stop'),'被拒时不得停服务')
+ assert.ok(!f.events.includes('restorePackage'),'被拒时不得走失败恢复')
+ assert.equal(fs.existsSync(f.access.file(STANDARD_RECORD)),true,'被拒后 withdrawn 记录必须保留')
 })

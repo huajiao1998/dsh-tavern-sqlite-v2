@@ -25,7 +25,7 @@ import { lstatSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { AUTHOR_PACKAGE_NAME, AUTHOR_PACKAGE_REL, insideApp } from './author-compatibility.mjs'
 
-const SEAM_MARKERS = ['[dsh-tavern-standard-owned:v1]', '[dsh-tavern-db-save:v1]', '[dsh-tavern-core-host:v1]']
+const SEAM_MARKERS = ['[dsh-tavern-standard-owned:v1]', '[dsh-tavern-db-save:v1]', '[dsh-tavern-core-host:v1]', '[dsh-tavern-row-rollback:v1]']
 const BACKUP_RES = [
   /^[\w.-]+\.pre-seams-[\w-]+\.bak$/,
   /^[\w.-]+\.legacy-view-seams\.backup$/,

@@ -6,6 +6,9 @@ import {sourceAccess,finishSourceUninstall,STANDARD_RECORD} from './source.mjs'
 
 const historyRecords=['.tavern-seams.json','.tavern-legacy-view-seams.json','.tavern-save-ui-seam.json']
 const indexRel='tavern-plugin/lib/index.js'
+// 唯一被标准记录/捕获覆盖、却既不在 adapter.targets、冻结目录也无官方字节的固定协调器路径（source.mjs:16-17）。
+// 只认这一条固定相对路径，不按目录或后缀枚举其他文件。
+const coordinatorRel='tavern-plugin/lib/domain/background-task-coordinator.js'
 const backupName=/\.(?:pre-seams-[\w-]+\.bak|legacy-view-seams\.backup|save-ui[^/]*\.backup)$/
 const packageRel='tavern-plugin/package.json'
 const operationName=/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i
@@ -13,13 +16,18 @@ const digest=bytes=>createHash('sha256').update(bytes).digest('hex')
 const seamed=code=>/\[dsh-tavern-|from ['"]\.\/domain\/(?:chat-sqlite-store|legacy-view-seams|storage-[\w-]+)\.js['"]/.test(code)
 const fail=reason=>{throw new Error('前像污染/恢复材料不可验证：'+reason+'；未修改目标。保留维护证据，不手工修改after哈希')}
 
-function candidateImage(data,access,adapter,before){
+function candidateImage(data,access,adapter,before,{coordinatorRequired=false}={}){
  if(!data||typeof data!=='object'||Array.isArray(data))throw Error('历史前像不是映射')
  for(const [rel,body]of Object.entries(data)){
   access.file(rel)
   if(body!==null&&(typeof body!=='string'||Buffer.from(body,'base64').toString('base64')!==body))throw Error('历史前像不是规范base64：'+rel)
  }
  const fixed=[...new Set([...adapter.targets,packageRel,STANDARD_RECORD])]
+ // 当前协调器有真字节，或标准记录 before/after 覆盖该键时：候选**必须含该键**并与当前现场重放相等，
+ // 绝不因候选缺键把它静默当 null（那等于把真实作者字节洗成"作者原本没有"）。
+ if(coordinatorRequired)fixed.push(coordinatorRel)
+ // 仅当证据自己带该键（含 null）时原样接收，null 保持 null；不从证据丢键、也不凭缺键补 null。
+ else if(Object.hasOwn(data,coordinatorRel))fixed.push(coordinatorRel)
  for(const rel of fixed)if(!Object.hasOwn(data,rel))throw Error('历史前像不完整：'+rel)
  if(data[STANDARD_RECORD]!==null||historyRecords.some(rel=>data[rel]!==null))throw Error('历史候选不是首次洁净安装前像')
  if(!data[packageRel]||data[packageRel]!==before[packageRel])throw Error('作者包身份与当前不符')
@@ -37,6 +45,10 @@ export function recoverSourcePreimage({access,adapter,evidenceDir,before,checkBu
   if(p===path.dirname(p))break
  }
  const currentRecord=JSON.parse(Buffer.from(before[STANDARD_RECORD],'base64').toString('utf8'))
+ // 协调器覆盖判定（只此一条固定路径）：当前仍有真字节，或标准记录 before/after 任一覆盖该键
+ // ⇒ 候选必须带它并重放相等；三者皆不成立（真实缺席）才不要求，避免凭缺键造文件。
+ const coordinatorRequired=typeof before[coordinatorRel]==='string'
+  ||Object.hasOwn(currentRecord?.before||{},coordinatorRel)||Object.hasOwn(currentRecord?.after||{},coordinatorRel)
  const ownedBackups=new Set()
  for(const name of historyRecords)if(before[name])for(const item of JSON.parse(Buffer.from(before[name],'base64').toString('utf8')).entries||[])if(item.backup){access.file(item.backup);ownedBackups.add(item.backup)}
  const preserved=Object.fromEntries(Object.entries(before).filter(([rel,body])=>body!==null&&backupName.test(rel)&&!ownedBackups.has(rel)))
@@ -52,7 +64,7 @@ export function recoverSourcePreimage({access,adapter,evidenceDir,before,checkBu
    if(stat.isSymbolicLink()||!stat.isFile()||stat.size>32*1024*1024)throw Error('证据不是有界普通文件')
    readBytes+=stat.size
    if(readBytes>128*1024*1024)fail('本次恢复材料超过128MiB读取上限')
-   const bytes=readFileSync(file),image=candidateImage(JSON.parse(bytes.toString('utf8')),access,adapter,before)
+   const bytes=readFileSync(file),image=candidateImage(JSON.parse(bytes.toString('utf8')),access,adapter,before,{coordinatorRequired})
    const key=digest(JSON.stringify(Object.entries(image).sort(([a],[b])=>a.localeCompare(b))))
    if(seen.has(key))continue
    seen.add(key)
@@ -67,6 +79,8 @@ export function recoverSourcePreimage({access,adapter,evidenceDir,before,checkBu
    adapter.applyStandardSeams({appDir:replayRoot})
    if(!adapter.checkStandardSeams({appDir:replayRoot}).ready)throw Error('候选重放接缝未ready')
    const applied=replay.capture(),active=adapter.targets.filter(rel=>rel.endsWith('.js'))
+   // 协调器被当前现场/记录覆盖时同样纳入逐字节重放比较（它不在 targets，但不能漏检）。
+   if(coordinatorRequired)active.push(coordinatorRel)
    for(const rel of active)if(applied[rel]!==before[rel])throw Error('候选重放与当前活动源码不一致：'+rel)
    const replayRecord=JSON.parse(readFileSync(replay.file(STANDARD_RECORD),'utf8'))
    finishSourceUninstall(replay,adapter,replayRecord,path.join(evidenceDir,'preimage-candidate-'+ordinal,'archives'))
