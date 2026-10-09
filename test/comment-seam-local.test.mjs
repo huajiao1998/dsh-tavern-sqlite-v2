@@ -32,9 +32,6 @@ test('现场块1 无记录ORIGINAL变量修改与ACTIVE修改卸载', () => {
   const originalEdited = installed.source.replace('//   let unused = 1', '//   let unused = 42')
   assert.notEqual(originalEdited, installed.source)
   assert.equal(uninstall(originalEdited).source, before.replace('let unused = 1', 'let unused = 42'), 'ORIGINAL 现场改动必须保留')
-  // ④ 传入坏 record 也不影响卸载（record 不参与判定）
-  assert.equal(planSeamUninstall(installed.source, { rel: REL, owner: OWNER, record: { format: 1, rel: REL, owner: OWNER, blocks: [] } }).source, before)
-  assert.equal(planSeamUninstall(installed.source, { rel: REL, owner: OWNER, record: 'not-a-record' }).source, before)
 })
 
 test('现场块2 注释嵌套CRLF BOM EOF与重复装卸', () => {

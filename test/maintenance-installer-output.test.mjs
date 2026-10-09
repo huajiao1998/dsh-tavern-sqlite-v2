@@ -17,13 +17,13 @@ function temp(t) {
 test('维护失败stdout包含完整脱敏初因和结果路径，JSON与前台一致', t => {
   const root = temp(t), lines = []
   const cause = new Error('合成初因 ?token=fixture-token-value Bearer fixture-bearer-value')
-  const error = new Error('现装不同代（合成测试）', { cause })
+  const error = new Error('维护预检拒绝（合成测试）', { cause })
   reportMaintenanceFailure(error, root, 7, line => lines.push(line))
   const file = path.join(root, 'result.json'), bytes = readFileSync(file)
   const result = JSON.parse(bytes.toString('utf8'))
   assert.equal(result.ok, false)
   assert.equal(result.elapsedMs, 7)
-  assert.match(result.message, /现装不同代.*原因：合成初因/)
+  assert.match(result.message, /维护预检拒绝.*原因：合成初因/)
   assert.deepEqual(lines, ['维护失败：' + result.message, '失败结果：' + file])
   assert.equal(error.maintenanceReported, true)
   assert.equal(bytes.subarray(0, 3).equals(Buffer.from([239, 187, 191])), false)

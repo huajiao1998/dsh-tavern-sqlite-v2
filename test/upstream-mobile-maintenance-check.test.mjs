@@ -31,7 +31,7 @@ for (const [rel, hash] of Object.entries(pins)) {
 }
 
 // 测试总窗口：真实 adapter + 真实 performance.now，只用**显式、仅测试**的 milliseconds 给本次运行一个有界的
-// 总窗口。生产预算仍由 budget.mjs 决定（successBudgetMs：CLI 60s / desktop 240s，一字不改），本行的
+// 总窗口。生产预算仍由 budget.mjs 决定（successBudgetMs：CLI 180s / desktop 240s，一字不改），本行的
 // 600000 **不构成生产预算已验证**，也不得据它声称成功路径在生产预算内可达：它只吸收全量并发/杀软下
 // 逐文件 node --check 子进程 spawn 成本的机器级膨胀（2026-10-09 全量并发下同相位曾达 319s）。
 const TEST_WINDOW_MS = 600000

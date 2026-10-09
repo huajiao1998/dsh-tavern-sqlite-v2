@@ -204,6 +204,7 @@ test('transform：无迁移区（更早真身）⇒ 桥落在状态体最前，�
   assert.match(out, new RegExp(`ctx\\.on\\("${SAVE_UI_EVENT}", refresh\\)`))
   assert.match(out, /ui\.active === true/)
   defaultSyntaxCheck(out, 'fixture.js')
+  assert.equal(transformSaveUiClient(out), out, '无迁移区布局同样幂等')
 })
 
 test('transform：有作者迁移区（当前真身布局）⇒ 桥紧邻迁移区之后、重载人物卡之前', () => {
@@ -217,12 +218,6 @@ test('transform：有作者迁移区（当前真身布局）⇒ 桥紧邻迁移�
   assert.equal(lines[migration + 2].trim().startsWith('["story", "script"].includes('), true, '桥之后应仍是重载人物卡分支')
   defaultSyntaxCheck(out, 'fixture.js')
   assert.equal(transformSaveUiClient(out), out, '有迁移区布局同样幂等')
-})
-
-test('transform：幂等（已施缝再跑原样返回）', () => {
-  const once = transformSaveUiClient(fixtureSource())
-  assert.equal(transformSaveUiClient(once), once)
-  assert.equal(once.split(SAVE_UI_MARKER).length - 1, 1)
 })
 
 test('fail closed：锚点缺失', () => {

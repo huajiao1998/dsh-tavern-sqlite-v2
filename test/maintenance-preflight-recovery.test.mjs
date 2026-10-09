@@ -23,11 +23,10 @@ const ADAPTER = Object.freeze({
   applyStandardSeams: () => ({ changed: true }),
   checkStandardSeams: () => ({ ready: true }),
   uninstallStandardSeams: () => {},
-  uninstallAllSeams: () => ({ restored: [] }),
 })
 // "本次从未 stop 就不得出现"的动作清单（driver + source 两侧）。
 const RECOVERY_ACTIONS = ['stop', 'stopIfAlive', 'stopFailedStart', 'stoppedAfterError', 'restorePackage',
-  'manage:install', 'manage:uninstall', 'start', 'verify', 'verifyRecovery', 'source:restore', 'source:protect', 'source:syntax']
+  'manage:install', 'manage:uninstall', 'start', 'verify', 'verifyRecovery', 'source:restore', 'source:syntax']
 
 function fixture(t, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v2-preflight-recovery-'))
@@ -76,7 +75,6 @@ function fixture(t, options = {}) {
         if (current !== body) throw new Error('源码前像不匹配：' + rel)
       }
     },
-    protect() { events.push('source:protect') },
     syntax() { events.push('source:syntax') },
   }
   const driver = {
@@ -103,14 +101,14 @@ function fixture(t, options = {}) {
 }
 const recoveryActions = f => f.events.filter(name => RECOVERY_ACTIONS.includes(name))
 
-test('preflight 抛"现装不同代"：桌面已停止也不补证，不 stop/restore/start/verifyRecovery，初因原样抛出', async t => {
-  const error = new Error('现装不同代；先用本地所属代卸载，不自动升级')
+test('preflight 抛合成拒绝：桌面已停止也不补证，不 stop/restore/start/verifyRecovery，初因原样抛出', async t => {
+  const error = new Error('维护预检拒绝（合成初因）')
   const f = fixture(t, { preflightError: error })
   assert.equal(f.driver.stoppedAfterErrorReturn, true, '桩若被调用会返回 true——这正是把预检失败误当"可恢复"的陷阱')
   let thrown
   await assert.rejects(f.run('install'), value => { thrown = value; return true })
   assert.equal(thrown, error, '初因 Error 原样抛出（不包 AggregateError、不改写成"已恢复"）')
-  assert.equal(thrown.message, '现装不同代；先用本地所属代卸载，不自动升级')
+  assert.equal(thrown.message, '维护预检拒绝（合成初因）')
   assert.deepEqual(recoveryActions(f), [], '本次从未 stop：无任何恢复动作')
   assert.equal(f.driver.calls.stop, 0)
   assert.equal(f.driver.calls.stoppedAfterError, 0, '未尝试 stop 就不允许 stoppedAfterError 补证')

@@ -138,18 +138,18 @@ async function expectThrow(fn, pattern) {
 }
 // 缝库的**可信 stub**：applyStandardSeams 成功后 checkStandardSeams 必须转 ready（真身就是这样：
 // apply 写完后 check 复检才 ready；不会被恒 false 的 stub 骗出"假成功"路径）。
-// uninstall 的返回值也照真身（deploy/standard-seams.mjs:155）：{changed, requiresRestart, restored, legacySeamsRemain}
+// uninstall 的返回值采用现行现场注释解除口径；控制器仍须转交重启/残留状态。
 function makeSeams({ ready = true, changed = true, order = [] } = {}) {
   const state = { ready, changed, applied: 0, uninstalled: [] }
   return {
     state,
     seams: {
-      checkStandardSeams: () => { order.push('check'); return { ready: state.ready, coverage: 'standard-core' } },
+      checkStandardSeams: () => { order.push('check'); return { ready: state.ready, coverage: 'comment-blocks' } },
       applyStandardSeams: () => { order.push('apply'); state.applied += 1; if (state.changed) state.ready = true; return { changed: state.changed, ready: true } },
       uninstallStandardSeams: (info) => {
         order.push('uninstall')
         state.uninstalled.push(info)
-        return { changed: true, requiresRestart: true, restored: 'standard-generation-before-image', legacySeamsRemain: false }
+        return { changed: true, requiresRestart: true, restored: 'onsite-comment-prefix', legacySeamsRemain: false }
       },
     },
   }

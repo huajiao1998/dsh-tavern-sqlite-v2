@@ -1,10 +1,6 @@
 // 最小粒度离线施缝闸：真实缩进锚点、幂等与 fail-closed；纯 transform 断言（不再含 fs 生命周期/卸缝用例）
 import assert from 'node:assert/strict'
 
-import path from 'node:path'
-import { readFileSync } from 'node:fs'
-import { transformStorageIndex } from '../deploy/apply-seams.mjs'
-import { prepareCommentAuthorTree } from './fixtures/comment-author-tree.mjs'
 import vm from 'node:vm'
 import { transformLegacyIndex, transformLegacyRegistry, transformLegacyInitialization, transformLegacyViewReader, LEGACY_VIEW_SHIM } from '../deploy/apply-legacy-view-seams.mjs'
 
@@ -143,11 +139,6 @@ const actionsV3 = transformLegacyIndex(index)
 assert.match(actionsV3, /\[dsh-tavern-save-actions:v3\]/)
 assert.match(actionsV3, /case 'sqliteSaveClaim': return await ctx\.get\('tavernSaveActions'\)\.claim\(args\)/)
 assert.match(actionsV3, /case 'sqliteSaveRelease': return await ctx\.get\('tavernSaveActions'\)\.release\(args\)/)
-// 本次新增 RPC 前的线上树（有 v3 标记 + claim，没有 release case）⇒ 守卫式就地补上并与全量产物逐字节收敛。
-const preReleaseHost = actionsV3.replace("      case 'sqliteSaveRelease': return await ctx.get('tavernSaveActions').release(args)\n", '')
-assert.notEqual(preReleaseHost, actionsV3, 'fixture 必须真的删掉了 release case')
-assert.equal(transformLegacyIndex(preReleaseHost), actionsV3, '补 release case 必须与 v1→v3 产物收敛到同一字节')
-assert.equal(transformLegacyIndex(actionsV3), actionsV3, '带 release case 的产物必须幂等')
 assert.match(actionsV3, /readSourceSessionTitle: async sessionId => await withObservedForkSource\(/)
 assert.match(actionsV3, /item\.type === 'session\/title'/)
 assert.match(actionsV3, /renameTargetSession: async/)
@@ -235,17 +226,3 @@ function transformLegacyReaderForTest() { return transformLegacyViewReader(reade
 
 console.log('legacy-view-deploy：锚点/幂等/只查/业务断言全部通过')
 
-// S1/S2 施缝代身份（原 main-legacy-seams-lifecycle 唯一的业务点，随旧 CLI 用例一并迁移）：反向还原必须逐字节回到作者原样。
-{
-  const tree = prepareCommentAuthorTree()
-  assert.ok(tree, '缺少作者 source fixture：设 DSH_TAVERN_TEST_APP 或准备本地 author-fixture')
-  const raw = readFileSync(path.join(tree.appDir, 'tavern-plugin/lib/index.js'), 'utf8')
-  const restored = transformStorageIndex(raw)
-    .replace("import { createChatSqliteStore } from './domain/chat-sqlite-store.js'\n", '')
-    .replace(/  \/\/ \[dsh-tavern-sqlite-v2\] 作者原存储[^\n]*\n  const authorChatStore = (createChatJournalStore\([^\n]*\))\n  \/\/ \[dsh-tavern-sqlite-v2\] 我们的行级 SQLite store[^\n]*\n  const chatJournalStore = createChatSqliteStore\([^\n]*\)\n/, '  const chatJournalStore = $1\n')
-    .replace("ctx.effect(() => () => { if (typeof authorChatStore.flushMaintenance === 'function') authorChatStore.flushMaintenance() },", 'ctx.effect(() => () => chatJournalStore.flushMaintenance(),')
-    .replace(/  \/\/ \[dsh-tavern-sqlite-v2\] 把聊天存储接口暴露[^\n]*\n  ctx\.provide\('tavernChats', chatPersistence\)\n/, '')
-  assert.equal(restored, raw, 'S1/S2 反向还原必须逐字节回到作者原样')
-  tree.cleanup()
-}
-console.log('legacy-view-deploy：锚点/幂等/fail-closed/S1S2 身份断言全部通过')

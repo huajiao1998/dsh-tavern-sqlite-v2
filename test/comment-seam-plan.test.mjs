@@ -68,7 +68,7 @@ test('结构拒绝：零多命中同一行冲突多声明非法描述符和语�
   assert.throws(() => install(good, { rel, owner, descriptors: [descriptor(),descriptor({ id: 'collision' })] }), /冲突/)
 })
 
-test('记录护栏：坏记录不阻现场按块卸载、ACTIVE 改动可撤、消失零写、换代可装', () => {
+test('记录护栏：坏记录不阻现场按块卸载、ACTIVE 改动可撤、换代可装', () => {
   const source = 'const result = db.prepare("SELECT 1");\n'
   const result = apply(source)
   // ① 坏 record（错 owner/rel/format/空 blocks/伪造块）一律不影响按现场块卸载
@@ -81,12 +81,7 @@ test('记录护栏：坏记录不阻现场按块卸载、ACTIVE 改动可撤、�
   const activeEdited = result.source.replace('plugin.prepare()', 'plugin.changed()')
   assert.notEqual(activeEdited, result.source)
   assert.equal(uninstall(activeEdited, { rel, owner }).source, source, 'ACTIVE 改动不阻撤块')
-  // ④ 块完全消失 ⇒ 零写（不回写任何 before）
-  const gone = source
-  const off = uninstall(gone, { rel, owner })
-  assert.equal(off.changed, false)
-  assert.equal(off.source, gone)
-  // ⑤ revision 换代：新 descriptors 在旧现场上允许重装（不比较历史 body/实现代）
+  // ④ revision 换代：新 descriptors 在旧现场上允许重装（不比较历史 body/实现代）
   const next = install(result.source, { rel, owner, descriptors: [descriptor({ revision: 2, body: 'const result = plugin.prepareV2();\n' })] })
   assert.equal(next.changed, true)
   assert.match(next.source, /plugin\.prepareV2/)

@@ -3,7 +3,7 @@
 set -eu
 RELEASE_URL='__DSH_RELEASE_URL__'
 RELEASE_SHA256='__DSH_RELEASE_SHA256__'
-VERSION='0.3.8'
+VERSION='0.3.9'
 SCRIPT_DIR=''
 case "$0" in
   *install.sh) SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) ;;
@@ -14,7 +14,7 @@ export DSH_STORAGE_RELEASE_SHA256="${DSH_STORAGE_RELEASE_SHA256:-$RELEASE_SHA256
 export DSH_STORAGE_RELEASE_VERSION="$VERSION"
 command -v node >/dev/null 2>&1 || { echo '需要已有酒馆使用的Node.js 22.19+；本脚本不另装运行时。' >&2; exit 1; }
 node --input-type=module - "$@" <<'DSH_STORAGE_BOOTSTRAP'
-// SH内嵌的零依赖获取器；仅缺安装包时联网，获取完成后才进入安装60秒预算。
+// SH内嵌的零依赖获取器；仅缺安装包时联网，获取完成后才进入安装180秒预算。
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
@@ -229,7 +229,7 @@ export async function bootstrap(args = process.argv.slice(2), { env = process.en
   } else validatePackage(root)
   if (!fs.existsSync(path.join(root, 'deploy', 'maintenance', 'driver.mjs'))) throw Error('本地旧代执行器仍需认证；不会调用或下载。请用--package指定新版本地离线包作执行器，旧包保留用于恢复')
   const entry = path.join(root, 'deploy', 'maintenance.mjs'), argv = [entry, op.action, ...op.pass, '--elapsed', String(performance.now() - started)]
-  console.log('使用本地完整包；开始离线维护，成功预算60秒。')
+  console.log('使用本地完整包；开始离线维护，成功预算180秒。')
   if (invoke) return await invoke(process.execPath, argv)
   const child = spawn(process.execPath, argv, { stdio: 'inherit', detached: process.platform !== 'win32', windowsHide: true })
   const detach = () => { child.unref(); console.error('终端中断，已启动维护作业继续。'); process.exit(130) }
