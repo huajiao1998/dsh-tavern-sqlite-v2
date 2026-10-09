@@ -35,7 +35,15 @@ for (const [rel, hash] of Object.entries(pins)) {
 // 600000 **不构成生产预算已验证**，也不得据它声称成功路径在生产预算内可达：它只吸收全量并发/杀软下
 // 逐文件 node --check 子进程 spawn 成本的机器级膨胀（2026-10-09 全量并发下同相位曾达 319s）。
 const TEST_WINDOW_MS = 600000
-function fixture(t, host) {
+// 合法非空 profile 用户层覆盖（与酒馆/本插件无关，无秘密）：旧预检按"非空"拒绝维护；新契约只要求维护不改写它。
+// 生效行形状取自真实 patch 行列表（注释行会被剥掉，故必须留非注释行，才是真正的回归输入）。
+const USER_PATCH = [
+  '# 用户自有覆盖：与酒馆/本插件无关；维护不得改写或删除',
+  '- id: user-local-preference',
+  '  disabled: false',
+  ''
+].join('\n')
+function fixture(t, host, patchText = '[]\n') {
   const root = mkdtempSync(path.join(os.tmpdir(), 'v2-mobile-check-'))
   t.after(() => { assert.ok(path.basename(root).startsWith('v2-mobile-check-')); rmSync(root, { recursive: true, force: true }) })
   const home = path.join(root, 'home'), app = path.join(home, 'apps', 'dsh-tavern')
@@ -44,7 +52,7 @@ function fixture(t, host) {
   mkdirSync(profileDir, { recursive: true })
   const profileFile = path.join(profileDir, 'package.json'), patch = path.join(profileDir, 'cordis.patch.yml')
   writeFileSync(profileFile, JSON.stringify({ name: 'dsh-profile-tavern', dependencies: {}, dsh: { profile: { bundles: [] } } }) + '\n', 'utf8')
-  writeFileSync(patch, '[]\n', 'utf8')
+  writeFileSync(patch, patchText, 'utf8')
   const peerRoot = path.join(home, 'runtime', 'lib', 'node_modules')
   const desktopApp = path.join(root, 'desktop-program')
   const pkg = JSON.parse(readFileSync(path.join(product, 'package.json'), 'utf8'))
@@ -74,7 +82,7 @@ function fixture(t, host) {
   const source = sourceAccess(app, adapter.targets)
   const capture = () => ({ source: source.capture(), profile: readFileSync(profileFile), patch: readFileSync(patch) })
   const run = () => checkMaintenance({ action: 'install', adapter, driver, source, evidenceDir: evidence, budget })
-  return { app, source, evidence, profileFile, peerRoot, peers, probes, capture, run }
+  return { app, source, evidence, profileFile, patch, peerRoot, peers, probes, capture, run }
 }
 
 for (const host of ['cli', 'desktop']) {
@@ -136,3 +144,14 @@ for (const host of ['cli', 'desktop']) {
     assert.deepEqual(f.capture(), before)
   })
 }
+
+// POSIX（linux）真 driver + 真作者树 + 真 adapter 的 check 安装预演：旧实现在 preflight 按"profile 用户层 patch 非空"拒绝维护。
+test('8480f7de cli：合法非空profile覆盖不再拒绝预检且目标零改', async t => {
+  const f = fixture(t, 'cli', USER_PATCH)
+  const before = f.capture()
+  const result = await f.run()
+  assert.equal(result.check, true)
+  assert.equal(result.ready, true)
+  assert.equal(readFileSync(f.patch, 'utf8'), USER_PATCH, '用户层 patch 必须逐字保留')
+  assert.deepEqual(f.capture(), before, '检查不得改写任何 profile/目标字节')
+})

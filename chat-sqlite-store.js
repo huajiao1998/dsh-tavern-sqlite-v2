@@ -11,7 +11,7 @@ import { revisions as componentRevisions } from './lib/component-revisions.js'
 import { createRollbackWorldbookHistory } from './lib/rollback-worldbook-history.js'
 import { computeTimelinePlan, writeTimelineNodes, verifyTimelineNodes, readTimelineTree, ensureTimelineNodesTable, usesTimelineNodes } from './lib/timeline-nodes.js'
 import { stmt } from './lib/statement-cache.js'
-import { readActivitySummary as queryActivitySummary } from './lib/chat-query-service.js'
+import { readActivitySummary as queryActivitySummary, queryFailureCleanup } from './lib/chat-query-service.js'
 import { writeStatusBarPlacement as commandSetStatusBarPlacement } from './lib/chat-command-service.js'
 import { readStoryInput as queryStoryInput } from './lib/chat-query-service.js'
 import { readCandidateInput as queryCandidateInput, readSettlementInputNative as querySettlementInput, readTemplateWindowNative as queryTemplateWindow } from './lib/chat-query-service.js'
@@ -1381,8 +1381,10 @@ export function createChatSqliteStore(options = {}) {
       }
       const worldMessage = source.worldMessage()
       assertPinnedRevision(id, summary.revision, source.currentRevision())
+      // 失败清理摘要：同快照内服务端判定“最新失败轮可否干净清理”，随窗口带回供 UI 接线（不恢复整档）。
+      const failureCleanup = queryFailureCleanup(db, { revision: summary.revision, timeline: summary.timeline })
       return { chat, messageCount: end, from, to: end - 1, revision: summary.revision,
-        worldMessage, activity: summary.activity, nativeData: true }
+        worldMessage, activity: summary.activity, failureCleanup, nativeData: true }
     })
   }
 

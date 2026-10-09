@@ -346,8 +346,6 @@ function createStoppedDriver(op, adapter, packageRoot, evidence, budget, { mode,
         const plan = typeof adapter.inspectStandardSeamsPlan === 'function' ? adapter.inspectStandardSeamsPlan({ appDir: op.app, authorVersion: author.version }) : null
         if (!plan || (plan.ready !== true && plan.compatible?.ok !== true)) throw Error('作者版本未适配且契约不等价：' + author.version)
       }
-      const patch = cleanResidual ? '' : readFileSync(path.join(op.profileDir, 'cordis.patch.yml'), 'utf8').replace(/^\s*#.*$/gm, '').trim()
-      if (!cleanResidual && patch !== '[]' && patch !== '') throw Error('profile自定义patch非空，请先核冲突；不覆盖用户配置')
       if (cleanResidual) {
         if (action !== 'uninstall') throw Error('兜底残留路径仅用于卸载')
         residual = residualAssembly({ home: op.home, profileDir: op.profileDir, packageName: adapter.packageName, evidence })
@@ -608,8 +606,6 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { platf
         const plan = typeof adapter.inspectStandardSeamsPlan === 'function' ? adapter.inspectStandardSeamsPlan({ appDir: op.app, authorVersion: author.version }) : null
         if (!plan || (plan.ready !== true && plan.compatible?.ok !== true)) throw Error('作者版本未适配且契约不等价：' + author.version)
       }
-      const patch = cleanResidual ? '' : readFileSync(path.join(op.profileDir, 'cordis.patch.yml'), 'utf8').replace(/^\s*#.*$/gm, '').trim()
-      if (!cleanResidual && patch !== '[]' && patch !== '') throw Error('profile自定义patch非空，请先核冲突；不覆盖用户配置')
       original = processFinder(context)
       if (original) {
         assertTargetAllowed({ ...op, port: original.port })

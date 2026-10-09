@@ -16,10 +16,15 @@ export function applyLatestFailureHostTransform(source) {
 }
 export function applyLatestFailureViewTransform(source) {
   const fields = `      failureTarget: latestFailureTarget(chat, replayTarget),
-      failureCleanupReason: replayTarget && !latestFailureTarget(chat, replayTarget) ? '当前失败缺少可靠发轮前基准或已不是最新尾部，不能安全清理' : '',`
+      failureCleanupReason: latestFailureCleanupReason(chat, replayTarget),`
   const helper = `function latestFailureTarget(chat, replayTarget) {
   const pending = chat.rollbackPending
   if (pending?.failureTarget) return { ...pending.failureTarget, chatId: chat.id, sessionId: chat.sessionId, rollbackId: pending.id }
+  const narrow = chat.failureCleanup
+  if (narrow && narrow.cleanable === true && Number(narrow.revision) === Number(chat._storageRevision)
+    && Number.isSafeInteger(Number(narrow.turn)) && Number(narrow.turn) >= 1 && narrow.operationId) {
+    return { chatId: chat.id, sessionId: chat.sessionId, turn: Number(narrow.turn), branchId: narrow.branchId, revision: Number(narrow.revision), operationId: narrow.operationId }
+  }
   const turn = Number(replayTarget?.turn)
   if (!Number.isSafeInteger(turn) || turn < 1 || !Number.isSafeInteger(chat._storageRevision) || !chat.timeline?.branchId) return null
   const entry = Object.entries(chat.timeline.operations || {}).find(([id, op]) => op?.kind === 'body' && Number(op.turn) === turn)
@@ -28,6 +33,12 @@ export function applyLatestFailureViewTransform(source) {
   if ((chat.messages || []).some(row => Number(row.turn) > turn)) return null
   if (Object.values(chat.timeline.operations || {}).some(op => Number(op?.turn) > turn)) return null
   return { chatId: chat.id, sessionId: chat.sessionId, turn, branchId: chat.timeline.branchId, revision: chat._storageRevision, operationId: entry[0] }
+}
+function latestFailureCleanupReason(chat, replayTarget) {
+  const narrow = chat.failureCleanup
+  if (narrow && narrow.cleanable !== true && narrow.reason) return narrow.reason
+  if (replayTarget && !latestFailureTarget(chat, replayTarget)) return '当前失败缺少可靠发轮前基准或已不是最新尾部，不能安全清理'
+  return ''
 }
 `
   if (source.includes(VIEW_MARKER)) {
@@ -43,7 +54,7 @@ export function applyLatestFailureViewTransform(source) {
   next = once(next, '      canReplayFailedTurn: replayTarget !== null,', fields + '\n      canReplayFailedTurn: replayTarget !== null,')
   next = once(next, '      canClearIncompleteReply: rollbackState.canClearIncompleteReply,', '      canClearIncompleteReply: latestFailureTarget(chat, replayTarget) !== null,')
   // 半提交只允许完成同一清理；不能从已经截断的正文重新选择目标。
-  next = once(next, '      undoRollbackTurn: canUndoRollback(chat, evidence.session) ? chat.rollbackUndo.turn : null,\n      rollbackUnavailableReason: rollbackState.reason', '      failureTarget: latestFailureTarget(chat, replayTarget),\n      failureCleanupReason: replayTarget && !latestFailureTarget(chat, replayTarget) ? \'当前失败缺少可靠发轮前基准或已不是最新尾部，不能安全清理\' : \'\',\n      undoRollbackTurn: canUndoRollback(chat, evidence.session) ? chat.rollbackUndo.turn : null,\n      rollbackUnavailableReason: rollbackState.reason')
+  next = once(next, '      undoRollbackTurn: canUndoRollback(chat, evidence.session) ? chat.rollbackUndo.turn : null,\n      rollbackUnavailableReason: rollbackState.reason', '      failureTarget: latestFailureTarget(chat, replayTarget),\n      failureCleanupReason: latestFailureCleanupReason(chat, replayTarget),\n      undoRollbackTurn: canUndoRollback(chat, evidence.session) ? chat.rollbackUndo.turn : null,\n      rollbackUnavailableReason: rollbackState.reason')
   next = once(next, 'canRollback: true, canClearIncompleteReply: false,', 'canRollback: true, canClearIncompleteReply: !!chat.rollbackPending.failureTarget,')
   // 命中旧rollback缓存也必须重新签发当前revision，旧凭据不能被缓存续用。
   next = once(next, 'return {...copyRollback(previous.value),undoRollbackTurn:', 'return {...copyRollback(previous.value),failureTarget: latestFailureTarget(chat, previous.value.replayFailedTurn === null ? null : {turn: previous.value.replayFailedTurn}),undoRollbackTurn:')

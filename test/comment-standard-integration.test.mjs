@@ -67,7 +67,13 @@ test('块产品1 真实裸树全部接缝安装卸载及源码构建双路径', 
   for (const rel of [...sourceRels, CLIENT_BUILT]) assert.match(after.get(rel), /\[dsh-tavern-seam:ACTIVE_BEGIN\]/)
 
   // ⑤ 必要接线确实进了产物（failTarget / legacy guard / 宿主补丁共享入口）
-  assert.match(after.get(CLIENT_BUILT), /failureTarget: state\.view && state\.view\.failureTarget/)
+  // 失败清理接线为 ref-based getter：`state.view` 闭包形态已废弃，bundle 与拆分 play-controls 双路径都要核。
+  for (const rel of [CLIENT_BUILT, 'tavern-plugin/src/client/features/play-controls.js']) {
+    assert.match(after.get(rel), /get failureTarget\(\) \{ return failureViewRef\.current\.view && failureViewRef\.current\.view\.failureTarget \|\| null \}/, rel + ' 必须用稳定 ref 活取当前视图')
+    assert.doesNotMatch(after.get(rel), /get failureTarget\(\) \{ return state\.view/, rel + ' 不得回退为闭包 state.view')
+    assert.match(after.get(rel), /const failureViewRef = React\.useRef\(state\);/, rel + ' 必须有跨 render 稳定 ref')
+    assert.match(after.get(rel), /\[props\.sessionId, revision, failureTargetKey\]\);/, rel + ' 目标身份变化必须触发 effect 重建')
+  }
   assert.match(after.get(INDEX), /installAuthorHostSessionPatch\(ctx\)/)
   assert.match(after.get('tavern-plugin/lib/domain/tavern-conversation-registry.js'), /legacyViewSeams\.assertWritable\(/)
   assert.match(after.get('tavern-plugin/lib/domain/legacy-view-seams.js'), /installAuthorHostSessionPatch/)

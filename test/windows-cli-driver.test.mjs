@@ -26,6 +26,14 @@ const seams = ready => ({ ...adapter, checkStandardSeams: () => ({ ready }) })
 const read = file => readFileSync(file)
 // 运行中：真实归属函数 + 注入的只读进程清单（不查真机进程表）。
 const runningPresence = context => windowsCliTavernProcesses(context, { list: () => [{ pid: 4321, exe: NODE_EXE, argv: 'node "' + context.windowsCli.cliEntry + '" --profile tavern' }] })
+// 合法非空 profile 用户层覆盖（与酒馆/本插件无关，无秘密）：旧预检按"非空"拒绝维护；新契约只要求维护不改写它。
+// 生效行形状取自真实 patch 行列表（注释行会被剥掉，故必须留非注释行，才是真正的回归输入）。
+const USER_PATCH = [
+  '# 用户自有覆盖：与酒馆/本插件无关；维护不得改写或删除',
+  '- id: user-local-preference',
+  '  disabled: false',
+  ''
+].join('\n')
 /** 目录字节快照（文件内容 + 链接字面目标）：证明源码/SDK/装配零改。 */
 function image(root) {
   const out = {}
@@ -188,6 +196,27 @@ test('WinCLI driver: 装卸不动原依赖/bundle与SDK源码，本包junction�
   assert.deepEqual(after.settings, { preserve: true })
   assert.equal(existsSync(junction), false); assert.equal(existsSync(installDir), false)
   assert.deepEqual(image(f.app), appBefore); assert.deepEqual(image(f.runtimeRoot), sdkBefore)
+})
+
+test('WinCLI driver: 合法非空profile覆盖不再拒绝预检，install/uninstall真实链逐字保留该文件', async t => {
+  const f = fixture(t)
+  const patchFile = path.join(f.profileDir, 'cordis.patch.yml')
+  writeFileSync(patchFile, USER_PATCH, 'utf8')
+  const patchBytes = read(patchFile)
+  const driver = f.make()
+  const installState = await driver.preflight('install') // 旧实现：非空 patch 在此抛"profile自定义patch非空"
+  assert.equal(installState.noop, false)
+  assert.ok(f.probes.length >= 2, '预检仍走既有能力探针调用路径（外部执行沿用桩），未被新分支短路')
+  await driver.manage('install')
+  assert.deepEqual(read(patchFile), patchBytes, '安装真实链不得改写用户层 patch')
+  const uninstallState = await driver.preflight('uninstall')
+  assert.equal(uninstallState.noop, false)
+  await driver.manage('uninstall')
+  assert.deepEqual(read(patchFile), patchBytes, '卸载真实链不得改写/删除用户层 patch')
+  assert.deepEqual(JSON.parse(read(f.profileFile).toString('utf8')).dsh.profile.bundles, ['keep'], '目标 bundle 撤净（沿用原装配语义）')
+  // 停态护栏沿用：同一非空覆盖现场下，运行中写前仍拒绝（未被新逻辑旁路）。
+  await assert.rejects(f.make({ presence: runningPresence }).preflight('install'), /正在运行/)
+  assert.deepEqual(read(patchFile), patchBytes)
 })
 
 test('WinCLI driver: 工厂路由只认注入的目标平台，不静默回退POSIX', t => {

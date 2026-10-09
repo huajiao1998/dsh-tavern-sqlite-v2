@@ -5,9 +5,9 @@
 ## 支持范围
 
 - macOS、Linux、WSL2 CLI 与 Windows（桌面版 Electron；原生 Windows CLI 为**本地适配、尚未发布**，见后节）。要求 DSH / boot 0.1.5-rc.2、Node.js 22.19+（建议 24）、pnpm（POSIX）。未知作者源码布局或未知管理器明确拒绝，不猜测覆盖；作者版本号只作**诊断定位**。
-- **接入准入（设计目标）**：必需接缝锚点在本次真实源码上命中、隔离副本完整施缝、语法与接缝就绪检查通过 ⇒ 允许安装。不校验文件与 runtime manifest 或冻结作者树一致性；缺失/过时的清单、删除无关说明文件、用户改块外代码（不破坏锚点）均不影响安装。
-- **本地施工状态**：当前源码已按 [COMMENT-SEAMS.md](<COMMENT-SEAMS.md>) 改为现场区块装卸，正在完成定向验证；尚未正式发布或在188验证。已发布旧包仍按各自旧规则执行，不把本地新行为当作公网latest行为。
-- 本指南描述的是**当前源码**（0.3.8 一代）。安装要求当前必需接口可定位、注入语法有效，不认证作者源码。DSH / boot与离线vendor能力要求保持；同名插件换版本由统一维护命令清旧装配再安装，不因包字节不同直接拒绝。
+- **接入准入**：必需接缝锚点在本次真实源码上命中、隔离副本完整施缝、语法与接缝就绪检查通过 ⇒ 允许安装。不校验文件与 runtime manifest 或冻结作者树一致性；缺失/过时的清单、删除无关说明文件、用户改块外代码（不破坏锚点）均不影响安装。
+- **发布状态**：现场注释区块装卸自 **0.3.8** 起已公开发布，机制说明见 [COMMENT-SEAMS.md](<COMMENT-SEAMS.md>)；旧机制（≤0.3.7）现场需先用旧版插件自带 CLI 完整卸载，再安装本版。
+- 本指南描述的是**当前源码**。安装要求当前必需接口可定位、注入语法有效，不认证作者源码。DSH / boot与离线vendor能力要求保持；同名插件换版本由统一维护命令清旧装配再安装，不因包字节不同直接拒绝。
 - 运行依赖零 npm 外部依赖：`json5`、`jsonrepair`、`lodash`、`yaml` 与注释块词法器 `acorn`（8.15.0，MIT）均已 vendor 进包内，安装不联网补依赖。
 - POSIX 官方包管理固定 `--offline --ignore-scripts --config.auto-install-peers=false`；Windows 复用本包复制、profile link/junction 与宿主 peer 同实例链接，不重装其它依赖、不联网补 SDK。
 - POSIX 维护路径保留 `--experimental-vm-modules` 启动资格检查；已有 systemd 单元可用 `--prepare-env` 授权备份并补旗标（失败自动回滚），不加则不改启动配置。Windows CLI 通过既有 Worker 取得 VM 能力，拒绝 `--prepare-env` / systemd 接管。
