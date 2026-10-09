@@ -1,20 +1,14 @@
-#!/usr/bin/env node
-// 原件只读与另存作者接缝；仅施缝，不打开会话、不迁移数据、不重启服务。
-import { existsSync, readFileSync, writeFileSync, copyFileSync, unlinkSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
-import { fileURLToPath, pathToFileURL } from 'node:url'
-import os from 'node:os'
-import path from 'node:path'
+// 阶段③：只保留**纯业务 transform**（无 fs / 无 manifest / 无备份 / 无 CLI / 无 __main__ 入口）。
+// 消费者（主）：统一 host before-base = `transformLegacyIndex(transformStorageIndex(raw))`；
+// 其余三个 transform（registry / initialization / session-view-reader）各自独立施加，互不代管。
 import { prepareProtectedLegacySource } from './maintenance/author-safety.mjs'
 
 const MARKER = '// [dsh-tavern-legacy-view-seams:v1]'
-const MANIFEST = '.tavern-legacy-view-seams.json'
 const LEGACY_SHIM_IMPORT = "import { legacyViewSeams, isReadOnlySession, withObservedForkSource, createAuthorSaveActions, initializeAuthorLegacyWorkspaces } from './domain/legacy-view-seams.js'"
 const IMPORT = "import { legacyViewSeams, isReadOnlySession, withObservedForkSource, createAuthorSaveActions, initializeAuthorLegacyWorkspaces, installAuthorHostSessionPatch } from './domain/legacy-view-seams.js'"
 const INSTALLER_CALL = "  // 宿主会话补丁只由我们的包安装一份（作者树那份是官方实现，会盖回接管接缝）。\n  const sessionPatch = await installAuthorHostSessionPatch(ctx)\n"
 const DOMAIN_IMPORT = "import { legacyViewSeams, isReadOnlySession } from './legacy-view-seams.js'"
 const OLD_SAVE_SERVICE = "  ctx.provide('tavernSaveActions', createAuthorSaveActions({\n    chats: chatPersistence,\n    resolveChatId: async sessionId => (await readSessionMap())[str(sessionId)],\n    prepareFork: prepareConversationFork, completeFork: forkChat\n  }))\n"
-const SAVE_ACTIONS_V2_MARKER = '// [dsh-tavern-save-actions:v2]'
 const SAVE_ACTIONS_V3_MARKER = '// [dsh-tavern-save-actions:v3]'
 // 源会话原生标题只读读取（v3 新增）：`sessionTitle.get` 需要**活 Session**（`session.snapshotEvents()`），
 // 而这里只有官方只读观察给的事件门面 ⇒ 直接折叠同一份观察到的日志里最后一条 `session/title`。
@@ -63,6 +57,8 @@ ${READ_SOURCE_TITLE_DEP}    validateTargetNaming: async () => {
     }
   }))
 `
+// 纯业务检查：历史 v3 标记的完整性（让同一次变换链稳定，不承担安装幂等）。
+// 阶段③ 起只走"新版 pure factory 首装路径"：作者树旧 service 形态 → SAVE_SERVICE，不再做 v2→v3 就地兼容升级。
 function upgradeSaveActions(source) {
   let out = source
   if (out.includes(SAVE_ACTIONS_V3_MARKER)) {
@@ -70,11 +66,6 @@ function upgradeSaveActions(source) {
     for (const required of ['readSourceSessionTitle:', 'renameTargetSession:', 'setTargetChatTitle:', 'validateTargetNaming:']) {
       if (!out.includes(required)) throw new Error('保存动作 v3 标记存在但不完整（缺少 ' + required + '），拒绝猜测修复')
     }
-  } else if (out.includes(SAVE_ACTIONS_V2_MARKER)) {
-    // 已施过 v2 的线上树就地升级到 v3：补源会话标题依赖 + 标记改写；两个锚点都必须唯一命中。
-    out = replace(out, SAVE_ACTIONS_V2_MARKER, SAVE_ACTIONS_V3_MARKER, '保存动作 v2→v3 标记升级')
-    out = replace(out, '    validateTargetNaming: async () => {',
-      READ_SOURCE_TITLE_DEP + '    validateTargetNaming: async () => {', '保存动作 v2→v3 源会话标题依赖')
   } else {
     out = replace(out, OLD_SAVE_SERVICE, SAVE_SERVICE, '保存动作 v3 升级')
   }
@@ -224,99 +215,4 @@ export function transformLegacyViewReader(source) {
   out = replace(out, '    cardContextRevision: Number(chat.cardContextRevision) || 0, mode, isCard:', "    cardContextRevision: Number(chat.cardContextRevision) || 0, sessionId: String(chat.sessionId ?? ''), mode, isCard:", 'cache 绑定身份')
   out = replace(out, "['cardPath', 'cardContextRevision', 'mode', 'isCard', 'resourceVersion']", "['sessionId', 'cardPath', 'cardContextRevision', 'mode', 'isCard', 'resourceVersion']", 'cache identity guard')
   return out
-}
-
-/** 所有锚点先验证，再统一备份/写入/语法检查；失败恢复本次前像。 */
-export function applyLegacyViewSeams({ appDir, check = false, uninstall = false, syntaxCheck } = {}) {
-  if (!appDir || !path.isAbsolute(appDir)) throw new Error('必须明确指定作者应用树绝对路径')
-  const manifestPath = path.join(appDir, MANIFEST)
-  if (uninstall) {
-    if (!existsSync(manifestPath)) return { changed: false, removed: false }
-    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-    for (const entry of manifest.entries) {
-      const file = path.join(appDir, entry.relative)
-      if (entry.created) {
-        if (existsSync(file) && !readFileSync(file, 'utf8').startsWith(MARKER)) throw new Error('部署垫片身份不符，拒绝删除')
-      } else if (!existsSync(path.join(appDir, entry.backup))) throw new Error('缺少原件只读接缝备份：' + entry.relative)
-    }
-    if (check) return { changed: false, needsUninstall: true }
-    for (const entry of manifest.entries) {
-      const file = path.join(appDir, entry.relative)
-      if (entry.created) { if (existsSync(file)) unlinkSync(file) }
-      else copyFileSync(path.join(appDir, entry.backup), file)
-    }
-    // 已完整恢复后移除本 manifest 精确拥有的备份，允许卸缝后重新施缝。
-    for (const entry of manifest.entries) if (!entry.created) unlinkSync(path.join(appDir, entry.backup))
-    unlinkSync(manifestPath)
-    return { changed: true, removed: true }
-  }
-  const transforms = [
-    ['tavern-plugin/lib/index.js', transformLegacyIndex],
-    ['tavern-plugin/lib/domain/tavern-conversation-registry.js', transformLegacyRegistry],
-    ['tavern-plugin/lib/domain/conversation-initialization.js', transformLegacyInitialization],
-    ['tavern-plugin/lib/domain/session-view-reader.js', transformLegacyViewReader]
-  ]
-  const changes = transforms.map(([relative, transform]) => {
-    const file = path.join(appDir, relative)
-    if (!existsSync(file)) throw new Error('缺少作者源模块：' + relative)
-    const before = readFileSync(file, 'utf8')
-    return { relative, file, before, after: transform(before), created: false }
-  })
-  const shimRelative = 'tavern-plugin/lib/domain/legacy-view-seams.js'
-  const shimFile = path.join(appDir, shimRelative)
-  const shimBefore = existsSync(shimFile) ? readFileSync(shimFile, 'utf8') : undefined
-  if (shimBefore !== undefined && !shimBefore.startsWith(MARKER)) throw new Error('作者已有同名模块，拒绝覆盖')
-  changes.push({ relative: shimRelative, file: shimFile, before: shimBefore, after: LEGACY_VIEW_SHIM, created: shimBefore === undefined })
-  const dirty = changes.filter(entry => entry.before !== entry.after)
-  if (!dirty.length || check) return { changed: false, needsApply: dirty.length > 0, files: dirty.map(entry => entry.relative) }
-  const oldManifest = existsSync(manifestPath) ? readFileSync(manifestPath, 'utf8') : undefined
-  const entries = oldManifest ? JSON.parse(oldManifest).entries : []
-  const newBackups = []
-  const validate = syntaxCheck || (file => execFileSync(process.execPath, ['--check', file], { stdio: 'inherit' }))
-  try {
-    for (const entry of dirty) {
-      if (!entries.some(old => old.relative === entry.relative)) {
-        const backup = entry.relative + '.legacy-view-seams.backup'
-        if (!entry.created) {
-          if (existsSync(path.join(appDir, backup))) throw new Error('未知旧备份存在，拒绝覆盖：' + backup)
-          copyFileSync(entry.file, path.join(appDir, backup)); newBackups.push(path.join(appDir, backup))
-        }
-        entries.push({ relative: entry.relative, created: entry.created, ...(entry.created ? {} : { backup }) })
-      }
-      writeFileSync(entry.file, entry.after, 'utf8')
-    }
-    for (const entry of dirty) validate(entry.file)
-    writeFileSync(manifestPath, JSON.stringify({ version: 1, entries }, null, 2) + '\n', 'utf8')
-  } catch (error) {
-    for (const entry of dirty) {
-      if (entry.before === undefined) { if (existsSync(entry.file)) unlinkSync(entry.file) }
-      else writeFileSync(entry.file, entry.before, 'utf8')
-    }
-    for (const file of newBackups) if (existsSync(file)) unlinkSync(file)
-    if (oldManifest === undefined) { if (existsSync(manifestPath)) unlinkSync(manifestPath) }
-    else writeFileSync(manifestPath, oldManifest, 'utf8')
-    throw error
-  }
-  return { changed: true, needsApply: false, files: dirty.map(entry => entry.relative) }
-}
-
-function defaultAppDir() {
-  const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh-tavern')
-  const profile = path.join(home, 'profiles', 'tavern', 'package.json')
-  if (existsSync(profile)) {
-    const declared = JSON.parse(readFileSync(profile, 'utf8'))?.dshTavern?.source
-    if (typeof declared === 'string' && declared) return path.resolve(declared)
-  }
-  return path.join(home, 'apps', 'dsh-tavern')
-}
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  try {
-    const args = process.argv.slice(2)
-    const position = args.indexOf('--app')
-    if (position >= 0 && (!args[position + 1] || args[position + 1].startsWith('--'))) throw new Error('--app 缺少应用树路径')
-    const appDir = position >= 0 ? path.resolve(args[position + 1]) : defaultAppDir()
-    const result = applyLegacyViewSeams({ appDir, check: args.includes('--check'), uninstall: args.includes('--uninstall') })
-    console.log(result.changed ? '原件只读接缝已更新；未重启服务。' : result.needsApply ? '需要施加原件只读接缝。' : '原件只读接缝已是最新。')
-    process.exitCode = result.needsApply ? 3 : 0
-  } catch (error) { console.error('原件只读接缝失败：' + String(error?.message || error)); process.exitCode = 1 }
 }

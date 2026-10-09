@@ -16,13 +16,12 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { loadAuthorCleanImages } from '../deploy/maintenance/residual-uninstall.mjs'
 import { applyStandardSeams } from '../deploy/standard-seams.mjs'
+import { activeSource, prepareCommentAuthorTree } from './fixtures/comment-author-tree.mjs'
 import { applyNativeDataTransform, isNativeDataApplied, STORY_INPUT_MARKER } from '../deploy/native-data-transform.mjs'
 import { createChatSqliteStore } from '../chat-sqlite-store.js'
 import { AUTHOR_VERSION } from '../lib/standard-host.js'
 
-const TARGET = '68215e47516637e00c75d2b4bba3192679559425'   // 与 native-data-seams 同一个固定目标作者树
 const INDEX = 'tavern-plugin/lib/index.js'
 const AUTHOR25 = '../../../tmp/upstream25-author-fixture/src/dsh-tavern-5d2ffacf4231c9f45dc641b9db9e0286c4fa5f60/tavern-plugin/lib/domain/'
 const AUTHOR68215 = '../../../tmp/release-034-20261008/author-fixture/src/dsh-tavern-68215e47516637e00c75d2b4bba3192679559425/tavern-plugin/lib/'
@@ -62,26 +61,21 @@ function sliceFunction(text, name) {
   throw new Error('函数体未闭合：' + name)
 }
 
-/** 作者真实随包树 → 自有 tmp → 真实施缝；返回装配后 index 源码（整轮测试共用一份只读副本）。 */
+/** 真实作者 source fixture → 自有 tmp → 真实施缝；返回**ACTIVE 投影**源码（整轮测试共用一份只读副本）。 */
 let SEAM = null
 function seamSource() {
   if (SEAM !== null) return SEAM
-  const tree = loadAuthorCleanImages().trees.find(item => item.commit === TARGET)
-  assert.ok(tree, '缺官方作者树：' + TARGET)
-  const appDir = mkdtempSync(path.join(tmpdir(), 'native-story-host-'))
-  test.after(() => rmSync(appDir, { recursive: true, force: true }))     // 只删本夹具自有唯一前缀目录
-  for (const [rel, item] of Object.entries(tree.files)) {
-    if (item === null) continue
-    const file = path.join(appDir, ...rel.split('/'))
-    mkdirSync(path.dirname(file), { recursive: true })
-    writeFileSync(file, Buffer.from(item.body, 'base64'))
-  }
-  const indexFile = path.join(appDir, ...INDEX.split('/'))
+  const tree = prepareCommentAuthorTree()
+  assert.ok(tree, '缺少作者 source fixture：设 DSH_TAVERN_TEST_APP 或准备本地 author-fixture')
+  test.after(tree.cleanup)                                            // 只删 helper 自己的 mkdtemp 目录
+  const indexFile = path.join(tree.appDir, ...INDEX.split('/'))
   assert.equal(isNativeDataApplied(readFileSync(indexFile, 'utf8')), false, '前置：作者原字节不应已应用 native-data 转换')
-  assert.equal(applyStandardSeams({ appDir, authorVersion: AUTHOR_VERSION }).changed, true)
-  const source = readFileSync(indexFile, 'utf8')
-  assert.equal(isNativeDataApplied(source), true, '装配后实际 index 必须已应用 native-data 转换')
-  SEAM = source
+  assert.equal(applyStandardSeams({ appDir: tree.appDir, authorVersion: AUTHOR_VERSION, assertStopped: () => true }).changed, true)
+  const seamed = readFileSync(indexFile, 'utf8')
+  assert.equal(isNativeDataApplied(seamed), true, '装配后实际 index 必须已应用 native-data 转换')
+  // 切缝副本只取 ACTIVE 投影：ORIGINAL 区是注释掉的作者原文，直接切片会撞锚点/重复声明。
+  SEAM = activeSource(seamed, INDEX)
+  assert.equal(isNativeDataApplied(SEAM), true, 'ACTIVE 投影必须保留 native-data 生成标记')
   return SEAM
 }
 

@@ -12,7 +12,7 @@ import { maintenanceBudget } from '../deploy/maintenance/budget.mjs'
 import { executeMaintenance } from '../deploy/maintenance/runner.mjs'
 import { STANDARD_RECORD } from '../deploy/maintenance/source.mjs'
 import { maintenanceAdapter } from '../deploy/maintenance.mjs'
-import { loadAuthorCleanImages } from '../deploy/maintenance/residual-uninstall.mjs'
+import { prepareCommentAuthorTree } from './fixtures/comment-author-tree.mjs'
 
 const INDEX = 'tavern-plugin/lib/index.js'
 // 最小 adapter 桩：targets 只需满足真实 sourceAccess 的有限目标校验（入口 + 三条历史记录）。
@@ -36,8 +36,11 @@ function fixture(t, options = {}) {
   fs.mkdirSync(path.join(app, 'tavern-plugin/lib'), { recursive: true })
   const activeAdapter = options.withdrawnClean ? maintenanceAdapter : ADAPTER
   if (options.withdrawnClean) {
-    const tree = loadAuthorCleanImages().trees.find(row => row.commit.startsWith('8480f7de'))
-    for (const [rel, body] of Object.entries(tree.files)) if (body) { const target=path.join(app,rel); fs.mkdirSync(path.dirname(target),{recursive:true}); fs.writeFileSync(target,Buffer.from(body.body,'base64')) }
+    // 真实作者源码只从 fixtures/comment-author-tree.mjs 取（env DSH_TAVERN_TEST_APP 优先）；缺来源即如实失败，不假造作者树、不造 catalog API。
+    const prepared = prepareCommentAuthorTree()
+    if (!prepared) throw new Error('无真实作者 source fixture（DSH_TAVERN_TEST_APP 与本地 author-fixture 都不可用）：本用例需真实作者源码')
+    t.after(() => prepared.cleanup())
+    fs.cpSync(prepared.appDir, app, { recursive: true })
   } else fs.writeFileSync(path.join(app, INDEX), options.indexBody ?? '// 作者入口（测试桩，无任何接缝标记）\n', 'utf8')
   const evidenceDir = path.join(root, 'maintenance', ADAPTER.packageName, 'run-1')
   fs.mkdirSync(evidenceDir, { recursive: true })

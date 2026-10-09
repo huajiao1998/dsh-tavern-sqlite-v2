@@ -26,6 +26,9 @@
 | json5 | 2.2.3 | MIT | `json5/index.mjs` | 46 KB |
 | jsonrepair | 3.15.0 | MIT | `jsonrepair/esm/index.js` | 69 KB |
 | yaml | 2.9.1 | ISC | `yaml/dist/index.js` | 287 KB |
+| acorn | 8.15.0 | MIT | `acorn/acorn.mjs` | 229792 B |
+
+Acorn 为注释接缝块的离线词法/结构解析器，复用工作区工具依赖中的官方单文件产物，随附 MIT 许可；不依赖用户酒馆的 node_modules，不联网补装。阶段③已纳入维护入口依赖完整性清单，版本与入口记入同目录台账。本阶段不运行发布用 SHA 增量检测。
 
 - 各包 `LICENSE` / `LICENSE.md` 已随附（MIT / ISC 均要求保留版权与许可声明）。
 - `yaml/dist` 已剔除 `*.d.ts`、`*.map` 与 `cli.mjs`；`jsonrepair/esm` 已剔除 sourcemap。
@@ -35,7 +38,7 @@
 
 ## 维护约定
 
-- 升级这些依赖 = 重新取官方 tarball、替换目录、**重算 manifest.json 摘要**，并跑全量门禁；
-  `deploy/maintenance/driver.mjs` 的 `assertPackageDependencies()` 会在安装前核对
-  "零运行时依赖 + 账本齐全 + 四个入口文件存在"，不符即拒绝安装。
+- 升级依赖须保留官方版本、入口与许可来源，开发时仅验证受影响调用。发布用摘要检测和发布前全量测试遵循项目规则，各自仅在获发布授权、输入冻结后执行一次，开发期不得提前运行。
+  `deploy/maintenance/driver.mjs` 的 `assertPackageDependencies()` 在安装前核对
+  “零运行时依赖 + 台账齐全 + 五个入口文件存在”，不符即拒绝安装。
 - 不要在 `package.json` 里重新声明这四个依赖——那会让离线安装在桌面版宿主上重新失败。

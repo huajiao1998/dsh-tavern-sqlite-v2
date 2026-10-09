@@ -7,9 +7,10 @@ import { fileURLToPath } from 'node:url'
 import os from 'node:os'
 import path from 'node:path'
 import vm from 'node:vm'
+const defaultSyntaxCheck = (code, file) => new vm.Script(code, { filename: file })
 import {
-  applySaveUiSeam, defaultSyntaxCheck, transformSaveUiClient,
-  SAVE_UI_BRIDGE, SAVE_UI_EVENT, SAVE_UI_MANIFEST, SAVE_UI_MARKER, SAVE_UI_SERVICE, SAVE_UI_TARGETS
+  transformSaveUiClient,
+  SAVE_UI_BRIDGE, SAVE_UI_EVENT, SAVE_UI_MARKER, SAVE_UI_SERVICE, SAVE_UI_TARGETS
 } from '../deploy/apply-save-ui-seam.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -69,21 +70,6 @@ function fixtureSource({ withMigration = false } = {}) {
     '});',
     ''
   ].join('\n')
-}
-
-function makeTempApp({ identical = true } = {}) {
-  const dir = mkdtempSync(path.join(os.tmpdir(), TEMP_PREFIX))
-  tempRoots.push(dir)
-  mkdirSync(path.join(dir, 'tavern-plugin', 'src', 'client'), { recursive: true })
-  mkdirSync(path.join(dir, 'tavern-plugin', 'lib'), { recursive: true })
-  const bundle = identical ? fixtureSource() : fixtureSource()
-  writeFileSync(path.join(dir, SAVE_UI_TARGETS[0]), fixtureSource(), 'utf8')
-  writeFileSync(path.join(dir, SAVE_UI_TARGETS[1]), bundle, 'utf8')
-  return dir
-}
-
-function readTargets(appDir) {
-  return SAVE_UI_TARGETS.map(relative => readFileSync(path.join(appDir, relative), 'utf8'))
 }
 
 function seamBlock(text) {
@@ -267,19 +253,6 @@ test('fail closed：迁移区锚点不唯一', () => {
   assert.throws(() => transformSaveUiClient(broken), /锚点不唯一（作者迁移区/)
 })
 
-test('卸缝护栏：无 manifest 但文件仍含标记 ⇒ 拒绝猜测还原', () => {
-  const appDir = makeTempApp()
-  applySaveUiSeam({ appDir })
-  const applied = readTargets(appDir)
-  assert.equal(applied.every(text => text.includes(SAVE_UI_MARKER)), true)
-  rmSync(path.join(appDir, SAVE_UI_MANIFEST), { force: true })                 // 模拟施缝记录丢失
-  assert.throws(() => applySaveUiSeam({ appDir, uninstall: true }), /缺少存档格式桥接缝记录|拒绝猜测还原/)
-  assert.deepEqual(readTargets(appDir), applied, '拒绝时必须原样保留，不得猜着还原')
-  for (const relative of SAVE_UI_TARGETS) {
-    assert.equal(existsSync(path.join(appDir, relative + '.save-ui-seam.backup')), true, '备份不得被删')
-  }
-})
-
 test('fail closed：已有同名桥但无标记', () => {
   const broken = fixtureSource().replace('function TavernStatusTab(props) {', `function ${SAVE_UI_BRIDGE}(props) { return null }\n\t\tfunction TavernStatusTab(props) {`)
   assert.throws(() => transformSaveUiClient(broken), /拒绝覆盖/)
@@ -291,76 +264,6 @@ test('fail closed：标记在但缺桥调用（完整性）⇒ 拒绝', () => {
   assert.equal(without.includes(SAVE_UI_MARKER), true, '仍应保留标记')
   assert.equal(without.includes(SAVE_UI_BRIDGE), true, '仍应保留桥定义/名字')
   assert.throws(() => transformSaveUiClient(without), /实现不完整/)
-})
-
-test('apply：写前解析预验证失败 ⇒ 不写盘', () => {
-  const appDir = makeTempApp()
-  const before = readTargets(appDir)
-  assert.throws(() => applySaveUiSeam({
-    appDir,
-    syntaxCheck: (code, file) => {
-      if (/[\\/]lib[\\/]client\.js$/.test(file)) throw new Error('synthetic parse failure')
-      return defaultSyntaxCheck(code, file)
-    }
-  }), /synthetic parse failure/)
-  assert.deepEqual(readTargets(appDir), before)
-  assert.equal(existsSync(path.join(appDir, SAVE_UI_MANIFEST)), false)
-})
-
-test('apply：写后回读复核失败 ⇒ 两个文件与 manifest/备份整体回滚', () => {
-  const appDir = makeTempApp()
-  const before = readTargets(appDir)
-  let calls = 0
-  assert.throws(() => applySaveUiSeam({
-    appDir,
-    syntaxCheck: (code, file) => {
-      calls += 1
-      if (calls === 4) throw new Error('synthetic read-back failure') // 预验证 2 次 → 写后回读第 4 次
-      return defaultSyntaxCheck(code, file)
-    }
-  }), /synthetic read-back failure/)
-  assert.deepEqual(readTargets(appDir), before, '回滚必须逐字节还原')
-  assert.equal(existsSync(path.join(appDir, SAVE_UI_MANIFEST)), false, '失败后不得留下 manifest')
-  for (const relative of SAVE_UI_TARGETS) {
-    assert.equal(existsSync(path.join(appDir, relative + '.save-ui-seam.backup')), false, '失败后不得留下备份')
-  }
-})
-
-test('apply/--check/重复/卸缝：幂等且精确还原', () => {
-  const appDir = makeTempApp()
-  const before = readTargets(appDir)
-  const check = applySaveUiSeam({ appDir, check: true })
-  assert.deepEqual({ changed: check.changed, needsApply: check.needsApply }, { changed: false, needsApply: true })
-  assert.deepEqual(readTargets(appDir), before, '--check 不得写盘')
-
-  const applied = applySaveUiSeam({ appDir })
-  assert.equal(applied.changed, true)
-  const after = readTargets(appDir)
-  assert.notDeepEqual(after, before)
-  for (const relative of SAVE_UI_TARGETS) {
-    assert.equal(existsSync(path.join(appDir, relative + '.save-ui-seam.backup')), true)
-    assert.match(readFileSync(path.join(appDir, relative), 'utf8'), /\[dsh-tavern-save-ui-seam:v1\]/)
-  }
-  assert.equal(existsSync(path.join(appDir, SAVE_UI_MANIFEST)), true)
-
-  assert.equal(applySaveUiSeam({ appDir }).changed, false, '重复施缝必须幂等')
-  assert.equal(applySaveUiSeam({ appDir, check: true }).needsApply, false)
-
-  const removed = applySaveUiSeam({ appDir, uninstall: true })
-  assert.deepEqual({ changed: removed.changed, removed: removed.removed }, { changed: true, removed: true })
-  assert.deepEqual(readTargets(appDir), before, '卸缝必须逐字节还原作者原样')
-  assert.equal(existsSync(path.join(appDir, SAVE_UI_MANIFEST)), false)
-  for (const relative of SAVE_UI_TARGETS) {
-    assert.equal(existsSync(path.join(appDir, relative + '.save-ui-seam.backup')), false)
-  }
-  assert.deepEqual(applySaveUiSeam({ appDir, uninstall: true }), { changed: false, removed: false })
-})
-
-test('apply：源码与产物状态不一致（只一个脏）⇒ 响亮拒绝', () => {
-  const appDir = makeTempApp()
-  writeFileSync(path.join(appDir, SAVE_UI_TARGETS[0]), transformSaveUiClient(fixtureSource()), 'utf8')
-  assert.throws(() => applySaveUiSeam({ appDir }), /两文件接缝状态不一致/)
-  assert.equal(existsSync(path.join(appDir, SAVE_UI_MANIFEST)), false)
 })
 
 test('接缝输出不含写死颜色（主题语义变量/无样式）', () => {

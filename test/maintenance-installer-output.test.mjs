@@ -236,3 +236,22 @@ if (process.platform === 'win32') {
     assert.equal((log.match(/RUN-MARKER/g) || []).length, 1, '脚本自己写过日志时不得再兜底重跑（否则可能把真安装跑两遍）')
   })
 }
+
+// 静态合同：Windows 更新只走**一次** install（驱动单命令内清旧装配），不再代卸旧机制。
+// 证据边界：只对真实 install.ps1 源文本做静态断言（可选 PS 解析器语法检查），不执行脚本、不联网、不启进程；
+// 因此**不能**据此宣称真实 Windows 升级行为已验证。
+test('现场更新1 Windows更新统一install而不代卸旧机制', () => {
+  const body = installer.slice(installer.indexOf('function Do-Update'), installer.indexOf('# ——— 6. 菜单 / 直用 ———'))
+  assert.ok(body.length > 0, '必须定位到 Do-Update：' + body.length)
+  assert.equal((body.match(/Invoke-Maintenance[^\n]*\$remote[^\n]*'install'/g) || []).length, 1, '远程更新必须恰好一次 install')
+  assert.equal((body.match(/Invoke-Maintenance[^\n]*\$localEntry[^\n]*'install'/g) || []).length, 1, '本包覆盖必须恰好一次 install')
+  assert.equal((body.match(/Invoke-Maintenance[^\n]*'uninstall'/g) || []).length, 0, 'Do-Update 内不得代卸旧代（旧机制由旧 CLI 先卸）')
+  assert.ok(!/Do-Install\s+\$tavern/.test(body), '不得再走"先卸再 Do-Install"两段式')
+  // 动作映射：两处 $verb 只保留 uninstall 分支（install/update/check 一律 install）
+  const maps = installer.match(/\$verb = if \(\$Action -eq 'uninstall'\) \{ 'uninstall' \} else \{ 'install' \}/g) || []
+  assert.equal(maps.length, 2, '两处资格映射都必须只留 uninstall 分支，实际 ' + maps.length)
+  const old = installer.match(/\$verb = if \(\$Action -eq 'install' -or \$Action -eq 'check'\)/g) || []
+  assert.equal(old.length, 0, '旧 install/check 映射必须已移除')
+  // 说明：可选 PowerShell 解析器语法检查**不在此处执行**——扁平字符串传参易假失败（空 stderr/引号与 [ref] 语义），
+  // 且它是可选增强；本用例只做上面这些真实源文本的静态合同断言（不执行脚本、不联网、不启进程）。
+})

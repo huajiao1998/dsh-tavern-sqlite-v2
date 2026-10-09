@@ -18,7 +18,6 @@ fs.mkdirSync(out, { recursive: true })
 const packRoot = path.join(out, 'package'); fs.mkdirSync(packRoot)
 const { packageFiles } = await import('../deploy/maintenance/runner.mjs')
 const { assertPackageDependencies } = await import('../deploy/maintenance/driver.mjs')
-const { loadAuthorCleanImages, assertAuthorRecoveryCoverage } = await import('../deploy/maintenance/residual-uninstall.mjs')
 const { maintenanceTargets } = await import('../deploy/standard-seams.mjs')
 const { RELEASE_GUIDE, releaseManifestJson } = await import('./release-manifest.mjs')
 const packFilter = rel => rel !== 'README.md' && rel !== 'INSTALL.zh-CN.md' && rel !== '安装指南.md' && rel !== 'install.log' && !rel.endsWith(path.sep + 'install.log') && !rel.startsWith('test' + path.sep)
@@ -42,14 +41,19 @@ fs.writeFileSync(path.join(packRoot, RELEASE_GUIDE), fs.readFileSync(path.join(r
   const missing = expected.filter(rel => !actual.includes(rel))
   if (missing.length) throw Error('发行包不完整：缺少 ' + missing.length + ' 个文件（例：' + missing.slice(0, 3).join('、') + '）；拒绝出包')
   assertPackageDependencies(JSON.parse(fs.readFileSync(path.join(packRoot, 'package.json'), 'utf8')), packRoot)
-  // —— 目录覆盖硬闸（防 TARGETS 新增后卸载破损）：与真实卸载同一 trustedImages 校验路径 ——
-  // 受管目标在任一随包 tree 缺键（除 OPTIONAL/OWNED 显式白名单）、越界键、字节/摘要不符、前像含插件代码
-  // 都在这里直接 fail，拒绝出包。adapter 用本包名＋真实维护目标集，不导入 CLI。
-  const catalog = loadAuthorCleanImages(path.join(packRoot, 'deploy', 'maintenance', 'author-clean-images.json.gz'))
-  assertAuthorRecoveryCoverage({ catalog, adapter: { packageName: pkg.name, targets: maintenanceTargets } })
-  for (const required of ['deploy/maintenance/residual-uninstall.mjs', 'deploy/maintenance/residual-assembly.mjs']) {
-    if (!fs.existsSync(path.join(packRoot, required))) throw Error('发行包缺兜底卸载模块：' + required)
+  // —— 阶段③门禁：块机制必需模块存在性/声明完整性 + 旧资产路径禁重流入 ——
+  // 不再读旧 catalog、不要求旧 residual-uninstall 模块、不做 SHA 增量、不运行块预演（发布前检查只做存在性）。
+  for (const required of [
+    'deploy/standard-seams.mjs', 'deploy/standard-seam-transforms.mjs', 'deploy/comment-seam-blocks.mjs', 'deploy/comment-seam-plan.mjs',
+    'deploy/comment-seam-descriptors.mjs', 'deploy/comment-seam-files.mjs', 'deploy/maintenance.mjs', 'deploy/maintenance/source.mjs',
+    'deploy/maintenance/runner.mjs', 'deploy/maintenance/driver.mjs', 'deploy/maintenance/residual-assembly.mjs',
+    'lib/vendor/manifest.json', 'lib/vendor/acorn/acorn.mjs',
+  ]) if (!fs.existsSync(path.join(packRoot, required)) || !actual.includes(required.split('/').join(path.sep))) throw Error('发行包缺块机制必需模块/声明：' + required + '；拒绝出包')
+  // 旧资产/旧模块名单（阶段③退役）：路径级拒绝，不读内容、不做摘要。
+  for (const retired of ['deploy/maintenance/author-clean-images.json.gz', 'deploy/author-compatibility.mjs', 'deploy/author-rebase-plan.mjs', 'deploy/author-runtime-manifest.mjs', 'deploy/maintenance/preimage-recovery.mjs', 'deploy/maintenance/residual-uninstall.mjs']) {
+    if (fs.existsSync(path.join(packRoot, retired)) || actual.includes(retired.split('/').join(path.sep))) throw Error('发行包含已退役旧资产：' + retired + '；拒绝出包')
   }
+  if (!Array.isArray(maintenanceTargets) || maintenanceTargets.length < 10) throw Error('块机制有限目标清单异常（少于 10 项）：拒绝出包')
 }
 // 发行包不带包根 README.md：包根 README 是仓库门面，曾被安装说明覆盖。
 // 包内中文文件名跨平台解码不可靠（Windows tar 默认按系统代码页写条目，曾把中文名写成乱码），

@@ -1,52 +1,44 @@
-// 只验最新b741标准接缝：用随包恢复资产的官方源码组独占fixture，静态检查接缝产物（不加载SDK/业务/服务）。
+// DB 交换桥标准接缝（块机制版）：夹具＝fixtures/comment-author-tree.mjs 的真实作者源码有限复制（env DSH_TAVERN_TEST_APP 可显式指定该代）；
+// 无夹具或夹具不是目标作者代时 skip（不造 catalog API、不假造旧树字节）；记录期待改用新 files/blocks/owned 形状；不加载 SDK/业务/服务。
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
-import { createHash } from 'node:crypto'
-import { loadAuthorCleanImages } from '../deploy/maintenance/residual-uninstall.mjs'
+import { activeSource, prepareCommentAuthorTree } from './fixtures/comment-author-tree.mjs'
 import { applyStandardSeams, checkStandardSeams, uninstallStandardSeams } from '../deploy/standard-seams.mjs'
-import { AUTHOR_VERSION } from '../lib/standard-host.js'
-const B741 = 'b74135535ec0b37b11ed77f252dd034c3ce5e285'
-const NEW_APP = '04bda78eaad25adfe6979cb211a17fd85d852393'
+import { STANDARD_RECORD } from '../deploy/maintenance/source.mjs'
 const BRIDGE = 'tavern-plugin/lib/domain/storage-db-save.js'
 const INDEX = 'tavern-plugin/lib/index.js'
+const CLIENT = 'tavern-plugin/lib/client.js'
 const BRIDGE_BODY = '// [dsh-tavern-standard-owned:v1]\nimport { storagePackage } from \'./storage-package.js\'\nexport const { createDbSaveExchange, createDbSaveRegistration, createDbSaveResourceTransfer } = await storagePackage(\'db-save-exchange\')\n'
-const sha = bytes => createHash('sha256').update(bytes).digest('hex')
-function fixture(t, commit = B741) {
-  const catalog = loadAuthorCleanImages(), tree = catalog.trees.find(item => item.commit === commit)
-  assert.ok(tree, 'catalog 缺 tree：' + commit)
-  const appDir = mkdtempSync(path.join(tmpdir(), 'dsh-db-latest-seams-'))
-  t.after(() => rmSync(appDir, { recursive: true, force: true }))
-  for (const [rel, item] of Object.entries(tree.files)) {
-    if (item === null) continue
-    const target = path.join(appDir, ...rel.split('/'))
-    mkdirSync(path.dirname(target), { recursive: true })
-    writeFileSync(target, Buffer.from(item.body, 'base64'))
-  }
-  return { catalog, tree, appDir, index: path.join(appDir, ...INDEX.split('/')), bridge: path.join(appDir, ...BRIDGE.split('/')) }
+function fixture(t) {
+  const prepared = prepareCommentAuthorTree()
+  if (!prepared) return null
+  t.after(() => prepared.cleanup())
+  const file = rel => path.join(prepared.appDir, ...rel.split('/'))
+  return { appDir: prepared.appDir, original: prepared.original, index: file(INDEX), bridge: file(BRIDGE), client: file(CLIENT), record: file(STANDARD_RECORD) }
 }
-test('DB最新04bda78标准接缝接同一SQL交换资源桥', t => {
-  const f = fixture(t, NEW_APP)
-  assert.equal(AUTHOR_VERSION, f.tree.authorVersion, '作者版本与04bda78树不一致')
-  assert.equal(f.tree.authorVersion, '2.5.0')
-  // 输入必须是官方新字节（不是旧 b741 bundle）：client.js 原始字节＝catalog 新树 sha，且含新代 UI 文案
-  const clientPath = path.join(f.appDir, 'tavern-plugin', 'lib', 'client.js')
-  const clientBefore = readFileSync(clientPath)
-  assert.equal(sha(clientBefore), f.tree.files['tavern-plugin/lib/client.js'].sha256, '新代 client bundle 原始字节不是官方新字节')
-  assert.ok(clientBefore.toString('utf8').includes('导入 SillyTavern 聊天记录'), '新代 client bundle 未含新代 UI 文案')
-  assert.equal(checkStandardSeams({ appDir: f.appDir, authorVersion: AUTHOR_VERSION }).ready, false)
-  const applied = applyStandardSeams({ appDir: f.appDir, authorVersion: AUTHOR_VERSION })
+const needTree = (f, rel, literal, label) => {
+  if (!f) return '无真实作者 source fixture（DSH_TAVERN_TEST_APP 与本地 author-fixture 都不可用）'
+  if (!(f.original.get(rel) ?? '').includes(literal)) return label + '：请用 DSH_TAVERN_TEST_APP 指向该代作者源码'
+  return null
+}
+
+test('DB最新作者代标准接缝接同一SQL交换资源桥', t => {
+  const f = fixture(t)
+  const skip = needTree(f, CLIENT, '导入 SillyTavern 聊天记录', '当前夹具不是含新代 UI 文案的作者代')
+  if (skip) return t.skip(skip)
+  assert.equal(checkStandardSeams({ appDir: f.appDir }).ready, false, '未接缝树不得 ready')
+  const applied = applyStandardSeams({ appDir: f.appDir, assertStopped: () => true })
   assert.equal(applied.changed, true); assert.equal(applied.ready, true)
-  assert.equal(checkStandardSeams({ appDir: f.appDir, authorVersion: AUTHOR_VERSION }).ready, true)
-  assert.ok(readFileSync(clientPath).toString('utf8').includes('导入 SillyTavern 聊天记录'), '接缝破坏新代 client bundle 字节')
+  assert.equal(checkStandardSeams({ appDir: f.appDir }).ready, true)
+  assert.ok(readFileSync(f.client, 'utf8').includes('导入 SillyTavern 聊天记录'), '接缝破坏新代 client bundle 字节')
   const index = readFileSync(f.index, 'utf8')
-  // 新代官方语义保存：lastSubmittedPosture import＋settleUserText(knownPosture) 与姿势结算路径不得被接缝破坏
+  // 新代官方语义保存：posture import 与已知姿势结算路径不得被接缝破坏
   assert.ok(index.includes("lastSubmittedPosture, normalizePostureSubmission } from './domain/posture-submission.js'"), '新代官方 posture import 被破坏')
   assert.ok(index.includes('lastSubmittedPosture('), '新代官方姿势已知值调用被破坏')
   assert.ok(index.includes('knownPosture'), '新代 settleUserText knownPosture 语义被破坏')
-  // b741 原有 DB 锚点语义保留（唯一入口 + 删局消费在 registry.remove 之前 + 卡校验契约）
+  // DB 锚点语义保留：唯一入口 + 删局消费在 registry.remove 之前 + 卡校验契约
   assert.equal(index.split('// [dsh-tavern-db-save:v1]').length - 1, 1)
   assert.ok(index.includes('  async function exportGameSave(sessionId, options = {}) {\n    return await dbSaveExchange.exportGameSave(sessionId, options)\n  }'))
   assert.ok(index.includes('  async function importGameSave(args) {\n    return await dbSaveExchange.importGameSave(args)\n  }'))
@@ -54,32 +46,42 @@ test('DB最新04bda78标准接缝接同一SQL交换资源桥', t => {
   assert.ok(deleteCall > 0 && deleteCall < index.indexOf('const result = await conversationRegistry.remove(chatId)'), '删局消费未在 registry.remove 之前')
   assert.ok(index.includes("validateCard: async payload => { const card = await cardPreparation.create({ kind: 'import', payload }); return { raw: cardPreparation.present({ card, as: 'raw' }), definition: cardPreparation.project(card) } }"))
 })
-test('DB最新b741标准接缝接同一SQL交换资源桥', t => {
+
+test('DB标准接缝桥为owned-new且卸载逐字节还原', t => {
   const f = fixture(t)
-  assert.equal(AUTHOR_VERSION, f.tree.authorVersion, '作者版本与b741树不一致')
-  assert.equal(checkStandardSeams({ appDir: f.appDir, authorVersion: AUTHOR_VERSION }).ready, false)
-  const applied = applyStandardSeams({ appDir: f.appDir, authorVersion: AUTHOR_VERSION })
-  assert.equal(applied.changed, true); assert.equal(applied.ready, true)
-  // apply 之后复检必须 ready：final index 派生链含 db-save transform 才算接齐
-  assert.equal(checkStandardSeams({ appDir: f.appDir, authorVersion: AUTHOR_VERSION }).ready, true)
-  const index = readFileSync(f.index, 'utf8'), bridge = readFileSync(f.bridge, 'utf8')
-  // ① 桥：3 factory 生成体逐字，且与 catalog.ownedFiles 可信字节一致
+  const skip = needTree(f, INDEX, "case 'exportGameSave': return await exportGameSave(", '当前夹具不是目标作者代')
+  if (skip) return t.skip(skip)
+  assert.equal(applyStandardSeams({ appDir: f.appDir, assertStopped: () => true }).changed, true)
+  assert.equal(checkStandardSeams({ appDir: f.appDir }).ready, true)
+  const rawIndex = readFileSync(f.index, 'utf8'), bridge = readFileSync(f.bridge, 'utf8')
+  // 注释块协议：raw 里 BEGIN/END 标记与 ORIGINAL 注释会打断连续字面 ⇒ 业务字节一律看 ACTIVE 投影；
+  // raw 只承担"块标记计数"这类协议层断言（marker 恰一处、RPC case 不重复等）。
+  const index = activeSource(rawIndex, INDEX)
+  // ① 桥：3 factory 生成体逐字；新记录里必须以 owned-new 承载同一字节（取代旧 catalog.ownedFiles 摘要比较）
   assert.equal(bridge, BRIDGE_BODY)
-  assert.equal(sha(Buffer.from(bridge, 'utf8')), f.catalog.ownedFiles[BRIDGE][0])
-  // ①b index：marker 唯一 + 3 factory import + 3 个 dbSave 常量装配
-  assert.equal(index.split('// [dsh-tavern-db-save:v1]').length - 1, 1)
+  const record = JSON.parse(readFileSync(f.record, 'utf8'))
+  assert.equal(record.format, 1); assert.equal(record.owner, 'dsh-tavern-sqlite-v2')
+  assert.deepEqual(Object.keys(record).sort(), ['files', 'format', 'owned', 'owner'])
+  assert.equal(record.owned[BRIDGE]?.mode, 'owned-new', '自有桥必须以 owned-new 记录')
+  // 新契约：owned 记录只留 metadata 四键（不存 body）；实现字节从现场 owned-file 块的 ACTIVE 投影读。
+  assert.deepEqual(Object.keys(record.owned[BRIDGE]).sort(), ['format', 'mode', 'owner', 'rel'], 'owned 记录只留 metadata 四键')
+  assert.equal(Object.hasOwn(record.owned[BRIDGE], 'body'), false, 'owned 记录不得保存 body 历史')
+  assert.equal(activeSource(bridge, BRIDGE), BRIDGE_BODY, 'ACTIVE 投影必须逐字等于自有实现（业务字节不变）')
+  assert.ok(record.files[INDEX]?.blocks?.length >= 1, 'index 必须以块记录承载接缝')
+  assert.equal(record.files[BRIDGE], undefined, '自有新文件不进 blocks 表')
+  // ①b index：marker 唯一（raw 计数）+ 3 factory import + 3 个 dbSave 常量装配（ACTIVE 投影看字节）
+  assert.equal(rawIndex.split('// [dsh-tavern-db-save:v1]').length - 1, 1)
+  assert.equal(rawIndex.split('[dsh-tavern-seam:BEGIN]').length - 1, rawIndex.split('[dsh-tavern-seam:END]').length - 1)
   assert.ok(index.includes("import { createDbSaveExchange, createDbSaveRegistration, createDbSaveResourceTransfer } from './domain/storage-db-save.js'"))
   assert.ok(index.includes('const dbSaveExchange = createDbSaveExchange({'))
-  // ② index：唯一两个 consumer RPC transport 保留、images 传输语义不改、原版旧函数体不残留
+  // ② 两个 consumer RPC transport 保留、images 传输语义不改
   assert.equal(index.split("case 'exportGameSave'").length - 1, 1)
   assert.equal(index.split("case 'importGameSave'").length - 1, 1)
-  // b741 官方传输语义逐字保留：images !== false 与 args 透传不被接缝改写
   assert.ok(index.includes("case 'exportGameSave': return await exportGameSave(args && args.sessionId, { images: args && args.images !== false })"))
   assert.ok(index.includes("case 'importGameSave': return await importGameSave(args)"))
-  // 旧函数体已被唯一新入口替换（不残留原版实现）
   assert.ok(index.includes('  async function exportGameSave(sessionId, options = {}) {\n    return await dbSaveExchange.exportGameSave(sessionId, options)\n  }'))
   assert.ok(index.includes('  async function importGameSave(args) {\n    return await dbSaveExchange.importGameSave(args)\n  }'))
-  // ③ 登记补偿与资源桥都接在同一注入点，sceneFiles 旧 dep 不残留
+  // ③ 登记补偿与资源桥接在同一注入点，sceneFiles 旧 dep 不残留
   for (const literal of [
     'const dbSaveRegistration = createDbSaveRegistration({ store: profileData })',
     'const dbSaveResources = createDbSaveResourceTransfer({',
@@ -91,12 +93,12 @@ test('DB最新b741标准接缝接同一SQL交换资源桥', t => {
     'await tavernScriptHostAdapter.whenIdle(chat.sessionId)'
   ]) assert.ok(index.includes(literal), '缺接缝字面：' + literal)
   assert.equal(index.includes('sceneFiles:'), false)
-  // 删局消费接在真实 b741 deleteChat 上，且位于 registry.remove 之前（只 stage 路径，不执行删除）
+  // 删局消费接在真实 deleteChat 上，位于 registry.remove 之前且唯一
   const deleteCall = index.indexOf('dbSaveDeleteFootprint(chatId, [footprint.foregroundSessionId')
   assert.ok(deleteCall > 0, '缺删局预检消费')
   assert.ok(deleteCall < index.indexOf('const result = await conversationRegistry.remove(chatId)'), '删局预检未在 registry.remove 之前')
   assert.equal(index.split('dbSaveDeleteFootprint(chatId, [footprint.foregroundSessionId').length - 1, 1)
-  // ④ 入口 renderer/image anchor 与 Set cache consumer 静态保留：官方字节未被接缝串改
+  // ④ 官方锚点与 Set cache consumer 未被串改
   for (const literal of [
     "import { computeSceneTarget, createSceneIllustrations, sceneTarget } from './domain/scene-illustration.js'",
     'const importingGameSaves = new Set()',
@@ -105,32 +107,11 @@ test('DB最新b741标准接缝接同一SQL交换资源桥', t => {
   ]) assert.ok(index.includes(literal), '官方锚点被串改：' + literal)
   assert.equal(index.split('const importingGameSaves = new Set()').length - 1, 1)
   assert.equal(index.split('const deletedChatIds = new Set()').length - 1, 1)
-  // ⑤ 非接缝目标的官方字节保持逐字（package.json 不在接缝写集内）
-  const pkg = readFileSync(path.join(f.appDir, 'tavern-plugin', 'package.json'), 'utf8')
-  assert.equal(sha(Buffer.from(pkg, 'utf8')), f.tree.files['tavern-plugin/package.json'].sha256)
-})
-
-// 新增（独立具名）：新受管目标的标准装配前像记录与卸载字节恢复（只此单名，旧两名不改）
-test('DB删局模块标准装配记录前像且卸载恢复官方字节', t => {
-  const f = fixture(t, B741)
-  const RECORD = '.tavern-standard-seams.json'
-  const GAME = 'tavern-plugin/lib/domain/game-footprint.js'
-  const official = Buffer.from(f.tree.files[GAME].body, 'base64')
-  assert.equal(sha(official), f.tree.files[GAME].sha256, '前置：官方 game 字节身份')
-  assert.equal(applyStandardSeams({ appDir: f.appDir, authorVersion: AUTHOR_VERSION }).changed, true)
-  const record = JSON.parse(readFileSync(path.join(f.appDir, RECORD), 'utf8'))
-  // 前像/后像都记录该新受管目标：before＝官方原字节，after＝实际装配后字节
-  assert.ok(record.before && Object.hasOwn(record.before, GAME), '记录缺 before 前像：' + GAME)
-  assert.ok(record.after && Object.hasOwn(record.after, GAME), '记录缺 after 后像：' + GAME)
-  const beforeBytes = Buffer.from(record.before[GAME].body ?? record.before[GAME], 'base64')
-  assert.deepEqual(beforeBytes, official, 'before 前像必须是官方原字节')
-  const afterSha = record.after[GAME].sha256 ?? record.after[GAME]
-  assert.equal(sha(readFileSync(path.join(f.appDir, GAME))), afterSha, 'after 后像必须是当前实际字节')
-  // 装配后的 game 文件必须带真实接缝：factory 回调字段与 SQL 目标判定
-  const gameNow = readFileSync(path.join(f.appDir, GAME), 'utf8')
-  assert.ok(gameNow.includes('canDeleteDeferredPath'), 'seamed game 文件缺 factory 回调字段')
-  assert.ok(gameNow.includes('const sqlTarget ='), 'seamed game 文件缺 SQL 目标判定')
-  // 卸载后该新受管目标必须逐字节恢复官方原像
-  assert.equal(uninstallStandardSeams({ appDir: f.appDir }).changed, true)
-  assert.deepEqual(readFileSync(path.join(f.appDir, GAME)), official, '卸载后必须恢复官方 game 字节')
+  // ⑤ 卸载必须按块记录与 owned body 逐字节还原到接缝前
+  assert.equal(uninstallStandardSeams({ appDir: f.appDir, assertStopped: () => true }).changed, true)
+  const bridgeOriginal = f.original.get(BRIDGE)
+  if (bridgeOriginal === undefined) assert.equal(existsSync(f.bridge), false, '卸载后 owned-new 文件必须被删除')
+  else assert.equal(readFileSync(f.bridge, 'utf8'), bridgeOriginal, '卸载后桥必须逐字节还原作者原文')
+  assert.equal(readFileSync(f.index, 'utf8'), f.original.get(INDEX), '卸载后 index 必须逐字节还原作者原文')
+  assert.equal(checkStandardSeams({ appDir: f.appDir }).ready, false, '卸载后不得 ready')
 })

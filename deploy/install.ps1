@@ -220,8 +220,8 @@ if (op.host !== 'cli') throw Error('该目录实际是桌面版宿主，不能�
 const runtime = runtimeFor(op);
 console.log(JSON.stringify({ host: op.host, cli: runtime.cli }));
 '@
-  # 与桌面同一动作映射：install/check 按 install 判资格；uninstall/update（先卸旧）按 uninstall 判资格。
-  $verb = if ($Action -eq 'install' -or $Action -eq 'check') { 'install' } else { 'uninstall' }
+  # 统一新接口：只有 uninstall 按卸资格；install/update/check 都按 **install** 动作判资格（换代由驱动单命令内清旧装配）。
+  $verb = if ($Action -eq 'uninstall') { 'uninstall' } else { 'install' }
   $request = @{ action = $verb; home = $tavern.home } | ConvertTo-Json -Compress
   $encoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($request))
   $saved = $env:ELECTRON_RUN_AS_NODE
@@ -260,8 +260,8 @@ if (op.host !== 'desktop') throw Error('桌面候选未通过实际宿主判定'
 const runtime = runtimeFor(op);
 console.log(JSON.stringify({ layout: op.desktopLayout, runtimeRoot: runtime.desktop.root }));
 '@
-  # 菜单/更新尚未决定安装动作，先按卸载资格识别，避免因安装peer错误堵死安全卸载。
-  $verb = if ($Action -eq 'install' -or $Action -eq 'check') { 'install' } else { 'uninstall' }
+  # 统一新接口：只有 uninstall 按卸资格；install/update/check 都按 **install** 动作判资格（换代由驱动单命令内清旧装配）。
+  $verb = if ($Action -eq 'uninstall') { 'uninstall' } else { 'install' }
   $request = @{ action = $verb; home = $tavern.home; desktopApp = $DesktopApp } | ConvertTo-Json -Compress
   $encoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($request))
   $saved = $env:ELECTRON_RUN_AS_NODE
@@ -404,7 +404,8 @@ function Do-Check([hashtable]$tavern, [hashtable]$node, [string]$entry) {
 
 function Do-Update([hashtable]$tavern, [hashtable]$node) {
   Say ('本机包版本：' + $localVersion)
-  # 更新=先卸旧再装新（两次维护），和安装/卸载同一条 CLI 生命周期：这里提示一次，不代停/代启。
+  # 更新＝**一次统一 install**：同包换代由驱动在单命令内先清旧装配再装新代（不再"先卸再装"两次维护事务）。
+  # ≤0.3.7 旧机制不代卸：现场旧记录/旧 marker 会被 source 门禁拒绝并提示先用旧版 CLI 卸载，这里只提示一次，不代停/代启。
   Show-CliServiceNotice $tavern
   Say '联网查询官方最新版本…'
   $release = Get-LatestRelease
@@ -414,13 +415,11 @@ function Do-Update([hashtable]$tavern, [hashtable]$node) {
     Say ('官方最新版本：' + $latest)
     $cmp = Compare-Version $latest $localVersion
     if ($cmp -gt 0) {
-      Say '发现新版本，使用官方包安装（先卸载旧代，再安装新版；存档与用户配置不动）'
+      Say '发现新版本，使用官方包更新（单次 install 完成换代；存档与用户配置不动）'
       $remote = Save-ReleasePackage $release
       if ($remote) {
-        $code = Invoke-Maintenance $tavern $node $remote 'uninstall'
-        if ($code -ne 0) { Fail ('卸载旧代失败（exit ' + $code + '）：已停止，未安装新版') }
         $code = Invoke-Maintenance $tavern $node $remote 'install'
-        if ($code -ne 0) { Fail ('安装新版本失败（exit ' + $code + '）：请把上面的输出发给维护者') }
+        if ($code -ne 0) { Fail ('更新到 ' + $latest + ' 失败（exit ' + $code + '）：若现场是 ≤0.3.7 旧机制，请先用**旧版插件自带 CLI** 完整卸载后再安装（新版拒绝旧记录/旧标记，不做自动接管）；其余请把上面的输出发给维护者') }
         Ok ('已更新到 ' + $latest + '。')
         if ($tavern.kind -eq 'desktop') { Say '  桌面版：请从托盘**完全退出**酒馆后重新启动，再从 Profile 菜单进入 tavern。' }
         Show-CliServiceNotice $tavern -After
@@ -435,9 +434,9 @@ function Do-Update([hashtable]$tavern, [hashtable]$node) {
   } else {
     Warn '联网查询失败（网络不可达或被拦截）：改用本包覆盖安装'
   }
-  $code = Invoke-Maintenance $tavern $node $localEntry 'uninstall'
-  if ($code -ne 0) { Fail ('卸载旧代失败（exit ' + $code + '）：已停止，未安装') }
-  Do-Install $tavern $node $localEntry -QuietNotice
+  # 本包覆盖：同样**单次 install**（驱动按现场区块清残留后重接，不再单独代卸旧代）。
+  $code = Invoke-Maintenance $tavern $node $localEntry 'install'
+  if ($code -ne 0) { Fail ('覆盖安装失败（exit ' + $code + '）：≤0.3.7 旧机制请先用旧版插件自带 CLI 完整卸载后再安装；其余请把上面的输出发给维护者') }
   Show-CliServiceNotice $tavern -After
 }
 

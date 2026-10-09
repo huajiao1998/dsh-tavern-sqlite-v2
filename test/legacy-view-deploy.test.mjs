@@ -1,11 +1,12 @@
-// 最小粒度离线施缝闸：真实缩进锚点、幂等、失败关闭、事务回滚；只创建本测试独占目录。
+// 最小粒度离线施缝闸：真实缩进锚点、幂等与 fail-closed；纯 transform 断言（不再含 fs 生命周期/卸缝用例）
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+
 import path from 'node:path'
+import { readFileSync } from 'node:fs'
+import { transformStorageIndex } from '../deploy/apply-seams.mjs'
+import { prepareCommentAuthorTree } from './fixtures/comment-author-tree.mjs'
 import vm from 'node:vm'
-import { applyLegacyViewSeams, transformLegacyIndex, transformLegacyRegistry, transformLegacyInitialization,
-  transformLegacyViewReader, LEGACY_VIEW_SHIM } from '../deploy/apply-legacy-view-seams.mjs'
+import { transformLegacyIndex, transformLegacyRegistry, transformLegacyInitialization, transformLegacyViewReader, LEGACY_VIEW_SHIM } from '../deploy/apply-legacy-view-seams.mjs'
 
 const index = `import { createChatPersistence } from './domain/chat-persistence.js'
 export async function apply(ctx) {
@@ -157,36 +158,6 @@ const actionStart = actionsV3.indexOf("  ctx.provide('tavernSaveActions'")
 const actionEnd = actionsV3.indexOf('  const chatHistoryImporter', actionStart)
 // v2 线上真身（2026-09-30 施缝形态）：没有 readSourceSessionTitle 依赖；升级路径据此验证。
 // 区域含标记注释行（SAVE_SERVICE 的首行就是它），否则 v3 标记会被留在原地。
-const saveRegion = text => text.slice(text.indexOf('  // [dsh-tavern-save-actions:v3]'), text.indexOf('  const chatHistoryImporter'))
-const V2_SAVE_SERVICE = `  // [dsh-tavern-save-actions:v2] 唯一同源占位与新档命名；只写目标。
-  ctx.provide('tavernSaveActions', createAuthorSaveActions({
-    chats: chatPersistence,
-    resolveChatId: async sessionId => (await readSessionMap())[str(sessionId)],
-    prepareFork: prepareConversationFork, completeFork: forkChat,
-    validateTargetNaming: async () => {
-      const titles = ctx.get('sessionTitle')
-      if (!titles || typeof titles.rename !== 'function' || typeof sessionStore.flush !== 'function') throw new Error('宿主缺少会话命名/持久化接口；尚未创建分叉')
-      if (typeof chatPersistence.update !== 'function' || typeof conversationRegistry.sync !== 'function') throw new Error('宿主缺少聊天命名/摘要同步接口；尚未创建分叉')
-    },
-    renameTargetSession: async (sessionId, title) => {
-      const target = sessionStore.get(sessionId) || agentRegistry.get(sessionId)?.session
-      if (!target || isReadOnlySession(sessionId)) throw new Error('数据库分叉目标会话不可写，未重命名')
-      const titleService = ctx.get('sessionTitle')
-      if (!titleService || typeof titleService.rename !== 'function') throw new Error('缺少原生会话标题服务')
-      const accepted = titleService.rename(target, title)
-      await sessionStore.flush(target)
-      if (typeof accepted?.title !== 'string' || !accepted.title) throw new Error('宿主未返回接受的标题')
-      return accepted.title
-    },
-    setTargetChatTitle: async (chatId, title) => {
-      legacyViewSeams.assertWritable(chatId, '数据库分叉命名')
-      const saved = await chatPersistence.update(chatId, chat => ({ ...chat, title }), { source: 'sqlite-fork.title' })
-      if (!saved || saved.title !== title) throw new Error('数据库分叉标题未写入')
-      await conversationRegistry.sync(saved)
-      return saved.title
-    }
-  }))
-`
 let actionDeps
 const titleTrace = []
 const targetSession = { id: 'session-target' }
@@ -241,17 +212,6 @@ assert.deepEqual(titleTrace, ['rename:DB.原名', 'flush', 'chat-title', 'sync']
 await assert.rejects(() => actionDeps.renameTargetSession('session-source', 'DB.不得写'), /不可写/)
 await assert.rejects(() => actionDeps.setTargetChatTitle('chat-source', 'DB.不得写'), /原件只读/)
 assert.equal(titleTrace.length, 4, '原件不调用任何写入器')
-// 升级路径：已施过 v2 的线上树（无 readSourceSessionTitle）必须**就地**补依赖并升到 v3，
-// 且与 v1→v3 的产物逐字节收敛（同一 transform ⇒ --check 判脏、apply 后幂等）。
-const v2Host = actionsV3.replace(saveRegion(actionsV3), V2_SAVE_SERVICE)
-assert.notEqual(v2Host, actionsV3, 'v2 fixture 必须真的把 v3 块换回 v2 块')
-assert.match(v2Host, /\[dsh-tavern-save-actions:v2\]/)
-assert.doesNotMatch(v2Host, /readSourceSessionTitle:/)
-assert.equal(v2Host.split('// [dsh-tavern-save-actions:v2]').length, 2, 'v2 fixture 只能有一个 v2 标记')
-const upgraded = transformLegacyIndex(v2Host)
-assert.equal(upgraded, actionsV3, 'v2→v3 必须与 v1→v3 收敛到同一字节')
-assert.equal(transformLegacyIndex(upgraded), upgraded, 'v2→v3 升级必须幂等')
-assert.throws(() => transformLegacyIndex(upgraded.replace('readSourceSessionTitle:', 'readSourceSessionTitleX:')), /v3 标记存在但不完整/)
 assert.match(LEGACY_VIEW_SHIM, /createRequire\(path\.join\(home, 'profiles', 'tavern', 'package\.json'\)\)/)
 assert.match(LEGACY_VIEW_SHIM, /profileRequire\.resolve\('dsh-tavern-sqlite-v2\/' \+ name\)/)
 assert.doesNotMatch(LEGACY_VIEW_SHIM, /from 'dsh-tavern-sqlite-v2\//)
@@ -263,7 +223,7 @@ assert.match(LEGACY_VIEW_SHIM, /export async function installAuthorHostSessionPa
 assert.ok(transformLegacyIndex(index).indexOf('await initializeAuthorLegacyWorkspaces(ctx)') > transformLegacyIndex(index).indexOf('await installAuthorHostSessionPatch(ctx)'),'workspace stat 必须在作者宿主补丁完成之后')
 assert.throws(()=>transformLegacyIndex(transformLegacyIndex(index)+'\nmigrateInstalledLegacySessions()'),/仍有启动迁移/)
 // 升级路径：已施缝但作者仍带官方安装调用（线上真实形态）→ 必须就地改成我们的入口，且复跑幂等
-const legacyDeployed = transformLegacyIndex(index).replace('await installAuthorHostSessionPatch(ctx)', "await installHostSessionPatch({\n    persistence,\n    query: ctx.get('sessionQuery'),\n  })").replace("import { legacyViewSeams", "import { installHostSessionPatch } from './domain/host-session-patch.js'\nimport { legacyViewSeams")
+const legacyDeployed = transformLegacyIndex(index).replace('await installAuthorHostSessionPatch(ctx)', "await installHostSessionPatch({\n    persistence,\n    query: ctx.get('sessionQuery'),\n  })").replace("\nimport { legacyViewSeams")
 assert.match(legacyDeployed, /installHostSessionPatch\(/)
 assert.doesNotMatch(transformLegacyIndex(legacyDeployed), /installHostSessionPatch\s*\(/)
 assert.match(transformLegacyIndex(legacyDeployed), /await installAuthorHostSessionPatch\(ctx\)/)
@@ -273,38 +233,19 @@ assert.throws(()=>transformLegacyIndex(index.replace('    else await migrateInst
 assert.match(transformLegacyReaderForTest(), /\['sessionId', 'cardPath'/)
 function transformLegacyReaderForTest() { return transformLegacyViewReader(reader) }
 
-const own = mkdtempSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '.legacy-view-deploy-'))
-try {
-  const domain = path.join(own,'tavern-plugin','lib','domain')
-  mkdirSync(domain,{recursive:true})
-  writeFileSync(path.join(own,'package.json'),'{"type":"module"}\n','utf8')
-  const fixtures = new Map([
-    ['tavern-plugin/lib/index.js',index],
-    ['tavern-plugin/lib/domain/tavern-conversation-registry.js',registry],
-    ['tavern-plugin/lib/domain/conversation-initialization.js',initialization],
-    ['tavern-plugin/lib/domain/session-view-reader.js',reader]
-  ])
-  for (const [relative,text] of fixtures) writeFileSync(path.join(own,relative),text,'utf8')
-  const manifest = path.join(own,'.tavern-legacy-view-seams.json')
-  const shim = path.join(domain,'legacy-view-seams.js')
-  const needed = applyLegacyViewSeams({appDir:own,check:true})
-  assert.equal(needed.needsApply,true); assert.equal(needed.changed,false); assert.equal(existsSync(manifest),false); assert.equal(existsSync(shim),false)
-  for (const [relative,text] of fixtures) assert.equal(readFileSync(path.join(own,relative),'utf8'),text)
-  let checked = 0
-  assert.throws(() => applyLegacyViewSeams({appDir:own,syntaxCheck:() => { if(++checked === 2)throw new Error('模拟语法失败') }}), /模拟语法失败/)
-  assert.equal(existsSync(manifest),false); assert.equal(existsSync(shim),false)
-  for (const [relative,text] of fixtures) {
-    assert.equal(readFileSync(path.join(own,relative),'utf8'),text,'失败必须恢复本次前像')
-    assert.equal(existsSync(path.join(own,relative+'.legacy-view-seams.backup')),false,'失败不得留下未知备份')
-  }
-  const applied = applyLegacyViewSeams({appDir:own})
-  assert.equal(applied.changed,true); assert.equal(applied.needsApply,false); assert.equal(existsSync(manifest),true)
-  assert.equal(readFileSync(shim,'utf8'),LEGACY_VIEW_SHIM)
-  assert.equal(applyLegacyViewSeams({appDir:own,check:true}).needsApply,false)
-  assert.equal(applyLegacyViewSeams({appDir:own}).changed,false)
-  const removed = applyLegacyViewSeams({appDir:own,uninstall:true})
-  assert.equal(removed.removed,true); assert.equal(existsSync(manifest),false); assert.equal(existsSync(shim),false)
-  for (const [relative,text] of fixtures) assert.equal(readFileSync(path.join(own,relative),'utf8'),text)
-  assert.equal(applyLegacyViewSeams({appDir:own,uninstall:true}).changed,false)
-} finally { rmSync(own,{recursive:true,force:true}) }
-console.log('legacy-view-deploy：锚点/幂等/只查/回滚/语法/卸缝定向断言全部通过')
+console.log('legacy-view-deploy：锚点/幂等/只查/业务断言全部通过')
+
+// S1/S2 施缝代身份（原 main-legacy-seams-lifecycle 唯一的业务点，随旧 CLI 用例一并迁移）：反向还原必须逐字节回到作者原样。
+{
+  const tree = prepareCommentAuthorTree()
+  assert.ok(tree, '缺少作者 source fixture：设 DSH_TAVERN_TEST_APP 或准备本地 author-fixture')
+  const raw = readFileSync(path.join(tree.appDir, 'tavern-plugin/lib/index.js'), 'utf8')
+  const restored = transformStorageIndex(raw)
+    .replace("import { createChatSqliteStore } from './domain/chat-sqlite-store.js'\n", '')
+    .replace(/  \/\/ \[dsh-tavern-sqlite-v2\] 作者原存储[^\n]*\n  const authorChatStore = (createChatJournalStore\([^\n]*\))\n  \/\/ \[dsh-tavern-sqlite-v2\] 我们的行级 SQLite store[^\n]*\n  const chatJournalStore = createChatSqliteStore\([^\n]*\)\n/, '  const chatJournalStore = $1\n')
+    .replace("ctx.effect(() => () => { if (typeof authorChatStore.flushMaintenance === 'function') authorChatStore.flushMaintenance() },", 'ctx.effect(() => () => chatJournalStore.flushMaintenance(),')
+    .replace(/  \/\/ \[dsh-tavern-sqlite-v2\] 把聊天存储接口暴露[^\n]*\n  ctx\.provide\('tavernChats', chatPersistence\)\n/, '')
+  assert.equal(restored, raw, 'S1/S2 反向还原必须逐字节回到作者原样')
+  tree.cleanup()
+}
+console.log('legacy-view-deploy：锚点/幂等/fail-closed/S1S2 身份断言全部通过')

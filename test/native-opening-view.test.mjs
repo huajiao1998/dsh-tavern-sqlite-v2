@@ -212,8 +212,10 @@ test('S2-6 transform 唯一锚点/幂等自校验/半应用拒绝/生成块齐�
   const bridgeAt = applied.indexOf(REQUIRED_BLOCKS.bridge)
   const stateViewAt = applied.indexOf('const sessionStateView = createSessionStateView({')
   assert.ok(bridgeAt !== -1 && stateViewAt !== -1 && bridgeAt < stateViewAt, '桥必须先于 sessionStateView（TDZ）')
-  assert.ok(applied.includes('chatJournalStore.readActivitySummary({ chatId: window.chat.id'), '缺消费者 guard')
-  assert.ok(applied.includes('拒绝返回旧窗口'), 'stale 必须抛明确错误而非 fallback')
+  assert.ok(applied.includes('let openingFastWindow = window'), '缺快路径竞态重投影循环（issue #6）')
+  assert.ok(applied.includes('chatJournalStore.readActivitySummary({ chatId: openingFastWindow.chat.id'), '缺消费者 guard')
+  assert.ok(applied.includes('连续过期'), '竞态重投影用尽必须响亮报错')
+  assert.ok(applied.includes('拒绝返回旧窗口'), '耗尽报错必须拒绝返回旧窗口而非 fallback')
   assert.throws(() => applyNativeDataTransform(applied + '\n// [dsh-tavern-native-data-transform:v1]', options), /半应用|标记数异常/)
 })
 

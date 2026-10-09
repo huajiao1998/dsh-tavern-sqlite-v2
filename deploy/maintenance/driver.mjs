@@ -14,13 +14,13 @@ import { STANDARD_RECORD } from './source.mjs'
 import { AUTHOR_VERSION } from '../../lib/standard-host.js'
 import { residualAssembly } from './residual-assembly.mjs'
 const family = ['dsh-tavern-storage-sqlite', 'dsh-tavern-storage-sqlite-v1', 'dsh-tavern-storage-sqlite-v2', 'dsh-tavern-sqlite-v1', 'dsh-tavern-sqlite-v2']
-// 运行时依赖**必须为零**：四个解析器依赖（lodash/yaml/json5/jsonrepair）已 vendor 进包内
+// 运行时依赖**必须为零**：四个解析器依赖（lodash/yaml/json5/jsonrepair）与注释块 lexer（acorn）已 vendor 进包内
 // （见 lib/vendor/VENDOR.md + manifest.json）。零依赖是"任何宿主都能离线安装"的前提：
 // 桌面版宿主的 pnpm 离线元数据缓存里没有 lodash/json5/jsonrepair，声明依赖会 ERR_PNPM_NO_OFFLINE_META。
-const VENDOR_ENTRIES = { lodash: 'lib/vendor/lodash/lodash.min.js', json5: 'lib/vendor/json5/index.mjs', jsonrepair: 'lib/vendor/jsonrepair/esm/index.js', yaml: 'lib/vendor/yaml/dist/index.js' }
+const VENDOR_ENTRIES = { lodash: 'lib/vendor/lodash/lodash.min.js', json5: 'lib/vendor/json5/index.mjs', jsonrepair: 'lib/vendor/jsonrepair/esm/index.js', yaml: 'lib/vendor/yaml/dist/index.js', acorn: 'lib/vendor/acorn/acorn.mjs' }
 /**
- * 供应链护栏（安装前必过）：包只能有零运行时依赖，且 vendor 账本与四个入口文件必须齐全。
- * 任一不符即拒绝安装——不放宽依赖政策。
+ * 供应链护栏（安装前必过）：包只能有零运行时依赖，且 vendor 账本与全部入口文件必须齐全。
+ * 任一不符即拒绝安装——不放宽依赖政策。acorn 为阶段③块机制 lexer，身份元数据见 manifest（本阶段不补 SHA）。
  */
 export function assertPackageDependencies(pkg, root) {
   const declared = Object.keys(pkg.dependencies || {})
@@ -341,7 +341,7 @@ function createStoppedDriver(op, adapter, packageRoot, evidence, budget, { mode,
       for (const name of family) if (name !== adapter.packageName && (prior.deps[name] || prior.bundles.includes(name))) throw Error('另一版本线已安装，先用所属包卸载')
       const author = json(path.join(op.app, 'tavern-plugin', 'package.json'))
       if (author.name !== 'dsh-tavern-plugin') throw Error('作者版本未适配')
-      if (!cleanResidual && author.version !== AUTHOR_VERSION) {
+      if (action === 'install' && !cleanResidual && author.version !== AUTHOR_VERSION) {
         // 作者版本变化不再直接拒：用共享**只读计划**判定“契约等价/已施缝同代”（不写盘、不 import 作者）。
         const plan = typeof adapter.inspectStandardSeamsPlan === 'function' ? adapter.inspectStandardSeamsPlan({ appDir: op.app, authorVersion: author.version }) : null
         if (!plan || (plan.ready !== true && plan.compatible?.ok !== true)) throw Error('作者版本未适配且契约不等价：' + author.version)
@@ -374,17 +374,20 @@ function createStoppedDriver(op, adapter, packageRoot, evidence, budget, { mode,
         const { copyPackage, samePackage } = await import('./runner.mjs')
         driver.recoveryPackage = samePackage(packageRoot, realpathSync(installed)) ? packageRoot : path.join(evidence, 'original-package')
         if (driver.recoveryPackage !== packageRoot) copyPackage(realpathSync(installed), driver.recoveryPackage)
-        if (action === 'install' && driver.recoveryPackage !== packageRoot) throw Error('现装不同代：现装插件 ' + json(path.join(installed, 'package.json')).version + '，待装插件 ' + pkg.version + '（包字节不一致，非酒馆版本不匹配）；先用本地所属代卸载，不自动升级；现装插件目录：' + realpathSync(installed))
+        if (action === 'install' && driver.recoveryPackage !== packageRoot) driver.upgrading = true // 同名不同包：允许**新块机制**换代（旧机制 ≤0.3.7 由 source 门禁按旧记录/marker 拒）；recoveryPackage 仅服务本次装配回滚
         // 宿主正常退出由标准host disposer撤缝并删记录（装配保留）：该态install按首装重建，
         // uninstall仅卸装配；非该态仍要求记录在场，缺记录即拒绝（不猜）。
         if (!existsSync(path.join(op.app, STANDARD_RECORD))) {
-          const { sourceAccess, withdrawnCleanState } = await import('./source.mjs')
-          if (!withdrawnCleanState(sourceAccess(op.app, adapter.targets))) throw Error('已装包但缺源码恢复记录')
-          withdrawnClean = true
+          const { sourceAccess } = await import('./source.mjs')
+          // 缺记录不再拒：源码已是干净撤缝态按原逻辑；否则交 source 按**现场完整块/整文件 owned 块**处理（无记录也可证明并撤）。
+          withdrawnClean = sourceAccess(op.app, adapter.targets).cleanState()
         }
-      } else if (existsSync(path.join(op.app, STANDARD_RECORD))) throw Error('包不在但接缝在，拒绝认领')
+      } else if (existsSync(path.join(op.app, STANDARD_RECORD))) {
+        // 包不在装配中但现场有记录/块：不再一刀拒——允许按现场结构撤缝（runner 走 assemblySkip 分支）。
+        withdrawnClean = true
+      }
       driver.wasRunning = false
-      return { noop: (action === 'install' ? present : !present) && !withdrawnClean, wasRunning: windowsCli && !!op.check && runningNow, host, runningNow, ...(withdrawnClean ? { withdrawnClean: true } : {}) }
+      return { noop: (action === 'install' ? present : !present) && !withdrawnClean && !driver.upgrading, wasRunning: windowsCli && !!op.check && runningNow, host, runningNow, ...(withdrawnClean ? { withdrawnClean: true } : {}) }
     },
     async manageResidual(action) {
       await assertStopped()
@@ -600,7 +603,7 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { platf
       for (const name of family) if (name !== adapter.packageName && (prior.deps[name] || prior.bundles.includes(name))) throw Error('另一版本线已安装，先用所属包卸载')
       const author = json(path.join(op.app, 'tavern-plugin', 'package.json'))
       if (author.name !== 'dsh-tavern-plugin') throw Error('作者版本未适配')
-      if (!cleanResidual && author.version !== AUTHOR_VERSION) {
+      if (action === 'install' && !cleanResidual && author.version !== AUTHOR_VERSION) {
         // 作者版本变化不再直接拒：用共享**只读计划**判定“契约等价/已施缝同代”（不写盘、不 import 作者）。
         const plan = typeof adapter.inspectStandardSeamsPlan === 'function' ? adapter.inspectStandardSeamsPlan({ appDir: op.app, authorVersion: author.version }) : null
         if (!plan || (plan.ready !== true && plan.compatible?.ok !== true)) throw Error('作者版本未适配且契约不等价：' + author.version)
@@ -650,18 +653,21 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { platf
         const { copyPackage, samePackage } = await import('./runner.mjs')
         driver.recoveryPackage = samePackage(packageRoot, realpathSync(installed)) ? packageRoot : path.join(evidence, 'original-package')
         if (driver.recoveryPackage !== packageRoot) copyPackage(realpathSync(installed), driver.recoveryPackage)
-        if (action === 'install' && driver.recoveryPackage !== packageRoot) throw Error('现装不同代：现装插件 ' + json(path.join(installed, 'package.json')).version + '，待装插件 ' + pkg.version + '（包字节不一致，非酒馆版本不匹配）；先用本地所属代卸载，不自动升级；现装插件目录：' + realpathSync(installed))
+        if (action === 'install' && driver.recoveryPackage !== packageRoot) driver.upgrading = true // 同名不同包：允许**新块机制**换代（旧机制 ≤0.3.7 由 source 门禁按旧记录/marker 拒）；recoveryPackage 仅服务本次装配回滚
         // 与桌面版同款"退出撤缝态"：宿主正常退出后disposer已撤缝删记录，源码即作者原像。
         if (!existsSync(path.join(op.app, STANDARD_RECORD))) {
-          const { sourceAccess, withdrawnCleanState } = await import('./source.mjs')
-          if (!withdrawnCleanState(sourceAccess(op.app, adapter.targets))) throw Error('已装包但缺源码恢复记录')
-          withdrawnClean = true
+          const { sourceAccess } = await import('./source.mjs')
+          // 缺记录不再拒：源码已是干净撤缝态按原逻辑；否则交 source 按**现场完整块/整文件 owned 块**处理（无记录也可证明并撤）。
+          withdrawnClean = sourceAccess(op.app, adapter.targets).cleanState()
         }
-      } else if (existsSync(path.join(op.app, STANDARD_RECORD))) throw Error('包不在但接缝在，拒绝认领')
+      } else if (existsSync(path.join(op.app, STANDARD_RECORD))) {
+        // 包不在装配中但现场有记录/块：不再一刀拒——允许按现场结构撤缝（runner 走 assemblySkip 分支）。
+        withdrawnClean = true
+      }
       driver.wasRunning = !!original
       if (original) { context.port = original.port; context.host = original.host }
       // 不运行官方--dump-config，避免构造Host或自动扫描原档。
-      return { noop: (action === 'install' ? present : !present) && !withdrawnClean, wasRunning: !!original, ...(withdrawnClean ? { withdrawnClean: true } : {}) }
+      return { noop: (action === 'install' ? present : !present) && !withdrawnClean && !driver.upgrading, wasRunning: !!original, ...(withdrawnClean ? { withdrawnClean: true } : {}) }
     },
     async assertIdentity() {
       const current = processFinder(context)

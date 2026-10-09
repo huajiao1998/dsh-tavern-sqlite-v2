@@ -59,11 +59,10 @@ function fixture(t, { installed = 'none', withPeers = true, presence = () => [],
   }
   const installedDir = path.join(profileDir, 'node_modules', adapter.packageName)
   const profile = { name: 'dsh-profile-tavern', dependencies: { keep: '1' }, dsh: { profile: { bundles: ['keep'] } }, settings: { preserve: true } }
-  if (installed === 'noop') { // 现装本代 + 标准记录在场 ⇒ 幂等路径
+  if (installed === 'noop') { // 现装本代 + 源码干净态（新机制无旧记录；无块无记录即 withdrawnClean）⇒ 幂等路径
     copyPackage(product, installedDir)
     profile.dependencies[adapter.packageName] = linkValue(installedDir)
     profile.dsh.profile.bundles.push(adapter.packageName)
-    writeFileSync(path.join(app, '.tavern-standard-seams.json'), '{}\n', 'utf8')
   } else if (installed === 'generation') { // 旧安装代：字节与待装包不同 ⇒ 预检抓恢复材料
     mkdirSync(installedDir, { recursive: true })
     writeFileSync(path.join(installedDir, 'package.json'), JSON.stringify({ name: adapter.packageName, version: '0.2.2', files: ['package.json', 'marker.txt'] }, null, 2) + '\n', 'utf8')
@@ -298,4 +297,24 @@ test('WinCLI driver: 兜底卸载坏旧包不要求 SDK peers/探针/包管理�
   assert.deepEqual(read(f.profileFile), f.profileBytes, 'restore 必须逐字还原原 profile')
   assert.deepEqual(read(path.join(f.installedDir, 'package.json')), brokenManifest, 'restore 必须逐字还原坏旧包')
   assert.equal(existsSync(archive), false)
+})
+
+// 新块机制换代：同名不同包不再直接拒（preflight 标 upgrading、noop=false），装配真实装卸可回原代。
+// input 用 version '0.3.8'（新机制一代）——判据是**块机制/现场块**，不是旧版 0.2.2 整数比较。
+test('现场驱动1 新块换代预检允许且装配回原代', async t => {
+  const f = fixture(t, { installed: 'generation' })
+  const oldPkgFile = path.join(f.installedDir, 'package.json')
+  writeFileSync(oldPkgFile, JSON.stringify({ name: adapter.packageName, version: '0.3.8', files: ['package.json', 'marker.txt'] }, null, 2) + '\n', 'utf8')
+  const oldPkgBytes = read(oldPkgFile), profileBefore = read(f.profileFile)
+  const driver = f.make()
+  const state = await driver.preflight('install')
+  assert.equal(driver.upgrading, true, '同名不同包必须标 upgrading（不再直接拒）')
+  assert.equal(state.noop, false, 'upgrading 时不得报 noop')
+  await driver.manage('uninstall') // 真文件系统：官方卸旧装配
+  await driver.manage('install') // 真文件系统：装新代
+  assert.ok(existsSync(path.join(f.profileDir, 'node_modules', adapter.packageName)), '装新代后装配必须存在')
+  await driver.restorePackage() // 真文件系统：按 recoveryPackage 恢复原代装配
+  assert.deepEqual(read(f.profileFile), profileBefore, 'profile 字节必须回到升级前')
+  assert.deepEqual(read(oldPkgFile), oldPkgBytes, '恢复后装配包字节必须是升级前那一代')
+  assert.ok(f.probes.every(item => item.exe === process.execPath), '只允许 fake runPackage 记录的能力探针（无真实包管理）')
 })

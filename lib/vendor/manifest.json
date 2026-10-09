@@ -3,6 +3,14 @@
   "reason": "安装零外部依赖：Windows 桌面版的 pnpm 离线元数据缓存里没有 lodash/json5/jsonrepair（作者用 lodash-es），离线解析失败 ERR_PNPM_NO_OFFLINE_META；改为把运行时依赖打进包内，任何宿主都能离线安装。",
   "source": "https://registry.npmmirror.com",
   "packages": {
+    "acorn": {
+      "version": "8.15.0",
+      "entry": "acorn/acorn.mjs",
+      "license": "MIT",
+      "copiedFrom": "tools/sql-test-kit/node_modules/acorn/dist/acorn.mjs",
+      "usedBy": "deploy/comment-seam-blocks.mjs",
+      "maintenanceGate": "已纳入维护CLI入口完整性清单；开发期不运行发布用SHA增量检测"
+    },
     "lodash": {
       "version": "4.17.21",
       "entry": "lodash/lodash.min.js",

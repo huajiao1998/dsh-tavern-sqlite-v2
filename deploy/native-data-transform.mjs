@@ -114,8 +114,9 @@ export const REQUIRED_BLOCKS = Object.freeze({
   factory: 'const sessionWindowProjector = createSessionWindowProjector({\n    get str() { return str },',
   stateViewCallback: 'activity: activityOf,\n    evidence: sessionId => sessionDebugEvidence(sessionId, true)',
   fastPath: 'if (window && window.nativeData === true) {',
+  fastPathRetry: 'let openingFastWindow = window',
   storeFirst: 'chatJournalStore.readOpeningWindow(chatId,',
-  consumerGuard: 'chatJournalStore.readActivitySummary({ chatId: window.chat.id',
+  consumerGuard: 'chatJournalStore.readActivitySummary({ chatId: openingFastWindow.chat.id',
   sessionActivity: 'const nativeSummary = chatJournalStore.readActivitySummary({ chatId, sessionId: str(sessionId) })',
   statusBarCase: 'chatJournalStore.setStatusBarPlacement(chat.id, { sessionId: chat.sessionId, placement: args.placement })',
   storyContext: '      const scanDepth = await worldBookScanDepth({ cardPath: header?.cardPath, sessionId })',
@@ -248,18 +249,28 @@ export function applyNativeDataTransform(source, options = {}) {
   // ④ 投影工厂
   next = next.replace(ANCHORS.factoryBefore, `  const ${factoryName} = createSessionWindowProjector(${depsExpression})\n\n  ${ANCHORS.factoryBefore}`)
 
-  // ⑤ opening 快路径（仅 nativeData；not-applicable 落回原体，不 catch）
+  // ⑤ opening 快路径（仅 nativeData；not-applicable 落回原体，不 catch）。
+  //    竞态策略（issue #6）：guard 失败＝异步组装期间被写入追上（head 已前进），按竞态处理而非错误——
+  //    立即重投影一次（单次写入竞态零等待即成），再以 100–200ms 抖动退避重投影两次；用尽仍被追上才响亮报错。
+  //    guard 改为读**最新**摘要＋比较 revision（身份校验仍在 store 内；异常只留给身份/形状异常）。
   next = next.replace(ANCHORS.factoryBefore, `${ANCHORS.factoryBefore}\n` +
     `    if (window && window.nativeData === true) {\n` +
-    `      const projected = await ${factoryName}.project({ chat: window.chat, window, activity: window.activity, card: window.card, options: { openingWindow: true, deferResources: options.deferResources }, resourceKey: window.resourceKey ?? ('window:' + window.revision + ':' + window.chat.sessionId + ':' + (window.chat.timeline && window.chat.timeline.branchId || '') + ':' + (window.chat.tavernHelperLifecycleRevision ?? '')) })\n` +
-    `      if (projected.kind === 'value') {\n` +
-    `        // 消费者 guard：async 组装不在 SQL 事务内 ⇒ 返回前用同一 store 复核 revision/身份；\n` +
-    `        // 拿不到摘要即视为 stale，抛明确错误（**不 catch、不转 fallback**）。\n` +
-    `        const guard = chatJournalStore.readActivitySummary({ chatId: window.chat.id, sessionId: window.chat.sessionId, revision: window.revision })\n` +
-    `        if (!guard || guard.kind === 'not-applicable' || guard.revision !== window.revision) {\n` +
-    `          throw new Error('opening 快路径结果已过期（revision/身份复核失败），拒绝返回旧窗口: ' + window.chat.id + '@' + window.revision)\n` +
+    `      let openingFastWindow = window\n` +
+    `      for (let openingFastAttempt = 0; ; openingFastAttempt++) {\n` +
+    `        if (openingFastAttempt > 0) {\n` +
+    `          if (openingFastAttempt > 1) await new Promise(resolve => setTimeout(resolve, 100 + Math.floor(Math.random() * 100)))\n` +
+    `          const openingFastFresh = chatJournalStore.readOpeningWindow(openingFastWindow.chat.id, { limit: HELPER_MESSAGE_COLD_WINDOW, from: Number.isSafeInteger(openingFastWindow.from) && openingFastWindow.from > 0 ? openingFastWindow.from : undefined, requirePartial: true, sessionId: openingFastWindow.chat.sessionId })\n` +
+    `          if (openingFastFresh === null) return null\n` +
+    `          if (!openingFastFresh || openingFastFresh.nativeData !== true) throw new Error('opening 快路径重读后窗口非原生，拒绝猜测: ' + String(openingFastFresh && openingFastFresh.kind))\n` +
+    `          openingFastWindow = openingFastFresh\n` +
     `        }\n` +
-    `        return ${factoryName}.finishOpeningWindow(projected, window, window.chat).view\n` +
+    `        const openingFastProjected = await ${factoryName}.project({ chat: openingFastWindow.chat, window: openingFastWindow, activity: openingFastWindow.activity, card: openingFastWindow.card, options: { openingWindow: true, deferResources: options.deferResources }, resourceKey: openingFastWindow.resourceKey ?? ('window:' + openingFastWindow.revision + ':' + openingFastWindow.chat.sessionId + ':' + (openingFastWindow.chat.timeline && openingFastWindow.chat.timeline.branchId || '') + ':' + (openingFastWindow.chat.tavernHelperLifecycleRevision ?? '')) })\n` +
+    `        if (openingFastProjected.kind !== 'value') break\n` +
+    `        const openingFastGuard = chatJournalStore.readActivitySummary({ chatId: openingFastWindow.chat.id, sessionId: openingFastWindow.chat.sessionId })\n` +
+    `        if (openingFastGuard && openingFastGuard.kind === 'value' && openingFastGuard.revision === openingFastWindow.revision) {\n` +
+    `          return ${factoryName}.finishOpeningWindow(openingFastProjected, openingFastWindow, openingFastWindow.chat).view\n` +
+    `        }\n` +
+    `        if (openingFastAttempt >= 3) throw new Error('opening 快路径连续过期：' + (openingFastAttempt + 1) + ' 次投影均被写入追上，拒绝返回旧窗口: ' + openingFastWindow.chat.id + '@' + openingFastWindow.revision + '→' + String(openingFastGuard && openingFastGuard.revision))\n` +
     `      }\n` +
     `    }`)
 
@@ -470,7 +481,21 @@ export const MESSAGE_REQUIRED_BLOCKS = Object.freeze({
   appendMessages: Object.freeze({
     guard: "if (typeof store.appendMessages !== 'function') throw new Error('宿主接线缺失：store.appendMessages 未装配，拒绝静默走整档 patch')",
     items: "const appended = changes.filter(change => change.op === 'splice' && change.path.length === 1 && change.path[0] === 'messages').flatMap(change => Array.isArray(change.items) ? change.items : [])",
-    headerSets: "const headerSets = changes.filter(change => !(change.op === 'splice' && change.path.length === 1 && change.path[0] === 'messages'))",
+    // 头写集＝**普通对象**（store normalizeHeaderSets 只收顶层普通对象，:137-232）；不可表示项一律响亮拒（不 patchChat 兜底）。
+    headerSets: [
+      'const headerSets = {}',
+      "for (const change of changes) {",
+      "  if (change.op === 'splice' && Array.isArray(change.path) && change.path.length === 1 && change.path[0] === 'messages') continue",
+      "  if (!Array.isArray(change.path) || change.path.length !== 1) throw new Error('追加命令不接受非顶层头改动：' + String(change.path && change.path.join('.')))",
+      "  const key = change.path[0]",
+      "  if (key === 'messages' || key === 'timeline') throw new Error('追加命令不接受保留头键：' + key)",
+      "  if (key === '_storageRevision' || key === 'updatedAt') throw new Error('追加命令不接受命令自管头键：' + key)",
+      "  if (key === '__proto__' || key === 'prototype' || key === 'constructor') throw new Error('追加命令不接受非法头键：' + key)",
+      "  if (Object.prototype.hasOwnProperty.call(headerSets, key)) throw new Error('追加命令不接受重复头键：' + key)",
+      "  if (change.op !== 'set' && change.op !== 'delete') throw new Error('追加命令不接受该头改动操作：' + String(change.op))",
+      "  headerSets[key] = change.op === 'delete' ? undefined : change.value",
+      '}',
+    ].join('\n        '),
     wire: 'return await store.appendMessages(before.id, before._storageRevision, { items: appended, headerSets }, metadata)',
     falsyShape: '})()) return result'
   }),
@@ -528,6 +553,99 @@ export function applyNativeMessageTransform(source, name) {
 export function isNativeMessageApplied(source, name) {
   if (typeof source !== 'string' || !Object.hasOwn(MESSAGE_ANCHORS, name) || countIn(source, MESSAGE_MARKER[name]) !== 1) return false
   assertMessageBlocks(source, name)
+  return true
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// S5 宿主 DI（index.js）：两个 factory 的**窄 store 字面量**补上我方窄出口，使
+// `store.appendMessages` / `store.setMessageFloor` 真指向同一个 `chatJournalStore`，并复刻作者
+// `patchChat`(:859-870) 的写后契约：candidate.changed → syncChatSummary（candidate.mailbox. 源跳过）
+// → coordinationEvents.publish(sessionId) → scheduleTemplateSync → queueAutoCompaction。
+//   · **不读整档、不 patch fallback**：通知对象＝窄命令返回的 `result.head`
+//     （`chat-command-service.js:152-167`：archive_head_fields 全键 + `_storageRevision`，无 messages）。
+//     实测各消费者所需键：candidate.changed＝sessionId/_storageRevision（candidate-worldbook-preparation.js:50-57）；
+//     scheduleTemplateSync＝sessionId/_storageRevision/mode/settleStatus（index.js:306-315）；
+//     publish/queueAutoCompaction＝sessionId；syncChatSummary→registry.sync 的 chatSummary 取
+//     id/cardPath/cardName/title/mode/requestMode/updatedAt/lastOpenedAt/backgroundSessionId 等头字段
+//     （tavern-conversation-registry.js:148-159 + chatSummary）⇒ head 足够；head 缺失即响亮拒，不用整档补。
+// ══════════════════════════════════════════════════════════════════════════════════
+export const MESSAGE_HOST_MARKER = '// [dsh-tavern-native-message-host-di:v1]'
+export const MESSAGE_HOST_ANCHORS = Object.freeze({
+  patchChat: '  async function patchChat(chatId, revision, changes, metadata) {',
+  background: '  const backgroundTasks = createBackgroundTaskCoordinator({\n    store: { ',
+  // orchestrator 不能在工厂行后紧接 `store: {` 打锚：body-signal 隐藏转换会在工厂参数区插入
+  // `rollbackBodySignals,`，三行锚点被打断（实测 orchestrator=0）。改用 store 内**唯一键行**
+  // （`createCard: createWorkspaceCard` 在全部 7 代夹具各恰一处），插入点仍在同一个 store 对象内。
+  orchestrator: '      createCard: createWorkspaceCard\n',
+})
+/** 注入的三个闭包**完整文本**（单一真源：helpers 与 required blocks 均由此派生，避免只验函数头的半应用）。 */
+export const MESSAGE_HOST_FUNCTIONS = Object.freeze([
+  `  async function notifyNarrowWrite(saved, metadata) {
+    if (!saved || typeof saved !== 'object') throw new Error('窄写后通知缺少 head 对象，拒绝用整档读补通知')
+    candidateWorldbookPreparation?.changed(saved, metadata)
+    if (!str(metadata?.source).startsWith('candidate.mailbox.')) await syncChatSummary(saved)
+    void coordinationEvents?.publish(saved.sessionId)
+    scheduleTemplateSync(saved, metadata)
+    queueAutoCompaction(saved.sessionId)
+  }`,
+  `  async function appendMessagesNarrow(chatId, revision, payload, metadata) {
+    if (deletedChatIds.has(chatId)) throw new Error('对话已删除')
+    const result = await chatJournalStore.appendMessages(chatId, revision, payload, metadata)
+    if (result === undefined) return undefined                    // CAS 不符：作者 attempt 循环/兜底语义原样
+    await notifyNarrowWrite(result.head, metadata)
+    return result
+  }`,
+  `  async function setMessageFloorNarrow(chatId, revision, index, payload, metadata) {
+    if (deletedChatIds.has(chatId)) throw new Error('对话已删除')
+    const result = await chatJournalStore.setMessageFloor(chatId, revision, index, payload, metadata)
+    if (result === undefined) return undefined                    // CAS 不符：作者 updateChat 兜底语义原样
+    await notifyNarrowWrite(result.head, metadata)
+    return result
+  }`,
+])
+export const MESSAGE_HOST_BLOCKS = Object.freeze({
+  notify: MESSAGE_HOST_FUNCTIONS[0],
+  append: MESSAGE_HOST_FUNCTIONS[1],
+  floor: MESSAGE_HOST_FUNCTIONS[2],
+  backgroundLiteral: MESSAGE_HOST_ANCHORS.background + 'setMessageFloor: setMessageFloorNarrow, ',
+  orchestratorLiteral: '      appendMessages: appendMessagesNarrow,\n' + MESSAGE_HOST_ANCHORS.orchestrator,
+})
+
+/** 注入的 closure 文本（插在作者 `patchChat` 声明之前；`deletedChatIds`/`str`/各通知函数均已在作者作用域更早声明）。 */
+function messageHostHelpers() {
+  return `  ${MESSAGE_HOST_MARKER}\n${MESSAGE_HOST_FUNCTIONS.join('\n')}\n`
+}
+
+function assertMessageHostBlocks(source) {
+  const missing = Object.entries(MESSAGE_HOST_BLOCKS).filter(([, text]) => !source.includes(text)).map(([key]) => key)
+  if (missing.length > 0) throw new Error('宿主 DI 生成物缺块: ' + missing.join(', '))
+}
+
+/**
+ * 宿主 DI 转换（幂等）：marker 恰 1 ⇒ 逐块校验后原样返回；0 ⇒ 施缝；其它 ⇒ 半应用拒。
+ * 三个锚点各自必须**全文唯一**，缺失或重复即拒。
+ * @param {string} source 作者 index.js 原文
+ */
+export function applyNativeMessageHostTransform(source) {
+  if (typeof source !== 'string' || source === '') throw new Error('宿主 DI 转换缺少源码')
+  const markers = countIn(source, MESSAGE_HOST_MARKER)
+  if (markers === 1) { assertMessageHostBlocks(source); return source }
+  if (markers !== 0) throw new Error('宿主 DI 标记数异常（半应用=' + markers + '）')
+  for (const [name, anchor] of Object.entries(MESSAGE_HOST_ANCHORS)) {
+    const hits = countIn(source, anchor)
+    if (hits !== 1) throw new Error('宿主 DI 锚点缺失/不唯一（' + name + '=' + hits + '）: ' + anchor.split('\n')[0].slice(0, 60))
+  }
+  let next = source.replace(MESSAGE_HOST_ANCHORS.patchChat, messageHostHelpers() + MESSAGE_HOST_ANCHORS.patchChat)
+  next = next.replace(MESSAGE_HOST_ANCHORS.background, MESSAGE_HOST_ANCHORS.background + 'setMessageFloor: setMessageFloorNarrow, ')
+  next = next.replace(MESSAGE_HOST_ANCHORS.orchestrator, '      appendMessages: appendMessagesNarrow,\n' + MESSAGE_HOST_ANCHORS.orchestrator)
+  if (countIn(next, MESSAGE_HOST_MARKER) !== 1) throw new Error('宿主 DI 转换结果标记数异常=' + countIn(next, MESSAGE_HOST_MARKER))
+  assertMessageHostBlocks(next)
+  return next
+}
+
+export function isNativeMessageHostApplied(source) {
+  if (typeof source !== 'string' || countIn(source, MESSAGE_HOST_MARKER) !== 1) return false
+  assertMessageHostBlocks(source)
   return true
 }
 

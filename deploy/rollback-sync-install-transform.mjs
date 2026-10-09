@@ -2,8 +2,9 @@
 const MARKER='// [dsh-tavern-rollback-sync-install:v1]'
 function once(s,a,b){if(s.split(a).length!==2)throw Error('同步安装锚点缺失/不唯一：'+a.slice(0,90));return s.replace(a,b)}
 export function applyRollbackSyncActionGuardTransform(source){
+ if(source.includes('// [dsh-tavern-error-purge-play:v1]'))return source
  const old='const result = await rpc("rollbackTurn", { expectedTurn: clearIncomplete ? null : targetTurn }, props.sessionId);'
- const next='if (typeof props.sessions?.waitForTavernRollbackSync !== "function") throw new Error("回退同步尚未接线或尚未就绪，未执行回退");\n                    '+old
+ const next='if (typeof props.sessions?.waitForTavernRollbackSync !== "function") throw new Error("回退同步尚未接线或尚未就绪，未执行回退");\n					'+old
  if(source.includes(next))return source
  return once(source,old,next)
 }

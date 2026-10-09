@@ -1,152 +1,238 @@
-// 有限源码维护：只准固定作者目标、接缝manifest与接缝自己的备份，绝不遍历业务数据。
-import {existsSync,readFileSync,writeFileSync,mkdirSync,readdirSync,unlinkSync,lstatSync,renameSync} from 'node:fs'
+// 有限源码维护（注释块记录版）：只认显式 target 清单 + 本次块记录；不扫备份目录、不读旧 manifest/旧原像资产、不凭 marker 猜恢复。
+// 归属/半装判定一律走**真 lexer**（acorn + parseSeamSource），不用 includes/正则近似：字符串里的伪 marker 不算块，用户注释提及插件名不算接管。
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, lstatSync } from 'node:fs'
 import path from 'node:path'
-import {createHash} from 'node:crypto'
-import {spawnSync} from 'node:child_process'
-import {protectAuthorStartup} from './author-safety.mjs'
-import {recoverSourcePreimage} from './preimage-recovery.mjs'
-export const STANDARD_RECORD='.tavern-standard-seams.json'
-const records=['.tavern-seams.json','.tavern-legacy-view-seams.json','.tavern-save-ui-seam.json']
-const directories=['.','tavern-plugin/lib','tavern-plugin/lib/domain','tavern-plugin/lib/hooks','tavern-plugin/src/client','tavern-plugin/src/client/features','tavern-plugin/src/client/ui','tavern-plugin/src/client/runtime','tavern-plugin/src/client/modules']
-const backup=/\.(?:pre-seams-[\w-]+\.bak|legacy-view-seams\.backup|save-ui[^/]*\.backup)$/
-const digest=bytes=>createHash('sha256').update(bytes).digest('hex')
-export function sourceAccess(appDir,targets){
- const root=path.resolve(appDir),fixed=new Set([...targets,STANDARD_RECORD,'tavern-plugin/package.json'])
- // 标准装配已按存在性接入的作者协调器：有限路径显式承认，不把记录中的原件误拒为越界。
- const coordinator='tavern-plugin/lib/domain/background-task-coordinator.js'
- fixed.add(coordinator)
- if(!fixed.has('tavern-plugin/lib/index.js')||!records.every(rel=>fixed.has(rel)))throw new Error('版本适配器有限目标清单不完整')
- if([...fixed].some(rel=>![...records,STANDARD_RECORD,'tavern-plugin/package.json'].includes(rel)&&(!rel.startsWith('tavern-plugin/lib/')&&!rel.startsWith('tavern-plugin/src/client/'))))throw new Error('版本目标不是有限作者源码')
- function file(rel){
-  if(!fixed.has(rel)&&!(backup.test(rel)&&directories.includes(path.posix.dirname(rel))))throw new Error('不属于有限源码维护范围：'+rel)
-  const resolved=path.resolve(root,rel);if(!resolved.startsWith(root+path.sep)||rel.includes('..'))throw new Error('源码路径越界：'+rel)
-  if(existsSync(root)&&lstatSync(root).isSymbolicLink())throw new Error('源码根不接受符号链接')
-  for(let p=resolved;p!==root;p=path.dirname(p))if(existsSync(p)&&lstatSync(p).isSymbolicLink())throw new Error('源码目标不接受符号链接：'+p)
-  return resolved
- }
- function capture(){
-  const names=new Set(fixed)
-  // 先拒绝源目录符号链接，不能先枚举后才发现跳到了业务目录。
-  for(const anchor of ['tavern-plugin/lib/index.js','tavern-plugin/lib/domain/read-variables.js','tavern-plugin/src/client/main.js'])file(anchor)
-  for(const rel of directories){const dir=path.resolve(root,rel)
-   for(let p=dir;;p=path.dirname(p)){if(existsSync(p)&&lstatSync(p).isSymbolicLink())throw Error('备份目录不接受符号链接：'+p);if(p===root)break}
-   if(!existsSync(dir))continue
-   for(const e of readdirSync(dir,{withFileTypes:true}))if(e.isFile()&&backup.test(e.name))names.add(path.posix.join(rel==='.'?'':rel,e.name))
+import { spawnSync } from 'node:child_process'
+import { parse } from '../../lib/vendor/acorn/acorn.mjs'
+import { parseSeamSource } from '../comment-seam-blocks.mjs'
+import { planSeamUninstall } from '../comment-seam-plan.mjs'
+import { readSeamRecord } from '../comment-seam-files.mjs'
+
+export const STANDARD_RECORD = '.tavern-comment-seams.json'
+export const SEAM_OWNER = 'dsh-tavern-sqlite-v2'
+/** 旧机制记录：新机制只做存在性探测并据此拒绝（要求先用旧版 CLI 卸载），绝不读内容、绝不删除。 */
+export const OLD_RECORDS = Object.freeze(['.tavern-standard-seams.json', '.tavern-seams.json', '.tavern-legacy-view-seams.json', '.tavern-save-ui-seam.json'])
+export const AUTHOR_PACKAGE_REL = 'tavern-plugin/package.json'
+export const ENTRY_REL = 'tavern-plugin/lib/index.js'
+const RECORD_KEYS = ['format', 'owner', 'files', 'owned']
+const OWNED_MODE = 'owned-new'
+// 旧机制真实行注释里出现的前缀（只认"真注释"，不认字符串/模板/正则里的同名文本）。
+const OLD_COMMENT_PREFIXES = ['[dsh-tavern-core-host:', '[dsh-tavern-standard-owned:', '[dsh-tavern-v1-storage-host:', '[dsh-tavern-legacy-view-seams:', '[dsh-tavern-save-ui-seam:', '[dsh-tavern-sqlite-v2', '[dsh-tavern-storage-sqlite']
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }) // 严格解码、保 BOM：不用 Buffer.toString 的容错替换
+const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value) && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)
+function lstatOrNull(target) { try { return lstatSync(target) } catch (error) { if (error && error.code === 'ENOENT') return null; throw error } }
+function assertRel(rel, what) {
+  if (typeof rel !== 'string' || !rel || path.isAbsolute(rel) || rel.includes('\\') || rel.includes(':')) throw new Error(what + '必须是相对 posix 路径：' + rel)
+  if (rel.split('/').some(part => !part || part === '.' || part === '..') || path.posix.normalize(rel) !== rel) throw new Error(what + '含空段/./.. 或非规范形式：' + rel)
+}
+function walk(node, visit) {
+  if (!node || typeof node !== 'object') return
+  if (typeof node.type === 'string') visit(node)
+  for (const key of Object.keys(node)) {
+    const value = node[key]
+    if (Array.isArray(value)) for (const item of value) walk(item, visit)
+    else if (value && typeof value === 'object') walk(value, visit)
   }
-  return Object.fromEntries([...names].sort().map(rel=>[rel,existsSync(file(rel))?readFileSync(file(rel)).toString('base64'):null]))
- }
- function restore(image){
-  for(const rel of new Set([...Object.keys(capture()),...Object.keys(image)])){
-   const target=file(rel),body=image[rel];if(body==null){if(existsSync(target))unlinkSync(target)}else{mkdirSync(path.dirname(target),{recursive:true});writeFileSync(target,Buffer.from(body,'base64'))}
+}
+export const sameImage = (left, right) => JSON.stringify(left) === JSON.stringify(right)
+
+/**
+ * 有限源码访问器：写集＝显式 targets ＋ 块记录 ＋ 作者包身份文件。
+ * 所有函数都是**本次现场**语义（捕获/回滚/比对都基于本次 capture），不使用任何历史 before/after。
+ */
+export function sourceAccess(appDir, targets) {
+  if (typeof appDir !== 'string' || !path.isAbsolute(appDir)) throw new Error('源码根必须显式绝对路径（不按 cwd 静默解析）')
+  const root = path.resolve(appDir), rootStat = lstatOrNull(root)
+  if (!rootStat || !rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('源码根必须是已存在的真实目录（不接受符号链接）')
+  if (!Array.isArray(targets) || targets.length === 0) throw new Error('有限目标清单不能为空')
+  for (const rel of targets) { assertRel(rel, '有限目标'); if (!rel.startsWith('tavern-plugin/')) throw new Error('有限目标必须是作者源码路径：' + rel) }
+  const fixed = new Set([...targets, STANDARD_RECORD, AUTHOR_PACKAGE_REL])
+  const legacy = new Set(OLD_RECORDS)
+  function file(rel) {
+    assertRel(rel, '源码目标')
+    if (!fixed.has(rel) && !legacy.has(rel)) throw new Error('不属于有限源码维护范围：' + rel)
+    const resolved = path.resolve(root, rel)
+    if (!resolved.startsWith(root + path.sep)) throw new Error('源码路径越界：' + rel)
+    // 逐级核到文件系统根：root 自身的 parent 链接同样拒（防 root 被外部链接顶替）。
+    for (let p = resolved; ; p = path.dirname(p)) {
+      const item = lstatOrNull(p)
+      if (item) {
+        if (item.isSymbolicLink()) throw new Error('源码目标不接受符号链接：' + p)
+        if (p === resolved) { if (!item.isFile()) throw new Error('源码目标不是普通文件：' + rel) }
+        else if (!item.isDirectory()) throw new Error('源码祖先不是普通目录：' + rel)
+      }
+      if (p === path.dirname(p)) break
+    }
+    return resolved
   }
- }
- function assertImage(image,{installation=false}={}){for(const [rel,body]of Object.entries(image)){const target=file(rel);if(installation&&backup.test(rel))continue;if(body==null){if(existsSync(target))throw new Error('源码应不存在：'+rel)}else if(installation&&[...records,STANDARD_RECORD].includes(rel)){if(!existsSync(target))throw new Error('安装记录缺失：'+rel)}else if(!existsSync(target)||!readFileSync(target).equals(Buffer.from(body,'base64')))throw new Error('源码前像不匹配：'+rel)}}
- function protect(){const rel='tavern-plugin/lib/index.js',target=file(rel),raw=readFileSync(target,'utf8'),safe=protectAuthorStartup(raw);if(raw!==safe)writeFileSync(target,safe,'utf8')}
- function syntax(){const result=spawnSync(process.execPath,['--check',file('tavern-plugin/lib/index.js')],{stdio:'inherit',timeout:8000,windowsHide:true});if(result.error||result.status!==0)throw new Error('作者保护主入口语法/有界检查拒绝')}
- return {root,file,capture,restore,assertImage,protect,syntax}
-}
-export function assertPackageSource(access,adapter,{allowRebase=false}={}){
- const index=readFileSync(access.file('tavern-plugin/lib/index.js'),'utf8')
- if(index.includes(adapter.otherHostMarker))throw new Error('另一功能线接缝不能直接覆盖，请先标准卸载')
- if(existsSync(access.file(STANDARD_RECORD))){
-  const record=JSON.parse(readFileSync(access.file(STANDARD_RECORD),'utf8'))
-  if(record.version!==1||!record.before||!record.after)throw new Error('标准记录格式不匹配')
-  if(typeof record.authorVersion!=='string'||!record.authorVersion.trim())throw new Error('标准记录作者版本字段不合法')
-  const plan=allowRebase?adapter.inspectStandardSeamsPlan?.({appDir:access.root}):null
-  const compatibleRefresh=plan?.needsReapply===true&&plan.compatible?.ok===true
-  for(const rel of [...adapter.targets,'tavern-plugin/lib/index.js'])if(!Object.hasOwn(record.before,rel)){
-   // 旧内联代不存在新增拆分模块，可以按自己的确切记录卸；有文件却无前像仍拒绝。
-   const added=/\/hooks\/turn-lifecycle\.js$|\/features\/(?:play-controls|turn-history)\.js$|\/ui\/error-center\.js$|\/runtime\/helper-script-runtime\.js$|\/domain\/card-summary-cache\.js$/.test(rel)
-   if(!added||existsSync(access.file(rel))||Object.hasOwn(record.after,rel))throw new Error('标准记录缺源码前像：'+rel)
+  const read = rel => { const target = file(rel); return lstatOrNull(target) === null ? null : readFileSync(target) }
+  const text = rel => {
+    const bytes = read(rel)
+    if (bytes === null) return null
+    try { return utf8.decode(bytes) } catch { throw new Error('源码不是合法 UTF-8：' + rel) }
   }
-  for(const [rel,body]of Object.entries(record.before)){access.file(rel);if(body!==null&&(typeof body!=='string'||Buffer.from(body,'base64').toString('base64')!==body))throw new Error('标准前像不是规范base64：'+rel);if(records.includes(rel)&&body!==null)assertHistoryManifest(access,JSON.parse(Buffer.from(body,'base64').toString('utf8')))}
-  if(record.withdrawn===true){// 撤缝保留态：after是施缝代摘要，源码等于before即干净，不再按after全等检查
-   for(const rel of Object.keys(record.after)){const file=access.file(rel);const body=record.before?.[rel]??null;if(body===null){if(existsSync(file))throw new Error('撤缝保留态异常：'+rel)}else if(!existsSync(file)||!readFileSync(file).equals(Buffer.from(body,'base64')))throw new Error('撤缝保留态源码漂移：'+rel)}
-  }else for(const [rel,hash]of Object.entries(record.after)){const file=access.file(rel);if(!/^[a-f0-9]{64}$/.test(hash))throw Error('标准后像摘要非法：'+rel);if((!existsSync(file)||digest(readFileSync(file))!==hash)&&!compatibleRefresh)throw new Error('标准代源码漂移：'+rel)}
-  if(!compatibleRefresh){const shim=readFileSync(access.file('tavern-plugin/lib/domain/storage-package.js'),'utf8');if(!shim.includes(adapter.packageName))throw new Error('标准代属于另一包，不允许跨版本线恢复')}
- }
- for(const name of records)if(existsSync(access.file(name))){const data=JSON.parse(readFileSync(access.file(name),'utf8'));assertHistoryManifest(access,data);if(data.package&&data.package!==adapter.packageName)throw new Error('历史接缝属于另一包：'+data.package)}
-}
-function assertHistoryManifest(access,data){
- if(data.version!==1||!Array.isArray(data.entries))throw new Error('历史manifest格式不符')
- for(const entry of data.entries){const rel=entry.rel||entry.relative;if(typeof rel!=='string'||!rel.startsWith('tavern-plugin/')||!rel.endsWith('.js')||backup.test(rel))throw new Error('历史manifest目标不是作者有限源码');access.file(rel);if(entry.backup){access.file(entry.backup);if(!backup.test(entry.backup))throw new Error('历史manifest备份不是所属接缝备份')}else if(!entry.created)throw new Error('历史manifest缺前像恢复材料')}
-}
-export function finishSourceUninstall(access,adapter,stopRecord,archiveDir){
- if(existsSync(access.file(STANDARD_RECORD))){const record=JSON.parse(readFileSync(access.file(STANDARD_RECORD),'utf8'));
-  // 撤缝保留态：源码已等于before，不再跑标准卸缝的after漂移检查；直接清历史缝并归档。
-  if(record.withdrawn===true){access.assertImage(Object.fromEntries(Object.keys(record.after).map(rel=>[rel,record.before?.[rel]??null])))}else adapter.uninstallStandardSeams({appDir:access.root})}
- else if(stopRecord){for(const name of records)if(!Object.hasOwn(stopRecord.before,name))throw new Error('停前标准记录不完整');access.assertImage(stopRecord.before)}
- else throw new Error('缺停前标准记录，不猜整包已卸载')
- const backups=[]
- for(const name of records)if(existsSync(access.file(name))){const data=JSON.parse(readFileSync(access.file(name),'utf8'));assertHistoryManifest(access,data);for(const e of data.entries||[])if(e.backup){access.file(e.backup);backups.push(e.backup)}}
- const outcome=adapter.uninstallAllSeams({appDir:access.root})
- const archived=[];mkdirSync(archiveDir,{recursive:true})
- for(const rel of backups){const src=access.file(rel);if(!existsSync(src))continue
-  const dst=path.resolve(archiveDir,path.basename(rel));if(!dst.startsWith(path.resolve(archiveDir)+path.sep)||existsSync(dst))throw new Error('源码归档目的越界或已存在')
-  const hash=digest(readFileSync(src));renameSync(src,dst);if(digest(readFileSync(dst))!==hash)throw new Error('归档回读不一致');archived.push({relative:rel,sha256:hash})
- }
- access.protect();access.syntax()
- // 正式卸载完成源码恢复后，清掉运行时撤缝保留的标准记录。
- if(existsSync(access.file(STANDARD_RECORD)))unlinkSync(access.file(STANDARD_RECORD))
- assertSourceUninstalled(access)
- return {outcome,archived,data:'用户数据未访问、未删除、未转换',protection:'独立原件保护保留'}
-}
-export function assertSourceUninstalled(access){
- for(const name of [...records,STANDARD_RECORD])if(existsSync(access.file(name)))throw new Error('卸载接缝记录仍在：'+name)
- for(const [rel,body]of Object.entries(access.capture()))if(body!==null&&/\.js$/.test(rel)){
-  const code=Buffer.from(body,'base64').toString('utf8');if(/dsh-tavern-(?:storage-)?sqlite(?:-v[12])?/.test(code)||code.includes('[dsh-tavern-standard-owned:v1]'))throw new Error('活动源码仍接管：'+rel)
- }
-}
-// 宿主正常退出时标准host disposer会撤缝并保留withdrawn记录，profile装配完整保留——"退出撤缝态"。
-// 源码此时即作者原像：install可按首装重建接缝与记录，uninstall只卸装配。仍要求
-// 源码零接管标记；无记录视为历史干净态，withdrawn记录视为撤净态；半撤/脏树不认，维持原拒绝。
-export function withdrawnCleanState(access){
- if(existsSync(access.file(STANDARD_RECORD))){
-  try{const record=JSON.parse(readFileSync(access.file(STANDARD_RECORD),'utf8'));if(record.withdrawn!==true)return false}catch{return false}
-  for(const name of records)if(existsSync(access.file(name)))return false
-  try{for(const [rel,body]of Object.entries(access.capture()))if(body!==null&&/\.js$/.test(rel)){const code=Buffer.from(body,'base64').toString('utf8');if(/dsh-tavern-(?:storage-)?sqlite(?:-v[12])?/.test(code)||code.includes('[dsh-tavern-standard-owned:v1]'))return false}}catch{return false}
-  return true
- }
- try{assertSourceUninstalled(access)}catch{return false}
- return true
-}
-// 修复只写已重放验证过的before；after及活动源码一字不改。
-export function commitRecoveredPreimage(access,rehearsal){
- access.assertImage(rehearsal.before)
- const file=access.file(STANDARD_RECORD),old=readFileSync(file),record=rehearsal.recovery.record
- const previous=JSON.parse(old.toString('utf8'))
- if(JSON.stringify(record.after)!==JSON.stringify(previous.after))throw new Error('前像恢复不得修改after校验')
- writeFileSync(file,JSON.stringify(record,null,2)+'\n','utf8')
- return ()=>writeFileSync(file,old)
-}
-export function finishRecoveredSourceUninstall(access,adapter,stopRecord,rehearsal,archiveDir){
- if(existsSync(access.file(STANDARD_RECORD))){
-  commitRecoveredPreimage(access,rehearsal)
-  return {...finishSourceUninstall(access,adapter,stopRecord,archiveDir),preimageRecovery:rehearsal.recovery.provenance}
- }
- // 原宿主disposer已撤标准代时，只允许停前记录描述的确切恢复状态，拒绝其他漂移。
- access.assertImage(stopRecord.before)
- access.restore(rehearsal.expected);access.protect();access.syntax();assertSourceUninstalled(access)
- return {preimageRecovery:rehearsal.recovery.provenance,data:'用户数据未访问、未删除、未转换',protection:'独立原件保护保留'}
-}
-export function rehearseSource(action,access,adapter,evidenceDir,checkBudget=()=>{}){
- if(action==='uninstall')assertPackageSource(access,adapter)
- const before=access.capture(),app=path.join(evidenceDir,'rehearsal'),test=sourceAccess(app,adapter.targets);test.restore(before)
- const refresh=action==='install'?adapter.inspectStandardSeamsPlan?.({appDir:access.root}):null
-  if(action==='install'&&records.some(name=>before[name]!==null)&&!(refresh?.needsReapply===true&&refresh.compatible?.ok===true))throw new Error('首装前历史记录仍在，先用所属包完整卸载；不复用危险历史前像')
- // 历史主manifest里app只是展示字段，卸载实际路径由调用的appDir限定。
- let result
- if(action==='install'){test.protect();test.syntax();result=adapter.applyStandardSeams({appDir:app,allowRebase:true});if(!adapter.checkStandardSeams({appDir:app}).ready)throw new Error('安装副本预检未ready')}
- else{
-  const raw=before[STANDARD_RECORD];if(raw==null)throw new Error('卸载缺标准记录，先诊断不猜')
-  try{result=finishSourceUninstall(test,adapter,JSON.parse(Buffer.from(raw,'base64')),path.join(evidenceDir,'rehearsal-archives'))}
-  catch(error){
-   let recovery
-   try{recovery=recoverSourcePreimage({access,adapter,evidenceDir,before,checkBudget})}
-   catch(recoveryError){throw new Error('卸载前像不可恢复；原错误：'+error.message+'；'+recoveryError.message,{cause:error})}
-   writeFileSync(path.join(evidenceDir,'preimage-recovery.json'),JSON.stringify(recovery.provenance,null,2)+'\n','utf8')
-   return {before,expected:recovery.expected,recovery,result:{preimageRecovery:recovery.provenance,repairAvailable:true,data:'用户数据未访问、未删除、未转换',protection:'独立原件保护保留'}}
+  /** 本次写集前像（base64/null）：不枚举目录、不扫备份、不含旧机制记录。 */
+  function capture() {
+    return Object.fromEntries([...fixed].sort().map(rel => { const bytes = read(rel); return [rel, bytes === null ? null : bytes.toString('base64')] }))
   }
- }
- return {before,expected:test.capture(),result}
+  /**
+   * 只回滚本次前像：现场==前像 ⇒ 不动；现场==本次 expected ⇒ 回写；其他（第三方改/部分写）⇒ 记冲突、保留不覆盖。
+   * expected 必传才能防"把第三方新内容盖掉"；缺省用于纯本地预演副本。
+   */
+  function restore(image, { expected = null } = {}) {
+    const conflicts = []
+    for (const rel of Object.keys(image)) {
+      const target = file(rel), bytes = lstatOrNull(target) === null ? null : readFileSync(target)
+      const current = bytes === null ? null : bytes.toString('base64')
+      if (current === image[rel]) continue
+      // 只允许"仍等于本次前像"或"等于本次写入结果"两种现场：任何第三方改动（含被删掉的记录）一律冲突保留，
+      // 不在这里猜 runtime disposer——停服撤缝由 runner 的 stopped 投影明证后再以停后现场为基准。
+      if (expected && current !== expected[rel]) { conflicts.push(rel); continue }
+      if (image[rel] === null) { if (existsSync(target)) unlinkSync(target) }
+      else { mkdirSync(path.dirname(target), { recursive: true }); writeFileSync(target, Buffer.from(image[rel], 'base64')) }
+      const back = lstatOrNull(target) === null ? null : readFileSync(target).toString('base64') // 回读确认，不凭 write rc0 宣称恢复
+      if (back !== image[rel]) conflicts.push(rel)
+    }
+    if (conflicts.length) throw new Error('恢复遇第三方修改/部分写或回读不符，保留现场不回盖：' + conflicts.join('、'))
+  }
+  function assertImage(image, { installation = false } = {}) {
+    for (const [rel, body] of Object.entries(image)) {
+      const target = file(rel)
+      // 记录与其他文件一律逐字节比对（installation 只额外要求记录必须在场）：稳定输出下 after 记录应逐字节等于预演 JSON。
+      if (body === null) { if (existsSync(target)) throw new Error('源码应不存在：' + rel) }
+      else if (!existsSync(target) || !readFileSync(target).equals(Buffer.from(body, 'base64'))) throw new Error((installation && rel === STANDARD_RECORD ? '安装后块记录与本次预期不符：' : '源码与本次前像不符：') + rel)
+    }
+  }
+  /** 块记录：形状/归属判定交给 comment-seam-files.readSeamRecord（不 deep 校验历史 before/after、不存 owned body）；
+   *  记录**不扩充**有限 targets；坏/缺记录返回 null 或诊断，不拦"结构可证"的完整块/整文件 owned 块撤缝。 */
+  function readRecord() {
+    const target = file(STANDARD_RECORD)
+    if (lstatOrNull(target) === null) return null
+    return readSeamRecord(read(STANDARD_RECORD), SEAM_OWNER)
+  }
+  const jsonRels = new Set([STANDARD_RECORD, AUTHOR_PACKAGE_REL])
+  /**
+   * 真 lexer 判定（不用字符串近似）：本插件块 + 旧机制真实行注释 + 指向本包的 import/export 说明符。
+   * malformed 标记由 parser 直接抛（不猜、不当首装）；字符串/模板/正则里的伪 marker 与用户注释里的插件名都不算。
+   */
+  function inspect(rel, given = null) {
+    const body = given === null ? text(rel) : given
+    if (body === null || !body.includes('dsh-tavern')) return null // 纯加速预筛：无该子串不可能含标记或本包说明符
+    const comments = []
+    const ast = parse(body, { ecmaVersion: 'latest', sourceType: 'module', allowHashBang: true, onComment: comments })
+    const blocks = parseSeamSource(body, { rel }).blocks.filter(block => block.metadata?.owner === SEAM_OWNER)
+    // acorn 的 onComment 传数组时推入 {type:'Line'|'Block', value, start, end}：旧真实 marker 只认 type==='Line'。
+    const lineComments = comments.filter(comment => comment.type === 'Line' && typeof comment.value === 'string').map(comment => comment.value)
+    const legacyComments = lineComments.filter(value => OLD_COMMENT_PREFIXES.some(prefix => value.includes(prefix)))
+    const pluginImports = []
+    walk(ast, node => {
+      if (node.type !== 'ImportDeclaration' && node.type !== 'ExportNamedDeclaration' && node.type !== 'ExportAllDeclaration') return
+      const spec = node.source?.value
+      if (typeof spec === 'string' && (spec === SEAM_OWNER || spec.startsWith(SEAM_OWNER + '/'))) pluginImports.push(spec)
+    })
+    return { blocks, legacyComments, lineComments, pluginImports }
+  }
+  const sourceFiles = () => [...fixed].filter(rel => !jsonRels.has(rel) && rel.endsWith('.js'))
+  /** 现场出现**本 owner** 块的文件（真 lexer 判定；他方块不算）。 */
+  function blockPresence() { return sourceFiles().filter(rel => (inspect(rel)?.blocks.length ?? 0) > 0) }
+  /** 现场出现旧机制真注释前缀或指向本包的 import/export（无记录时的半装/接管探测）。 */
+  function takeoverPresence() {
+    // 有本 owner 块的文件按**撤缝投影**判旧接管：整文件 owned 块/块内 marker 不算旧（无记录也能证明并撤）。
+    return sourceFiles().filter(rel => {
+      const found = inspect(rel)
+      if (!found) return false
+      if (found.blocks.length) {
+        const projection = planSeamUninstall(text(rel), { rel, owner: SEAM_OWNER, record: null }).source
+        const lexed = inspect(rel, projection) // 只用真 lexer（Line 注释 + AST plugin import）：字符串/模板里的伪 marker 不误拒
+        return !!lexed && (lexed.legacyComments.length > 0 || lexed.pluginImports.length > 0)
+      }
+      return found.legacyComments.length > 0 || found.pluginImports.length > 0
+    })
+  }
+  const oldRecordNames = () => OLD_RECORDS.filter(rel => lstatOrNull(file(rel)) !== null)
+  function assertNoOldRecords() {
+    const present = oldRecordNames()
+    if (present.length) throw new Error('检测到旧机制记录：请先用旧版 CLI 完整卸载后再装块机制版本（' + present.join('、') + '）')
+  }
+  /** 无新记录、无本 owner 块、无旧标记 ⇒ 干净（可仅装配恢复）。 */
+  function cleanState() { return lstatOrNull(file(STANDARD_RECORD)) === null && oldRecordNames().length === 0 && blockPresence().length === 0 && takeoverPresence().length === 0 }
+  function assertUninstalled() {
+    if (lstatOrNull(file(STANDARD_RECORD)) !== null) throw new Error('卸载后块记录仍在：' + STANDARD_RECORD)
+    const blocks = blockPresence()
+    if (blocks.length) throw new Error('卸载后仍有本插件块：' + blocks.join('、'))
+    const takeover = takeoverPresence()
+    if (takeover.length) throw new Error('活动源码仍接管：' + takeover.join('、'))
+    return true
+  }
+  /**
+   * 原件保护业务已由主侧纳入 standard transform 的归属区块（禁 startup 初始化/历史），本模块**不再**隐式改写块外源码：
+   * 故原 `protect()/protectIfBare()` 已删除（不再导出、不再引用 author-safety）。
+   */
+  function syntax() {
+    const result = spawnSync(process.execPath, ['--check', file(ENTRY_REL)], { stdio: 'inherit', timeout: 8000, windowsHide: true })
+    if (result.error || result.status !== 0) throw new Error('作者主入口语法检查拒绝')
+  }
+  return { root, targets: Object.freeze([...targets]), recordRel: STANDARD_RECORD, file, read, text, capture, restore, assertImage, readRecord, inspect, blockPresence, takeoverPresence, oldRecordNames, assertNoOldRecords, cleanState, assertUninstalled, syntax }
 }
+
+/**
+ * 记录/旧标记/块归属闸（**现场完整块**为准，不依赖记录里的历史 before/after 或 owned body）：
+ * 逐**现场块** parse＋planSeamUninstall(record:null)（半截/破损块、缺端在此抛）；旧接管只看真 lexer（含块时看撤缝投影）；
+ * install 侧只做只读 preflight inspect，不因 ready=false 拒（用户改了块外代码/上游覆盖 → needsReapply 仍可按现场重接）。
+ */
+export function assertPackageSource(access, adapter, { allowRebase = false, operation = 'uninstall' } = {}) {
+  // 另一功能线标记只认真实行注释里的字面（inspect 走真 lexer）：字符串常量/普通正文里的同名字样不误拒。
+  if (adapter.otherHostMarker) {
+    const marker = String(adapter.otherHostMarker)
+    const hit = access.targets.filter(rel => rel.endsWith('.js')).find(rel => (access.inspect(rel)?.lineComments ?? []).some(value => value.includes(marker)))
+    if (hit) throw new Error('另一功能线接缝不能直接覆盖，请先标准卸载（真实行注释标记：' + hit + '）')
+  }
+  access.assertNoOldRecords() // 旧机制（≤0.3.7）记录/真 marker：既定例外，仍拒（须旧 CLI 先卸）
+  const record = access.readRecord()
+  // 可卸性只认**现场完整块**（planUninstall 语义）：有记录缺块、无记录有块都不再拒；半截/破损块由 parser/plan 抛（不猜）。
+  const live = access.blockPresence()
+  for (const rel of live) {
+    const source = access.text(rel)
+    if (source === null) continue
+    parseSeamSource(source, { rel })
+    planSeamUninstall(source, { rel, owner: SEAM_OWNER, record: null }) // record=null 照卸：不依历史 src before/after
+  }
+  // 现场旧接管判定：直接用真 lexer 的 takeoverPresence（含块时看撤缝投影），不再自算前缀；它同时覆盖"未安装但残留旧真 marker"。
+  const stale = access.takeoverPresence()
+  if (stale.length) throw new Error('现场/撤缝投影仍含旧接管标记，请先用旧版 CLI 卸载：' + stale.join('、'))
+  // 记录里的 owned **不做任何 fs 迭代**：记录不是 owner proof，路径也不可信；owned 仅作 diagnostic 随返回值上报。
+  // install 可做只读 preflight inspect，但不得因 ready=false 直接拒（升级致块缺失＝needsReapply）。
+  if (operation === 'install' && typeof adapter.inspectStandardSeamsPlan === 'function') adapter.inspectStandardSeamsPlan({ appDir: access.root })
+  void allowRebase
+  return { record, blocks: live }
+}
+
+/**
+ * 本次有限副本预演：只复制本次捕获的有限写集到 evidence/rehearsal，在副本上真跑 apply/uninstall + 语法/就绪判定；
+ * 不使用任何旧原像资产，也不写真实目标。install 额外固化 `cleaned`＝"按块记录撤缝后"的投影，供停服期间 runtime disposer 撤缝后的现场比对。
+ */
+export function rehearseSource(action, access, adapter, evidenceDir, checkBudget = () => {}) {
+  checkBudget()
+  const before = access.capture()
+  const copyOf = name => { const dir = path.join(evidenceDir, name); mkdirSync(dir, { recursive: true }); const copy = sourceAccess(dir, adapter.targets); copy.restore(before); return { dir, copy } }
+  let result, cleaned = null
+  if (action === 'install') {
+    const { dir, copy } = copyOf('rehearsal')
+    copy.syntax() // 不再在预演里隐式 protect（改块外源码属原件保护业务，将由主纳入有归属区块）
+    // 隔离副本里没有目标进程：常量断言表达"副本无进程可停"，不是把异步函数假当真。
+    result = adapter.applyStandardSeams({ appDir: dir, allowRebase: true, assertStopped: () => true })
+    if (!adapter.checkStandardSeams({ appDir: dir }).ready) throw new Error('本次块预演未 ready（隔离副本）：现场未写入')
+    const cleanedRun = copyOf('rehearsal-cleaned')
+    adapter.uninstallStandardSeams({ appDir: cleanedRun.dir, assertStopped: () => true })
+    cleaned = cleanedRun.copy.capture()
+    return { before, expected: copy.capture(), cleaned, result, mode: action, app: dir }
+  }
+  const { dir, copy } = copyOf('rehearsal')
+  result = adapter.uninstallStandardSeams({ appDir: dir, assertStopped: () => true })
+  copy.assertUninstalled()
+  return { before, expected: copy.capture(), cleaned: null, result, mode: action, app: dir }
+}
+
+export function assertSourceUninstalled(access) { return access.assertUninstalled() }
+/** 撤缝保留态已取消：只有"当前无块、无新记录、无旧标记"才算干净；旧 marker 一律拒。 */
+export function withdrawnCleanState(access) { try { return access.cleanState() } catch { return false } }
