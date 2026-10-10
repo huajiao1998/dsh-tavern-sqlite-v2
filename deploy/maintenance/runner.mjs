@@ -1,4 +1,4 @@
-// V2 块机制本地维护：安装与卸载走同一条执行序列（预检 → 本次有限副本预演 → 精确停服 → 官方离线装/卸包 →
+// V2 块机制本地维护：安装与卸载走同一条执行序列（预检 → 本次有限副本预演 → 精确停服 → 标准目录/具名装配 →
 // 块施缝/撤缝 → 本次回读 → 按原方式启服 → 验收）。取消旧残留卸载链与旧原像恢复：
 // 不恢复任何历史 before，只回滚**本次 capture**，且仅当现场仍等于本次 expected 才回写（第三方改过即拒）。
 import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, readdirSync, lstatSync, openSync, closeSync, realpathSync } from 'node:fs'
@@ -108,7 +108,7 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
     })
     if (action === 'install') {
       if (driver.upgrading) await step('现装同包不同代：先移除旧装配再装新代（单命令内，失败仍按原装配/原状态恢复）', async () => { await driver.manage('uninstall'); await driver.manage('install') })
-      else if (!state.reapply) await step('目标profile官方离线装包/回读', () => driver.manage('install'))
+      else if (!state.reapply) await step('标准插件目录和持久启动行安装/回读', () => driver.manage('install'))
       else await step('同包已装且块需重接：跳过重装，只改源码块', async () => {})
       await step('作者未加载时块施缝（写前/写后各核一次停止态）', async () => {
         await driver.assertStopped() // CLI 侧先精确确证停止；随后给 apply 的同步断言只表达"已确证停止"，不是异步函数假 true
@@ -125,7 +125,7 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
         adapter.uninstallStandardSeams({ appDir: source.root, assertStopped: () => true })
         await driver.assertStopped()
       })
-      if (!state.assemblySkip) await step('目标profile官方离线卸包/回读', () => driver.manage('uninstall'))
+      if (!state.assemblySkip) await step('移除本包标准目录和自有启动行/回读', () => driver.manage('uninstall'))
     }
     source.assertImage(expected, { installation: action === 'install' })
     if (wasRunning) newProcess = await step('按原方式恢复运行实例（不经迁移launcher）', () => driver.start())
@@ -206,7 +206,7 @@ export function runCli(url, adapter) {
   if (!process.argv[1] || path.resolve(process.argv[1]) !== fileURLToPath(url)) return
   const main = async () => {
     if (process.argv.includes('--help')) {
-      console.log(`${adapter.packageName} 离线装卸（注释块机制；Windows/macOS/Linux/WSL2 CLI）\nnode deploy/maintenance.mjs install|uninstall [--home <已有安装目录>] [--desktop-app <嵌入式DSH Desktop安装根>] [--port <核对端口>] [--systemd-unit <既有单元>] [--prepare-env] [--check] [--background]\n默认apply；本地完整包不联网、不索取网页凭证、不复制依赖/存档。安装与卸载同一执行序列：预检→本次有限副本预演→精确停止→官方离线装/卸包→按块记录施缝/撤缝→本次回读→按原方式启服→验收；失败只回滚本次前像，第三方改过不回盖。\n块机制与旧机制不并存：现场存在旧记录（.tavern-seams.json/.tavern-legacy-view-seams.json/.tavern-save-ui-seam.json）或旧接缝代码但无块记录时直接拒绝，请先用旧版插件完成卸载。卸载无需旧恢复资产：无块无记录（撤净态）时只移除装配，源码零写。\nLinux/macOS运行中停止后按原方式恢复，原本停止则保持停止；Windows CLI/桌面不自动停启：请自行完整停止再装卸，成功后自行启动；运行/身份不明拒绝写入。包就绪后180秒成功预算；异常恢复独立处理。网页/真实玩法由用户确认。\nV2运行中目标须已带--experimental-vm-modules；默认不改启动配置。--prepare-env（仅install）显式授权补VM旗标（备份原unit、失败自动回滚）。四个解析依赖与acorn须离线可用，不补装宿主peer、不联网补依赖。`)
+      console.log(`${adapter.packageName} 离线装卸（注释块机制；Windows/macOS/Linux/WSL2 CLI）\nnode deploy/maintenance.mjs install|uninstall [--home <已有安装目录>] [--desktop-app <嵌入式DSH Desktop安装根>] [--port <核对端口>] [--systemd-unit <既有单元>] [--prepare-env] [--check] [--background]\n默认apply；本地完整包不联网、不索取网页凭证、不复制依赖/存档。安装与卸载同一执行序列：预检→本次有限副本预演→精确停止→标准插件目录和持久启动行装卸→按现场区块施缝/撤缝→本次回读→按原方式启服→验收；失败只回滚本次前像，第三方改过不回盖。\n块机制与旧机制不并存：现场存在旧记录（.tavern-seams.json/.tavern-legacy-view-seams.json/.tavern-save-ui-seam.json）或旧接缝代码但无块记录时直接拒绝，请先用旧版插件完成卸载。卸载无需旧恢复资产：无块无记录（撤净态）时只移除装配，源码零写。\nLinux/macOS运行中停止后按原方式恢复，原本停止则保持停止；Windows CLI/桌面不自动停启：请自行完整停止再装卸，成功后自行启动；运行/身份不明拒绝写入。包就绪后180秒成功预算；异常恢复独立处理。网页/真实玩法由用户确认。\nV2运行中目标须已带--experimental-vm-modules；默认不改启动配置。--prepare-env（仅install）显式授权补VM旗标（备份原unit、失败自动回滚）。四个解析依赖与acorn须离线可用，不补装宿主peer、不联网补依赖。`)
       return
     }
     if (!['linux', 'darwin', 'win32'].includes(process.platform)) throw Error('不支持的平台：' + process.platform)

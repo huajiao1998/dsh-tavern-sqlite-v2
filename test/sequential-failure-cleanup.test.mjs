@@ -35,11 +35,9 @@ assert.equal(typeof rollbackAvailability,'function','作者 rollbackAvailability
 /** 真实变换产物（真前端输出）→ 真 target 助手：view 的 failureTarget 必须来自它，不从消息猜。 */
 const {applyLatestFailureViewTransform}=await import('../deploy/latest-failure-transform.mjs')
 const {applyRollbackPendingViewTransform}=await import('../deploy/rollback-pending-view-transform.mjs')
-const {prepareCommentAuthorTree}=await import('./fixtures/comment-author-tree.mjs')
-const VIEW_REL='tavern-plugin/lib/domain/chat-session-state.js'
-const authorTree=prepareCommentAuthorTree()
-assert.ok(authorTree,'缺少作者 source fixture：设 DSH_TAVERN_TEST_APP 或准备本地 author-fixture')
-const readAuthor=(tree,rel)=>readFileSync(path.join(tree.appDir,rel),'utf8')
+// T3：不再复制有限作者树（不再建 mkdtemp 源副本）；直接只读作者源文本（support 内按路径缓存、无副作用）。
+// 真 Session/SqliteSessionDb/投影/handles 与 URL 隔离照旧每场景新建，不改业务装配。
+const {readAuthorSource,VIEW_REL}=await import('./support/latest-failure-source.mjs')
 /** 从变换产物里按花括号配对取真实函数文本（与既有 save-ui-seam/extractFunction 同法）。 */
 function extractFunction(text,header){
  const start=text.indexOf(header);assert.ok(start>=0,'应能定位 '+header)
@@ -98,7 +96,7 @@ function rows57(){
  * @param options.withoutBaseline42 去掉 42 的 businessBefore（负例：缺基准必须拒）
  * @param options.guardMessage 替换 guard 文案（负例：非 guard 轮）
  */
-async function fixture(tree,options={}){
+async function fixture(readSource,options={}){
  const root=mkdtempSync(path.join(os.tmpdir(),'tavern-seq-failure-'))
  const raw=readFileSync(new URL('../../../tmp/projection-baseline-1001/clean-session.js',import.meta.url),'utf8').replace(/from "(@deepseek-ai\/[^\"]+)"/g,(_all,name)=>'from '+JSON.stringify(pathToFileURL(requireHost.resolve(name)).href))
  const file=path.join(root,'session.mjs');writeFileSync(file,raw,'utf8');const {Session}=await import(pathToFileURL(file).href)
@@ -160,7 +158,7 @@ async function fixture(tree,options={}){
  const read=()=>store.read(chatId)
  const update=(_id,fn,metadata)=>store.update(chatId,async now=>{const next=await fn(now);next._storageRevision=now._storageRevision+1;return next},metadata)
  // 真实作者 rollbackAvailability 作 args.availability（不 stub）；真实变换产物 target 助手作 view 的 failureTarget
- const viewSeamed=applyLatestFailureViewTransform(applyRollbackPendingViewTransform(readAuthor(tree,VIEW_REL)))
+ const viewSeamed=applyLatestFailureViewTransform(applyRollbackPendingViewTransform(readSource(VIEW_REL)))
  const inspect=await loadInspectNativeFailureTail()
  const {latestFailureTarget}=failureHelpers(viewSeamed,{inspectNativeFailureTail:inspect})
  const availability=(chat,evidence)=>rollbackAvailability(chat,evidence)
@@ -194,7 +192,7 @@ async function fixture(tree,options={}){
 }
 
 test('连续失败清理：先清native-only43再清基准42并停在正文41',async()=>{
- const f=await fixture(authorTree,{seedAfter41:true})
+ const f=await fixture(readAuthorSource,{seedAfter41:true})
  try{
   const beforeChat=await f.read()
   // availability 必须来自真实作者判定（不得 stub）：failedTurns 由现场 events 决定
@@ -271,7 +269,7 @@ test('拒绝native-only清理：assistant/operation43/非guard文案一律不可
   ['目标 revision 漂移',{},null,/分支或存储版本已变化/,{revision:'bump'}],
  ]
  for(const [label,options,helperPattern,backendPattern,extra] of scenarios){
-  const f=await fixture(authorTree,options)
+  const f=await fixture(readAuthorSource,options)
   try{
    const before=await f.read(),eventsCount=f.eventCount()
    const found=await f.nativeTarget()
@@ -300,7 +298,7 @@ test('拒绝native-only清理：assistant/operation43/非guard文案一律不可
 })
 
 test('native-only清理后旧43目标重试不得误清42：stale坐标/过期目标只认已清不动42',async()=>{
- const f=await fixture(authorTree)
+ const f=await fixture(readAuthorSource)
  try{
   const found=await f.nativeTarget()
   assert.equal(found.cleanable,true,'前置：43 必须可清；实际 reason='+String(found&&found.reason)+' turn='+String(found&&found.turn)+' endSeq='+String(found&&found.endSeq)+' eventCount='+String(found&&found.eventCount))
@@ -341,7 +339,7 @@ test('native-only清理后旧43目标重试不得误清42：stale坐标/过期�
 })
 
 test('常规正文42缺基准仍拒：native-only不改变既有缺基准拒绝语义',async()=>{
- const f=await fixture(authorTree,{withoutBaseline42:true})
+ const f=await fixture(readAuthorSource,{withoutBaseline42:true})
  try{
   const before=await f.read()
   // ① 末轮是 native-only 43（op42 缺 base 不影响 native 判定）⇒ 必须可清
@@ -370,7 +368,7 @@ test('常规正文42缺基准仍拒：native-only不改变既有缺基准拒绝�
 test('native清理中途失败留pending：状态一致后按rollbackId重试完成且不误清42，冒认拒',async()=>{
  const inspectNativeFailureTail=await loadInspectNativeFailureTail()
  void inspectNativeFailureTail
- const f=await fixture(authorTree,{failInSideCleanup:true})
+ const f=await fixture(readAuthorSource,{failInSideCleanup:true})
  try{
   const before=await f.read()
   const found=await f.nativeTarget()

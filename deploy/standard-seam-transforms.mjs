@@ -41,22 +41,17 @@ import { applyNativeMessageTransform, isNativeMessageApplied, applyNativeMessage
 import { applyLatestFailureHostTransform, applyLatestFailureViewTransform } from './latest-failure-transform.mjs'
 
 
-const RESOLVER = `// [dsh-tavern-standard-owned:v1]
+export const STORAGE_PACKAGE_RESOLVER = `// [dsh-tavern-standard-owned:v1]
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
-import os from 'node:os'
-const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh-tavern')
+import { resolveTavernDataRoot } from './tavern-data.js'
+const packageRoot = path.join(resolveTavernDataRoot(), 'plugins', 'dsh-tavern-sqlite-v2')
+const packageRequire = createRequire(path.join(packageRoot, 'package.json'))
 export async function storagePackage(subpath) {
-  let last
-  for (const anchor of [path.join(home, 'profiles/tavern/package.json'), path.join(home, 'apps/dsh-tavern/package.json')]) {
-    let url
-    try { url = pathToFileURL(createRequire(anchor).resolve('dsh-tavern-sqlite-v2/' + subpath)).href }
-    catch (error) { last = error; continue }
-    // 路径命中后的加载异常直接上抛，不在另一个锚点重做初始化副作用。
-    return await import(url)
-  }
-  throw new Error('标准核心模块不可用：' + subpath, { cause: last })
+  // 用本包 exports 自解析，不依赖同名 profile/node_modules；所有调用命中同一模块 URL。
+  // 加载异常直接上抛，绝不尝试第二份实现或降级回文件存储。
+  return await import(pathToFileURL(packageRequire.resolve('dsh-tavern-sqlite-v2/' + subpath)).href)
 }
 `
 function shim(body) { return '// [dsh-tavern-standard-owned:v1]\n' + body }
@@ -119,7 +114,7 @@ export function buildCore(appDir, sourceFiles) {
   write.set('tavern-plugin/src/client/modules/host-session-patch.js', applyRollbackSyncHandshakeTransform(text(appDir, 'tavern-plugin/src/client/modules/host-session-patch.js')))
   write.set('tavern-plugin/src/client/modules/session-view-sync.js', applyRollbackViewReaderTransform(text(appDir, 'tavern-plugin/src/client/modules/session-view-sync.js')))
   write.set('tavern-plugin/src/client/modules/live-tavern-view.js', applyRollbackLiveViewTransform(text(appDir, 'tavern-plugin/src/client/modules/live-tavern-view.js')))
-  write.set(DOMAIN + 'storage-package.js', RESOLVER)
+  write.set(DOMAIN + 'storage-package.js', STORAGE_PACKAGE_RESOLVER)
   write.set(DOMAIN + 'storage-compaction-warning.js', shim("import { storagePackage } from './storage-package.js'\nexport const { projectCompactionWarning } = await storagePackage('compaction-warning')\n"))
   write.set(DOMAIN + 'storage-current-variables.js', shim("import { storagePackage } from './storage-package.js'\nexport const { createCurrentVariableReader } = await storagePackage('current-variables')\n"))
   write.set(DOMAIN + 'read-variables.js', shim("import { storagePackage } from './storage-package.js'\nexport const { readVariables, registerVariableReadTool } = await storagePackage('read-variables')\n"))

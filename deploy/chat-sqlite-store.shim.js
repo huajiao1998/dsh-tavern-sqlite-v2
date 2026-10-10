@@ -9,14 +9,8 @@
 // 卸载语义：本文件是**存储本体**（不是辅助层）⇒ 未安装本包时**响亮失败**，不静默降级
 //   （降级 = 聊天存档写不进去，风险远大于报错）。要回到"原存档"须按卸载流程放回作者原实现。
 //
-// ⚠ 解析我们包的路径（2026-09-30 应用本缝时踩中）：**不能写成裸说明符** —— 本文件在
-//   `apps/dsh-tavern/tavern-plugin/lib/domain/` 下，而我们的包装在 **profile** 的
-//   `node_modules/`（`<DSH_HOME>/profiles/tavern/node_modules/`）里，两者不是同一棵树，
-//   裸 `import('dsh-tavern-sqlite-v2/chat-store')` 解析不到 ⇒ 必须显式按 profile 锚点解析。
-import { createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
-import os from 'node:os'
-import path from 'node:path'
+// 作者应用树与数据 plugins 不在同一解析祖先链；统一经 storage-package 定位，不能裸导入本包。
+
 import { copyJsonTree } from './copy-json-tree.js'
 import { projectSceneImageState, projectChatSessionState, projectDisplayRuntimeState, projectChatBackgroundConfig, projectSettlementCheckpoint, projectSessionMessage } from './chat-session-state.js'
 import { applyJsonChangesShared, diffJson } from './json-mutation.js'
@@ -36,58 +30,18 @@ const helpers = {
   projectTavernHelperMessage, projectTavernHelperContext, lastTavernHelperVariables, projectAgentMessageText, createScopedMessages, isScopedMessages, projectSessionMessage, copyLazyHistoryHeader,
 }
 
-function resolveChatStoreUrl() {
-  const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh-tavern')
-  const anchors = [
-    path.join(home, 'profiles', 'tavern', 'package.json'),   // 包实际被 pnpm 装在这里
-    path.join(home, 'apps', 'dsh-tavern', 'package.json'),
-  ]
-  for (const anchor of anchors) {
-    try {
-      return pathToFileURL(createRequire(anchor).resolve('dsh-tavern-sqlite-v2/chat-store')).href
-    } catch { /* 换下一个锚点 */ }
-  }
-  return null
-}
+// 标准目录与其他作者薄垫片统一解析到同一份实现；缺包直接失败，不降级原档可写。
+import { storagePackage } from './storage-package.js'
+const impl = await storagePackage('chat-store')
 
 // 作者对话迁移契约适配（见 lib/author-migration-adapter.js 的缺陷 C 说明）：
-// 与 chat-store 同样必须按 profile 锚点解析，不能写裸说明符。
-function resolveMigrationAdapterUrl() {
-  const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh-tavern')
-  const anchors = [
-    path.join(home, 'profiles', 'tavern', 'package.json'),
-    path.join(home, 'apps', 'dsh-tavern', 'package.json'),
-  ]
-  for (const anchor of anchors) {
-    try {
-      return pathToFileURL(createRequire(anchor).resolve('dsh-tavern-sqlite-v2/author-migration-adapter')).href
-    } catch { /* 换下一个锚点 */ }
-  }
-  return null
-}
-
-let impl = null
-const moduleUrl = resolveChatStoreUrl()
-if (moduleUrl === null) {
-  console.error('[chat-sqlite-store] 解析不到 dsh-tavern-sqlite-v2/chat-store（已按 profile 锚点找过）——请确认本包已安装到 <DSH_HOME>/profiles/tavern/node_modules')
-} else {
-  try {
-    impl = await import(moduleUrl)
-  } catch (error) {
-    console.error('[chat-sqlite-store] 未能加载 dsh-tavern-sqlite-v2/chat-store：' + String(error?.message || error))
-  }
-}
-
+// 与 chat-store 同样经 storage-package 定位，不能写裸说明符。
+// 它只被 S2(d) 迁移缝用到 ⇒ 加载不到不冒泡到模块顶层，缺包在调用期响亮失败。
 let migrationImpl = null
-const migrationUrl = resolveMigrationAdapterUrl()
-if (migrationUrl === null) {
-  console.error('[chat-sqlite-store] 解析不到 dsh-tavern-sqlite-v2/author-migration-adapter（已按 profile 锚点找过）——请确认本包已安装')
-} else {
-  try {
-    migrationImpl = await import(migrationUrl)
-  } catch (error) {
-    console.error('[chat-sqlite-store] 未能加载 dsh-tavern-sqlite-v2/author-migration-adapter：' + String(error?.message || error))
-  }
+try {
+  migrationImpl = await storagePackage('author-migration-adapter')
+} catch (error) {
+  console.error('[chat-sqlite-store] 未能加载 dsh-tavern-sqlite-v2/author-migration-adapter：' + String(error?.message || error))
 }
 
 export function createChatSqliteStore(options = {}) {

@@ -1,8 +1,10 @@
 // 最小粒度离线施缝闸：真实缩进锚点、幂等与 fail-closed；纯 transform 断言（不再含 fs 生命周期/卸缝用例）
 import assert from 'node:assert/strict'
-
+import test from 'node:test'
 import vm from 'node:vm'
 import { transformLegacyIndex, transformLegacyRegistry, transformLegacyInitialization, transformLegacyViewReader, LEGACY_VIEW_SHIM } from '../deploy/apply-legacy-view-seams.mjs'
+
+test('旧视图部署：锚点与原件只读及命名契约', async () => {
 
 const index = `import { createChatPersistence } from './domain/chat-persistence.js'
 export async function apply(ctx) {
@@ -137,8 +139,8 @@ assert.match(LEGACY_VIEW_SHIM, /loadOwnedModule\('legacy-fork-records'\)/)
 assert.match(LEGACY_VIEW_SHIM, /forkRecords: createForkRecords\(\)/)
 const actionsV3 = transformLegacyIndex(index)
 assert.match(actionsV3, /\[dsh-tavern-save-actions:v3\]/)
-assert.match(actionsV3, /case 'sqliteSaveClaim': return await ctx\.get\('tavernSaveActions'\)\.claim\(args\)/)
-assert.match(actionsV3, /case 'sqliteSaveRelease': return await ctx\.get\('tavernSaveActions'\)\.release\(args\)/)
+assert.doesNotMatch(actionsV3, /case 'sqlite(?:Save(?:Status|Prepare|Claim|Complete|Recover|Release)|VariablesQuery)':/, '七项请求已迁自有路由，作者switch不再插入转发')
+assert.match(actionsV3, /chats: chatPersistence, runtimeGeneration,/, '业务服务保留作者运行代，供新路由回包')
 assert.match(actionsV3, /readSourceSessionTitle: async sessionId => await withObservedForkSource\(/)
 assert.match(actionsV3, /item\.type === 'session\/title'/)
 assert.match(actionsV3, /renameTargetSession: async/)
@@ -170,6 +172,7 @@ const titleContext = {
     assert.equal(query, sessionQuery); observations++
     return await work(Object.freeze({ id: sessionId, header: { id: sessionId }, events: titleEvents }))
   },
+  runtimeGeneration: 'fixture-runtime-generation',
   createAuthorSaveActions: deps => deps,
   chatPersistence: { async update(id, mutation) {
     assert.equal(id, 'chat-target'); titleTrace.push('chat-title'); return mutation({ id, title: '旧标题' })
@@ -203,8 +206,9 @@ assert.deepEqual(titleTrace, ['rename:DB.原名', 'flush', 'chat-title', 'sync']
 await assert.rejects(() => actionDeps.renameTargetSession('session-source', 'DB.不得写'), /不可写/)
 await assert.rejects(() => actionDeps.setTargetChatTitle('chat-source', 'DB.不得写'), /原件只读/)
 assert.equal(titleTrace.length, 4, '原件不调用任何写入器')
-assert.match(LEGACY_VIEW_SHIM, /createRequire\(path\.join\(home, 'profiles', 'tavern', 'package\.json'\)\)/)
-assert.match(LEGACY_VIEW_SHIM, /profileRequire\.resolve\('dsh-tavern-sqlite-v2\/' \+ name\)/)
+assert.match(LEGACY_VIEW_SHIM, /import \{ storagePackage as loadOwnedModule \} from '\.\/storage-package\.js'/)
+assert.doesNotMatch(LEGACY_VIEW_SHIM, /profileRequire\.resolve/)
+assert.match(LEGACY_VIEW_SHIM, /loadOwnedModule\('host-session-install'\)/)
 assert.doesNotMatch(LEGACY_VIEW_SHIM, /from 'dsh-tavern-sqlite-v2\//)
 assert.doesNotMatch(transformLegacyIndex(index), /migrateInstalledLegacySessions\s*\(/)
 assert.doesNotMatch(transformLegacyIndex(index), /installHostSessionPatch\s*\(/, '作者树不得再自带官方宿主补丁安装调用')
@@ -224,5 +228,6 @@ assert.throws(()=>transformLegacyIndex(index.replace('    else await migrateInst
 assert.match(transformLegacyReaderForTest(), /\['sessionId', 'cardPath'/)
 function transformLegacyReaderForTest() { return transformLegacyViewReader(reader) }
 
-console.log('legacy-view-deploy：锚点/幂等/只查/业务断言全部通过')
+assert.equal(actionDeps.runtimeGeneration, 'fixture-runtime-generation', '服务收到同一运行代')
+})
 

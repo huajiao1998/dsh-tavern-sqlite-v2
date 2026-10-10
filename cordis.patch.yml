@@ -1,27 +1,21 @@
-# dsh-tavern-sqlite-v2 bundle —— 接管 DSH Tavern 的会话 / transcript 后端
-#
-# 1) 关掉官方 jsonl 后端那条 row（它由 @deepseek-ai/dsh-base 声明；酒馆 bundle 只改了它的 root）
-# 2) 插入我们的 SQLite 后端：注册同名服务 sessionPersistence（官方允许的「默认导出 service class」形式）
-#    root 必须沿用酒馆的路径约定，否则找不到档
-# 3) 插入宿主会话内存补丁的入口（原型级接管 + 租约中性化；官方包文件零改动）
-#
-# ⚠ 若 disabled 被更高优先层压住（--dump-config 会显示 overridden）：
-#   把 `- id: session-persistence-jsonl` / `disabled: true` 两行移到 profile 用户层 <profileDir>/cordis.patch.yml
+# 一次性安装使用的装配模板；安装器将相对入口与会话根改成目标绝对路径。
+# 普通 plugin.js 与浏览器半边由作者 data/plugins 扫描装载，不再声明 profile bundle。
 - id: session-persistence-jsonl
   disabled: true
-# 原作者行禁止提前 import；包装器完成检查/接线后通过公开Loader创建作者行。
 - id: dsh-tavern
   disabled: true
 - insert:
     - id: dsh-tavern-sqlite-v2
-      name: dsh-tavern-sqlite-v2
+      name: ./bootstrap/session-persistence.js
       config:
         root: !!js dshHomePath('profile-data', 'tavern', 'sessions')
     - id: dsh-tavern-storage-host-patch-v2
-      name: dsh-tavern-sqlite-v2/host-patch
-    - id: dsh-tavern-storage-host-actions-v2
-      name: dsh-tavern-sqlite-v2/host-actions
+      name: ./bootstrap/host-patch.js
     - id: dsh-tavern-storage-standard-host-v2
-      name: dsh-tavern-sqlite-v2/standard-host
+      name: ./bootstrap/standard-host.js
       inject:
         - loader
+        - sessionPersistence
+        - tavernStorageBootstrapReady
+      config:
+        persistedSeams: true

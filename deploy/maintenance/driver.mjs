@@ -6,13 +6,13 @@ import path from 'node:path'
 import net from 'node:net'
 import { command, findProcess, readProcess, sameProcess, stripSecrets, waitExit, processAlive, desktopTavernProcesses, windowsCliTavernProcesses } from './process.mjs'
 import { pause, maintenanceBudget } from './budget.mjs'
-import { runtimeFor, packagePolicyArgs, assertTargetAllowed } from './target.mjs'
+import { runtimeFor, assertTargetAllowed } from './target.mjs'
 import { parseSystemdProperties, systemdOwner, assertSystemdTarget, assertSystemdUnchanged } from './systemd.mjs'
 import { rewriteExecStartVmFlag } from './environment.mjs'
 import { waitSystemdExecIdentity } from './start-identity.mjs'
 import { STANDARD_RECORD } from './source.mjs'
 import { AUTHOR_VERSION } from '../../lib/standard-host.js'
-import { residualAssembly } from './residual-assembly.mjs'
+import { createStandardInstallation } from './standard-installation.mjs'
 const family = ['dsh-tavern-storage-sqlite', 'dsh-tavern-storage-sqlite-v1', 'dsh-tavern-storage-sqlite-v2', 'dsh-tavern-sqlite-v1', 'dsh-tavern-sqlite-v2']
 // 运行时依赖**必须为零**：四个解析器依赖（lodash/yaml/json5/jsonrepair）与注释块 lexer（acorn）已 vendor 进包内
 // （见 lib/vendor/VENDOR.md + manifest.json）。零依赖是"任何宿主都能离线安装"的前提：
@@ -205,8 +205,8 @@ export function linkHostPeersIntoPackage(pkg, desktop, installDir, label = '桌�
  * 停止态驱动（桌面版 Electron 与原生 Windows CLI 共用；2026-10-07 由旧 createDesktopDriver 原样提取）。
  *
  * 共同点：**不接管停/启**——桌面版没有可由安装器管理的服务（托盘启停），WinCLI 由用户自己的
- * `dsh-tavern stop/start` 负责；装包一律按作者 `link:` 形状（copyPackage + profile link + junction
- * + 宿主 peer 同实例投影），**不走官方 pnpm shell**：避免离线重装其它 dep 与 store/路径坑，
+ * `dsh-tavern stop/start` 负责；程序单份复制到 data/plugins，包内 peer 链接宿主同实例，
+ * profile 只保具名持久启动行，不设本包依赖/bundle，**不走官方 pnpm shell**，
  * 本包已零 runtimeDependencies、解析器依赖 vendor 进包内。
  *
  * 差异只在 `mode`：
@@ -254,8 +254,13 @@ function createStoppedDriver(op, adapter, packageRoot, evidence, budget, { mode,
   const context = windowsCli ? { ...op, ...runtime } : { root: op.tavernRoot, runtimeDir: layout.root }
   const findRunning = presence || (windowsCli ? windowsCliTavernProcesses : desktopTavernProcesses)
   const installed = path.join(op.profileDir, 'node_modules', adapter.packageName)
+  // 标准装配助手：present/layout/dir/upgrading 与本次 original 快照（内部用真实 copyPackage 落到自有临时目录）都由它出。
+  const assembly = createStandardInstallation({
+    op, adapter, packageRoot, evidence,
+    linkPeers: (pkg, dir) => linkHostPeersIntoPackage(pkg, layout, dir),
+  })
   let prior = null, originalDependencyBytes = {}, residual = null
-  const driver = { runtime, recoveryPackage: null, wasRunning: false, host }
+  const driver = { runtime, wasRunning: false, host }
   // pnpm store 探路只为桌面版历史通路保留（WinCLI 不读 pnpm 产物，装包只 copy+link）：
   // pnpm 11 的 store-dir 只认 CLI flag（.npmrc/环境变量无效），与既有 node_modules 不一致会
   // ERR_PNPM_UNEXPECTED_STORE，故沿用 `.modules.yaml` 记录的既有 store 并给值加内嵌双引号。
@@ -291,7 +296,8 @@ function createStoppedDriver(op, adapter, packageRoot, evidence, budget, { mode,
     }
   }
   const assertAssembly = action => {
-    const state = profileState(op.profileDir), present = !!state.deps[adapter.packageName] && state.bundles.includes(adapter.packageName) && existsSync(installed)
+    const state = profileState(op.profileDir)
+    const present = assembly.assertAssembly(action).present   // 目标存在性一律由 helper 判定（不再用 const 路径 existsSync）
     const other = deps => Object.fromEntries(Object.entries(deps).filter(([key]) => key !== adapter.packageName).sort(([a], [b]) => a.localeCompare(b)))
     if (JSON.stringify(other(state.deps)) !== JSON.stringify(other(prior.deps)) || JSON.stringify(state.bundles.filter(s => s !== adapter.packageName)) !== JSON.stringify(prior.bundles.filter(s => s !== adapter.packageName))) throw Error('装卸改变非目标依赖/bundle，拒绝成功')
     for (const [file, bytes] of Object.entries(originalDependencyBytes || {})) if (bytes && (!existsSync(file) || !readFileSync(file).equals(bytes))) throw Error('官方操作改变既有非目标软件包，拒绝冒认单包安装成功')
@@ -348,7 +354,7 @@ function createStoppedDriver(op, adapter, packageRoot, evidence, budget, { mode,
       }
       if (cleanResidual) {
         if (action !== 'uninstall') throw Error('兜底残留路径仅用于卸载')
-        residual = residualAssembly({ home: op.home, profileDir: op.profileDir, packageName: adapter.packageName, evidence })
+        residual = assembly.residual()   // 残留识别由 helper 提供（含 uninstall/restore/verify 三件套）
         driver.wasRunning = false
         const runningNow = running().length > 0
         return { noop: false, wasRunning: windowsCli && !!op.check && runningNow, host, runningNow, assemblyPresent: residual.present }
@@ -364,17 +370,17 @@ function createStoppedDriver(op, adapter, packageRoot, evidence, budget, { mode,
       const desktopWorkerProbe = "import {Worker} from 'node:worker_threads';const code=\"const vm=require('node:vm');const {parentPort}=require('node:worker_threads');parentPort.postMessage(typeof vm.SourceTextModule)\";const worker=new Worker(code,{eval:true,execArgv:['--experimental-vm-modules']});const seen=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Worker 探针超时')),8000);worker.once('message',message=>{clearTimeout(timer);resolve(message);worker.terminate()});worker.once('error',error=>{clearTimeout(timer);reject(error)})});if(seen!=='function')throw Error('Worker 内缺少 vm.SourceTextModule')"
       const workerProbe = windowsCli ? "import {Worker} from 'node:worker_threads';const code=\"const vm=require('node:vm');const {parentPort}=require('node:worker_threads');(async()=>{const m=new vm.SourceTextModule('export default 42');await m.link(()=>{});await m.evaluate();if(typeof vm.SyntheticModule!=='function')throw Error('缺少SyntheticModule');parentPort.postMessage(m.namespace.default)})().catch(e=>{throw e})\";const worker=new Worker(code,{eval:true,execArgv:['--experimental-vm-modules']});let timer;try{const seen=await new Promise((resolve,reject)=>{timer=setTimeout(()=>reject(Error('Worker探针超时')),4000);worker.once('message',resolve);worker.once('error',reject)});if(seen!==42)throw Error('Worker ESM核验失败')}finally{clearTimeout(timer);await worker.terminate()}" : desktopWorkerProbe
       await runPackage(process.execPath, ['--input-type=module', '-e', workerProbe], { cwd: op.app, env, timeout: activeBudget.remaining(windowsCli ? 5000 : 9000) })
-      const present = !!prior.deps[adapter.packageName]
-      if (present !== prior.bundles.includes(adapter.packageName) || present !== existsSync(installed)) throw Error('目标装配不完整，拒绝猜测')
+      // present / upgrading / dir 与本次 original 快照都由 helper 的 preflight 给出
+      //（helper 写入前把原位置归档供本次失败恢复；不复制依赖或用户数据）。
+      const assemblyState = await assembly.preflight(action)
+      const present = assemblyState.present
+      driver.priorAssemblyPresent = present
+      if (assemblyState.upgrading) driver.upgrading = true
       let withdrawnClean = false
       if (present) {
-        if (json(path.join(installed, 'package.json')).name !== adapter.packageName) throw Error('现装包身份错误')
-        const { copyPackage, samePackage } = await import('./runner.mjs')
-        driver.recoveryPackage = samePackage(packageRoot, realpathSync(installed)) ? packageRoot : path.join(evidence, 'original-package')
-        if (driver.recoveryPackage !== packageRoot) copyPackage(realpathSync(installed), driver.recoveryPackage)
-        if (action === 'install' && driver.recoveryPackage !== packageRoot) driver.upgrading = true // 同名不同包：允许**新块机制**换代（旧机制 ≤0.3.7 由 source 门禁按旧记录/marker 拒）；recoveryPackage 仅服务本次装配回滚
-        // 宿主正常退出由标准host disposer撤缝并删记录（装配保留）：该态install按首装重建，
-        // uninstall仅卸装配；非该态仍要求记录在场，缺记录即拒绝（不猜）。
+        if (json(path.join(assemblyState.dir, 'package.json')).name !== adapter.packageName) throw Error('现装包身份错误')
+        // 兼容旧装配正常退出后的撤缝态；新标准目录持久模式退出不撤缝。
+        // 缺记录本身不判失败，仍按现场源码是否完整撤净决定维护分支。
         if (!existsSync(path.join(op.app, STANDARD_RECORD))) {
           const { sourceAccess } = await import('./source.mjs')
           // 缺记录不再拒：源码已是干净撤缝态按原逻辑；否则交 source 按**现场完整块/整文件 owned 块**处理（无记录也可证明并撤）。
@@ -405,52 +411,16 @@ function createStoppedDriver(op, adapter, packageRoot, evidence, budget, { mode,
     async stoppedAfterError() { return (await running()).length === 0 },
     beginRecovery() {},
     async restorePackage() {
-      // 与 POSIX 驱动同语义：把 **profile 装配**恢复到操作前状态——本来就装着 ⇒ 用恢复包重装；
-      // 本来没装 ⇒ 卸掉；两态都没有 ⇒ 断言确实未装。**绝不往包源（packageRoot）写**。
-      if (prior?.deps?.[adapter.packageName]) {
-        await driver.manage('install', driver.recoveryPackage || packageRoot)
-        if (windowsCli) {
-          // 旧代恢复只还原本插件的原依赖说明；其他字段沿用当前值，不把旧profile整档盖回。
-          await assertStopped()
-          const file = path.join(op.profileDir, 'package.json'), current = json(file)
-          current.dependencies[adapter.packageName] = prior.deps[adapter.packageName]
-          writeFileSync(file, JSON.stringify(current, null, 2) + '\n', 'utf8')
-          assertAssembly('install')
-        }
-      }
-      else if (profileState(op.profileDir).deps[adapter.packageName] || existsSync(installed)) await driver.manage('uninstall')
-      else assertAssembly('uninstall')
+      // helper 将本次归档的程序/链接移回原位置，并恢复本次写前 profile/patch 字节。
+      await assertStopped()
+      await assembly.restore()
       return { changed: true, host }
     },
     async manage(action, root = packageRoot) {
       await assertStopped()
-      // **桌面版按作者的 `link:` 形状安装，不走 pnpm**（2026-10-06 真机根因）：
-      // 桌面版 Electron 的解析覆盖层把"profile 包解析到共享回退根 `<home>/profiles/node_modules`"
-      // 判为 obsolete 而拒绝，**只有 linked profile 模块才允许走共享回退**
-      //（`resources/app/lib/module-resolution-*.js` 的 canUseProfileSharedDependencyUrl 要求父模块是 linked）。
-      // 作者自己的插件全是 `link:` 形状，所以它们的 `@deepseek-ai/*` 能从共享根解析、拿到与 harness
-      // 同一实例。走 pnpm 的 `file:` 安装则注定解析失败（真机两次实测）。这同时绕开了 pnpm 11 在
-      // 桌面宿主上的 store/离线元数据/remove 参数三个坑。
-      const installDir = path.join(op.home, 'plugins', adapter.packageName)
-      const linkPath = path.join(op.profileDir, 'node_modules', adapter.packageName)
-      const { copyPackage, samePackage } = await import('./runner.mjs')
-      if (action === 'install') {
-        rmSync(installDir, { recursive: true, force: true })
-        mkdirSync(path.dirname(installDir), { recursive: true })
-        copyPackage(root, installDir)
-        linkHostPeersIntoPackage(json(path.join(root, 'package.json')), layout, installDir)
-        writeProfileLink(op.profileDir, adapter.packageName, installDir)
-        rmSync(linkPath, { recursive: true, force: true })
-        mkdirSync(path.dirname(linkPath), { recursive: true })
-        symlinkSync(installDir, linkPath, process.platform === 'win32' ? 'junction' : 'dir')
-        assertAssembly(action)
-        if (!samePackage(root, realpathSync(linkPath))) throw Error('链接安装后的包字节不是选定本地代，拒绝成功')
-      } else {
-        removeProfileLink(op.profileDir, adapter.packageName)
-        rmSync(linkPath, { recursive: true, force: true })
-        rmSync(installDir, { recursive: true, force: true })
-        assertAssembly(action)
-      }
+      // 标准目录复制、包内同宿主 peer 链接和具名持久行统一由 helper 写盘；driver 核停止态与回读。
+      await assembly.manage(action, root)
+      assertAssembly(action)
     },
     async verify(action, _adapter, _opts = {}) {
       if (windowsCli) await assertStopped()
@@ -465,7 +435,7 @@ function createStoppedDriver(op, adapter, packageRoot, evidence, budget, { mode,
         webVerification: spec.web,
       }
     },
-    async verifyRecovery() { return driver.verify('install', adapter, {}) },
+    async verifyRecovery() { return driver.verify(driver.priorAssemblyPresent ? 'install' : 'uninstall', adapter, {}) },
   })
 }
 
@@ -479,6 +449,11 @@ export function createWindowsCliDriver(op, adapter, root, evidence, budget, opti
 
 export function createDriver(op, adapter, packageRoot, evidence, budget, { platform = process.platform, processFinder = findProcess, processReader = readProcess, runPackage = packageCommand, request = fetch, runtimeResolver = runtimeFor, runCommand = command, portOpen = tcpOpen, alive = processAlive } = {}) {
   const runtime = runtimeResolver(op, { platform }), context = { ...op, ...runtime }, installed = path.join(op.profileDir, 'node_modules', adapter.packageName)
+  // posix 侧同 helper：peer 链接指向 `home/runtime/lib`（官方 pnpm 代），不依赖 profile 内同名 dep/bundle。
+  const assembly = createStandardInstallation({
+    op, adapter, packageRoot, evidence,
+    linkPeers: (pkg, dir) => linkHostPeersIntoPackage(pkg, { appDir: path.join(op.home, 'runtime', 'lib') }, dir),
+  })
   // 桌面版（Electron）走整体替换的独立驱动：POSIX 的进程身份与 systemd 所有权在 Windows 无等价物，
   // 不做"半套身份校验"，只做存在性判定＋桌面版自己的装包入口。CLI/POSIX 路径一行未改。
   if (op.host === 'desktop') return createDesktopDriver(op, adapter, packageRoot, evidence, budget, { runtime, runPackage })
@@ -490,7 +465,8 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { platf
   const env = { ...stripSecrets(process.env), DSH_HOME: op.home, DSH_TAVERN_CLI_HOME: op.home, pnpm_config_update_notifier: 'false', npm_config_offline: 'true', pnpm_config_offline: 'true' }
   const inspectUnit = () => properties(unit?.unit || op['systemd-unit'], activeBudget.remaining(2000), runCommand)
   const assertAssembly = action => {
-    const state = profileState(op.profileDir), present = !!state.deps[adapter.packageName] && state.bundles.includes(adapter.packageName) && existsSync(installed)
+    const state = profileState(op.profileDir)
+    const present = assembly.assertAssembly(action).present   // 目标存在性一律由 helper 判定（不再用 const 路径 existsSync）
     const other = deps => Object.fromEntries(Object.entries(deps).filter(([key]) => key !== adapter.packageName).sort(([a], [b]) => a.localeCompare(b)))
     if (JSON.stringify(other(state.deps)) !== JSON.stringify(other(prior.deps)) || JSON.stringify(state.bundles.filter(s => s !== adapter.packageName)) !== JSON.stringify(prior.bundles.filter(s => s !== adapter.packageName))) throw Error('装卸改变非目标依赖/bundle，拒绝成功')
     for(const [file,bytes]of Object.entries(originalDependencyBytes||{}))if(bytes&&(!existsSync(file)||!readFileSync(file).equals(bytes)))throw Error('官方操作改变既有非目标软件包，拒绝冒认单包安装成功')
@@ -500,12 +476,10 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { platf
   }
   async function manage(action, root = packageRoot) {
     await driver.assertStopped()
-    await runPackage(original?.argv[0] || process.execPath, [runtime.cli, 'plugin', '--profile', op.profile, ...(action === 'install' ? ['add', 'file:' + root] : ['remove', adapter.packageName]), ...packagePolicyArgs()], { cwd: op.app, env, timeout: activeBudget.remaining(18000) })
+    // POSIX 标准目录、包内宿主同实例 peer 和持久行由 helper 写盘；
+    // 不再走官方 `plugin add/remove`（file: 安装），也不再由 driver 复制/比对包字节。
+    await assembly.manage(action, root)
     assertAssembly(action)
-    if(action==='install'){
-      const {samePackage}=await import('./runner.mjs')
-      if(!samePackage(root,realpathSync(installed)))throw Error('官方安装后包字节不是选定本地代，拒绝成功')
-    }
   }
   const driver = {
     runtime,
@@ -629,7 +603,7 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { platf
       }
       if (cleanResidual) {
         if (action !== 'uninstall') throw Error('兜底残留路径仅用于卸载')
-        residual = residualAssembly({ home: op.home, profileDir: op.profileDir, packageName: adapter.packageName, evidence })
+        residual = assembly.residual()   // 残留识别由 helper 提供（含 uninstall/restore/verify 三件套）
         driver.wasRunning = !!original
         if (original) { context.port = original.port; context.host = original.host }
         return { noop: false, wasRunning: !!original, assemblyPresent: residual.present }
@@ -640,17 +614,16 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { platf
         ? "import vm from 'node:vm';import {DatabaseSync} from 'node:sqlite';import {zstdDecompressSync} from 'node:zlib';if(typeof vm.SourceTextModule!=='function')throw Error('缺少vm.SourceTextModule');const db=new DatabaseSync(':memory:');db.exec('CREATE TABLE probe(k INTEGER PRIMARY KEY) STRICT');db.close();if(typeof zstdDecompressSync!=='function')throw Error('缺少zstd')"
         : "import {DatabaseSync} from 'node:sqlite';import {zstdDecompressSync} from 'node:zlib';const db=new DatabaseSync(':memory:');db.exec('CREATE TABLE probe(k INTEGER PRIMARY KEY) STRICT');db.close();if(typeof zstdDecompressSync!=='function')throw Error('缺少zstd')"
       await runPackage(original?.argv[0] || process.execPath, [...(action === 'install' && adapter.requiresVmModules ? ['--experimental-vm-modules'] : []), '--input-type=module', '-e', probe], { cwd: op.app, env, timeout: activeBudget.remaining(2500) })
-      await runPackage('pnpm', ['--version'], { cwd: op.app, env, timeout: activeBudget.remaining(2500) })
-      const present = !!prior.deps[adapter.packageName]
-      if (present !== prior.bundles.includes(adapter.packageName) || present !== existsSync(installed)) throw Error('目标装配不完整，拒绝猜测')
+      // present / upgrading / dir 与本次 original 快照都由 helper 的 preflight 给出
+      //（helper 写入前把原位置归档供本次失败恢复；不复制依赖或用户数据）。
+      const assemblyState = await assembly.preflight(action)
+      const present = assemblyState.present
+      driver.priorAssemblyPresent = present
+      if (assemblyState.upgrading) driver.upgrading = true
       let withdrawnClean = false
       if (present) {
-        if (json(path.join(installed, 'package.json')).name !== adapter.packageName) throw Error('现装包身份错误')
-        const { copyPackage, samePackage } = await import('./runner.mjs')
-        driver.recoveryPackage = samePackage(packageRoot, realpathSync(installed)) ? packageRoot : path.join(evidence, 'original-package')
-        if (driver.recoveryPackage !== packageRoot) copyPackage(realpathSync(installed), driver.recoveryPackage)
-        if (action === 'install' && driver.recoveryPackage !== packageRoot) driver.upgrading = true // 同名不同包：允许**新块机制**换代（旧机制 ≤0.3.7 由 source 门禁按旧记录/marker 拒）；recoveryPackage 仅服务本次装配回滚
-        // 与桌面版同款"退出撤缝态"：宿主正常退出后disposer已撤缝删记录，源码即作者原像。
+        if (json(path.join(assemblyState.dir, 'package.json')).name !== adapter.packageName) throw Error('现装包身份错误')
+        // 兼容旧代退出撤缝态；标准目录持久模式正常退出保留区块和摘要。
         if (!existsSync(path.join(op.app, STANDARD_RECORD))) {
           const { sourceAccess } = await import('./source.mjs')
           // 缺记录不再拒：源码已是干净撤缝态按原逻辑；否则交 source 按**现场完整块/整文件 owned 块**处理（无记录也可证明并撤）。
@@ -740,9 +713,9 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { platf
       return action === 'restore' ? residual.restore() : residual.uninstall()
     },
     async restorePackage() {
-      if (prior.deps[adapter.packageName]) await manage('install', driver.recoveryPackage || packageRoot)
-      else if (profileState(op.profileDir).deps[adapter.packageName] || existsSync(installed)) await manage('uninstall')
-      else assertAssembly('uninstall')
+      // 同桌面驱动：恢复语义（原代包/装配回原布局）由 helper 承担；这里只保证停止态。
+      await driver.assertStopped()
+      await assembly.restore()
     },
     beginRecovery() { recovery = true; activeBudget = maintenanceBudget({ milliseconds: 90000 }) },
     async start() {
@@ -797,7 +770,7 @@ export function createDriver(op, adapter, packageRoot, evidence, budget, { platf
       if (!recovery) budget.remaining()
       return { runtimeVerified: false, basicHealthVerified: true, state: 'running', webVerification: '待用户在已登录页面确认；未认证插件库存，不冒称功能验收' }
     },
-    async verifyRecovery(target) { return driver.verify(prior.deps[adapter.packageName] ? 'install' : 'uninstall', adapter, { process: target }) },
+    async verifyRecovery(target) { return driver.verify(driver.priorAssemblyPresent ? 'install' : 'uninstall', adapter, { process: target }) },
   }
   return driver
 }

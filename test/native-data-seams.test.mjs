@@ -12,6 +12,7 @@ import { applyNativeDataTransform, isNativeDataApplied } from '../deploy/native-
 import { createChatSqliteStore } from '../chat-sqlite-store.js'
 import { AUTHOR_VERSION } from '../lib/standard-host.js'
 import { activeSource, prepareCommentAuthorTree } from './fixtures/comment-author-tree.mjs'
+import { disposeNativeDataPrepare, nativeDataMetrics, nativeDataSeamSource } from './support/native-data-prepare.mjs'
 
 // 与 A 闸同机制的真实 helper（作者 2.5 真身 copy/diff/apply ＋ 5 显示投影脱离替身）
 const AUTHOR25 = '../../../tmp/upstream25-author-fixture/src/dsh-tavern-5d2ffacf4231c9f45dc641b9db9e0286c4fa5f60/tavern-plugin/lib/domain/'
@@ -25,7 +26,11 @@ const RECORD = COMMENT_SEAMS_RECORD
 const BRIDGE = 'tavern-plugin/lib/domain/storage-native-data.js'
 const INDEX = 'tavern-plugin/lib/index.js'
 
-/** 真实作者 source fixture → 独立 tmp（helper 只复制 maintenanceTargets + 作者包；缺失即响亮失败，不 skip）。 */
+/** 本次实际执行到的共享准备消费者数（只选一条时指标按实际计，不虚报"两用例都跑了"）。 */
+let casesRan = 0
+
+/** 真实作者 source fixture → 独立 tmp（helper 只复制 maintenanceTargets + 作者包；缺失即响亮失败，不 skip）。
+ *  只给**第 1 条装卸用例**用（保持自身独立、不参与共享准备）。 */
 function fixture(t) {
   const tree = prepareCommentAuthorTree()
   assert.ok(tree, '缺少作者 source fixture：设 DSH_TAVERN_TEST_APP 或准备本地 author-fixture')
@@ -33,49 +38,8 @@ function fixture(t) {
   return { appDir: tree.appDir, original: tree.original }
 }
 
-test('S1 S2标准装卸保持同store能力桥并恢复作者字节', t => {
-  const f = fixture(t)
-  const indexPath = path.join(f.appDir, ...INDEX.split('/'))
-  const indexBefore = readFileSync(indexPath)
-  assert.equal(existsSync(path.join(f.appDir, ...BRIDGE.split('/'))), false, '装配前不应存在该桥（作者树无此文件）')
+// 原正向结果迁至 standard-positive.test.mjs；其余场景保留独立现场。
 
-  // ① 装配：桥写入、记录归属（owned-new + 注释块）、check ready（前置：装配前原字节未应用转换）
-  assert.equal(isNativeDataApplied(indexBefore.toString('utf8')), false, '前置（装配前原字节）：尚未应用 native-data 转换')
-  assert.equal(applyStandardSeams({ appDir: f.appDir, authorVersion: AUTHOR_VERSION, assertStopped: () => true }).changed, true)
-  const bridgePath = path.join(f.appDir, ...BRIDGE.split('/'))
-  assert.equal(existsSync(bridgePath), true, '装配后桥必须存在')
-  const bridgeAfter = readFileSync(bridgePath)
-  // 桥是 projector 工厂入口（不是"同 store 摘要"本身）：同 store 的实际证明在 index 的 store 调用
-  assert.match(bridgeAfter.toString('utf8'), /storagePackage\('session-window-projector'\)/, '桥必须接同一 store 能力包（session-window-projector）')
-  assert.match(bridgeAfter.toString('utf8'), /createSessionWindowProjector/, '桥必须暴露 S2 窗口投影工厂')
-  assert.match(bridgeAfter.toString('utf8'), /createActivitySummaryBridge/, '桥必须暴露 S1 活动摘要工厂')
-  // 作者 index 上的 native-data 转换：装配后读**实际** index，必须已应用且真实调用同一 store
-  const indexSeamed = readFileSync(indexPath, 'utf8')
-  assert.equal(isNativeDataApplied(indexSeamed), true, '装配后实际 index 必须已应用 native-data 转换')
-  assert.match(indexSeamed, /chatJournalStore\.readActivitySummary/, 'index 必须真实调用同一 store 的 readActivitySummary')
-  assert.match(indexSeamed, /chatJournalStore\.readOpeningWindow/, 'index 必须真实调用同一 store 的 readOpeningWindow')
-  assert.match(indexSeamed, /storage-native-data\.js/, 'index 必须 import 新桥（projector 工厂）')
-  const record = JSON.parse(readFileSync(path.join(f.appDir, RECORD), 'utf8'))
-  assert.equal(record.format, 1)
-  assert.equal(record.owner, 'dsh-tavern-sqlite-v2')
-  assert.ok(Object.hasOwn(record.owned, BRIDGE), 'owned-new 归属必须记新桥：' + BRIDGE)
-  assert.equal(record.owned[BRIDGE].mode, 'owned-new')
-  // 新契约：owned 记录只留 metadata 四键（不存 body）；实现字节从现场 owned-file 块的 ACTIVE 投影读。
-  assert.deepEqual(Object.keys(record.owned[BRIDGE]).sort(), ['format', 'mode', 'owner', 'rel'], 'owned 记录只留 metadata 四键')
-  assert.equal(Object.hasOwn(record.owned[BRIDGE], 'body'), false, 'owned 记录不得保存 body 历史')
-  assert.match(activeSource(readFileSync(bridgePath, 'utf8'), BRIDGE), /storagePackage\('session-window-projector'\)/, 'ACTIVE 投影必须承载真实自有实现')
-  assert.ok(Object.hasOwn(record.files, INDEX), '作者 index 必须记成注释块文件')
-  assert.ok(record.files[INDEX].blocks.length > 0, 'index 必须至少一个接缝块')
-  assert.equal(checkStandardSeams({ appDir: f.appDir, authorVersion: AUTHOR_VERSION }).ready, true, '装配后应 ready')
-
-  // ② 卸载：桥移除、记录清理、作者 index 逐字节回原（不残留旧全 timeline 形态）
-  assert.equal(uninstallStandardSeams({ appDir: f.appDir, assertStopped: () => true }).changed, true)
-  assert.equal(existsSync(bridgePath), false, '卸载后桥必须移除')
-  assert.equal(existsSync(path.join(f.appDir, RECORD)), false, '卸载后不应残留标准记录')
-  assert.deepEqual(readFileSync(indexPath), indexBefore, '作者 lib/index.js 必须逐字节恢复')
-  const indexAfter = readFileSync(indexPath, 'utf8')
-  assert.equal(/session-window-projector|createActivitySummaryBridge/.test(indexAfter), false, '卸载后 index 不得残留新桥引用')
-})
 
 /** 真实 store 夹具：沿用既有 A 闸机制（8 个真实/脱离 helper ＋ 自有 tmp；与原装卸夹具互不影响）。 */
 function createStoreFixture(t, chatId = 'chat-consumer-fixture') {
@@ -113,13 +77,11 @@ test('S1 S2同真store查询消费者走SQL快路径', async t => {
   }
   await f.store.update(chatId, () => chat)
   const stored = await f.store.read(chatId)                    // 真 store 读（不是 readChat）
-  // source＝独立装配后的作者 index（由 applyStandardSeams 真正施缝，不自行调 transform、不猜 depsExpression）
-  const seam = fixture(t)
-  assert.equal(applyStandardSeams({ appDir: seam.appDir, authorVersion: AUTHOR_VERSION, assertStopped: () => true }).changed, true)
-  const seamed = readFileSync(path.join(seam.appDir, ...INDEX.split('/')), 'utf8')
-  assert.equal(isNativeDataApplied(seamed), true, '装配后 source 必须已应用 native-data 转换')
-  // 切缝副本只取 ACTIVE 投影：ORIGINAL 区是注释掉的作者原文，整段切片会撞锚点/重复声明。
-  const transformed = activeSource(seamed, INDEX)
+  // source＝与下一用例**共享一次**真实施缝准备（support/native-data-prepare.mjs：懒单例 + 缓存命中）；
+  // 真实施缝仍由 applyStandardSeams 完成（不自行调 transform、不猜 depsExpression），真 store 仍本用例独立。
+  casesRan += 1
+  const transformed = nativeDataSeamSource()
+  assert.equal(isNativeDataApplied(transformed), true, '共享准备的 ACTIVE 投影必须已应用 native-data 转换')
   const api = new Function(
     'readSessionMap', 'str', 'chatJournalStore', 'HELPER_MESSAGE_COLD_WINDOW', 'readRecentWindow',
     'chatPersistence', 'taskStateReader',
@@ -159,11 +121,9 @@ test('S1 S2同真store窗口消费者形状分发与guard', async t => {
     messages: Array.from({ length: 90 }, (_v, index) => ({ role: index % 2 === 0 ? 'user' : 'assistant', text: 'msg-' + index, turn: Math.floor(index / 2) + 1 }))
   }
   await f.store.update(chatId, () => chat)
-  const seam = fixture(t)
-  assert.equal(applyStandardSeams({ appDir: seam.appDir, authorVersion: AUTHOR_VERSION, assertStopped: () => true }).changed, true)
-  const seamed = readFileSync(path.join(seam.appDir, ...INDEX.split('/')), 'utf8')
-  // 切缝副本只取 ACTIVE 投影（ORIGINAL 是注释掉的作者原文，直接切片会撞锚点/重复声明）。
-  const transformed = activeSource(seamed, INDEX)
+  // 与上一用例共享同一份准备（第二次必然命中缓存；真 store/窗口状态本用例独立）
+  casesRan += 1
+  const transformed = nativeDataSeamSource()
   const viewCalls = [], fallbackCalls = [], cardCalls = []
   let projectorMode = 'native'
   let projectCalls = 0, staleAdvances = 0, openingReads = 0
@@ -249,4 +209,14 @@ test('S1 S2同真store窗口消费者形状分发与guard', async t => {
   const viewCallsBefore = viewCalls.length
   await api.projectOpeningWindow({ chat: stored, from: 0, to: 89, messageCount: 90, revision: pinnedRevision })
   assert.equal(viewCalls.length > viewCallsBefore, true, '普通窗口必须仍走作者原路径（view 可被调用）')
+})
+
+// 共享准备收口：两消费者同 process 共享一次准备 ⇒ preparations 1、第二个命中缓存、cleanup 一次；
+// 只跑其中一条时按实际执行数核（不虚报、也不掩盖）。
+test.after(() => {
+  const disposed = disposeNativeDataPrepare()
+  assert.equal(nativeDataMetrics.preparations, casesRan > 0 ? 1 : 0, '共享准备次数必须等于"是否有消费者"（两消费者共同只准备 1 次）')
+  assert.equal(nativeDataMetrics.cacheHits, Math.max(0, casesRan - 1), '第二个消费者必须命中缓存（未跑第二条则为 0）')
+  assert.equal(nativeDataMetrics.cleanups, nativeDataMetrics.preparations, '每次准备恰一次 cleanup')
+  assert.equal(disposed, casesRan > 0, '有消费者时必须真的 dispose 掉共享目录')
 })

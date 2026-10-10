@@ -161,7 +161,7 @@ function embeddedDesktopRuntimeFor(op) {
 /**
  * 官方 Windows CLI 运行时（私有 home/runtime；独占新增，不接管桌面版也不动 POSIX 分支）：
  *   root=appDir=home/runtime，peerRoot=home/runtime/node_modules，cli=**真实 JS 入口**（不是 dsh.cmd）。
- * 返回 `cli` 为真实 JS 入口：维护驱动用 `node <cli> plugin …` 启动，cmd 包装器不能被当 JS 执行。
+ * 返回 `cli` 为真实 JS 入口供目标身份核对，cmd 包装器不能被当 JS 执行；标准目录装配不调用 plugin add/remove。
  * 安装核 SDK/boot 与导入 peer 的版本，并要求解析到的 entry 就是**本地 physical 副本**（允许正规
  * pnpm 链接，拒绝经祖先 node_modules 补缺）；uninstall 只要求私有 SDK bin 与同一把原子锁（不核 peer）。
  * 注意：官方 WinCLI **没有私有 runtime/node.exe**，它用 system PATH 的 node 启动（见 process.mjs 存在性判定）。

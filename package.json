@@ -1,11 +1,12 @@
 {
   "name": "dsh-tavern-sqlite-v2",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "private": true,
   "type": "module",
   "description": "V2 完整功能版本线：SQLite权威存储与干净回退，保留当前服务端MVU、卡脚本执行和分类能力；原档只读、用户手动新ID分叉",
   "exports": {
-    ".": "./index.js",
+    ".": "./plugin.js",
+    "./session-persistence": "./index.js",
     "./host-patch": "./host-patch.js",
     "./host-session-install": "./lib/host-session-install.js",
     "./rollback-layers": "./rollback-layers.js",
@@ -31,6 +32,7 @@
     "./locale/*.json": "./locale/*.json",
     "./client": "./client.js",
     "./host-actions": "./host-actions.js",
+    "./save-handlers": "./save-handlers.js",
     "./variable-ops": "./lib/variable-ops.js",
     "./legacy-view-seams": "./lib/legacy-view-seams.js",
     "./legacy-bindings": "./lib/legacy-bindings.js",
@@ -59,14 +61,14 @@
     "./tavern-regex-api": "./lib/tavern-regex-api.js"
   },
   "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    },
     "client": {
       "platform": "web",
       "immediately": true,
       "inject": [
-        "@deepseek-ai/dsh-client-ui-conversation"
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "dsh-tavern-plugin"
       ]
     }
   },
@@ -80,6 +82,8 @@
     "build:release": "node scripts/build-release.mjs"
   },
   "files": [
+    "bootstrap/**",
+    "plugin.js",
     "chat-sqlite-store.js",
     "client.js",
     "cordis.patch.yml",
@@ -87,6 +91,7 @@
     "install.sh",
     "scripts/**",
     "host-actions.js",
+    "save-handlers.js",
     "host-patch.js",
     "index.js",
     "lib/**",

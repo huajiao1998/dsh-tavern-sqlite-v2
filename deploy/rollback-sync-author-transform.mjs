@@ -13,7 +13,28 @@ const EVENT=`const slots = ctx.slots;
                     liveTavernView.rebase(receipt.sessionId);
                     tavernCoordination.invalidate(receipt.sessionId);
                 });
-            }, "dsh-tavern: same-connection rollback sync");`
+            }, "dsh-tavern: same-connection rollback sync");
+            // [dsh-tavern-storage-view:v2] 只转发作者既有读所有权/同步语义，不新增第二套 view 或清理引擎。
+            ctx.provide("tavernStorageView", {
+                apiVersion: 2,
+                selectFailure: function (sessionId) {
+                    if (typeof sessionId !== "string" || !sessionId) return null;
+                    return liveTavernView.select(sessionId, [["failureTarget"], ["failureCleanupReason"], ["activity"]]);
+                },
+                getSnapshot: function (sessionId) {
+                    return sessionId ? liveTavernView.getSnapshot(sessionId) : null;
+                },
+                request: function (method, args, sessionId) {
+                    if (method !== "rollbackTurn") throw new Error("tavernStorageView 只允许 rollbackTurn");
+                    return rpc(method, args, sessionId);
+                },
+                refresh: function (sessionId) {
+                    if (!sessionId) return;
+                    beginSessionViewRead.rebase(sessionId);
+                    liveTavernView.rebase(sessionId);
+                    tavernCoordination.invalidate(sessionId);
+                }
+            });`
 function once(s,a,b){if(s.split(a).length!==2)throw Error('回退同步作者锚点缺失/不唯一：'+a.slice(0,90));return s.replace(a,b)}
 function inlineModule(source,name,transform){
  const start=source.indexOf('function '+name+'('),end=source.indexOf('\n\t\tfunction ',start+10)

@@ -68,13 +68,27 @@ export function applyHostTransform(source) {
     "owner: 'server', serverOwned: true,", '浏览器MVU核心退役')
   next = once(next, "    requiresBrowser: async chat => hasTavernScriptRuntime(chat, (await readCardExtensions(chat.cardPath, chat))?.helperScripts)",
     "    requiresBrowser: async chat => storageBrowserScripts(projectTavernHelperScripts((await readCardExtensions(chat.cardPath, chat))?.helperScripts).scripts, { store: storageDispatchMarks, cardPath: chat.cardPath }).length > 0", '无计算脚本浏览器依赖')
-  next = once(next, "      case 'saveBodyEdit': return { view: await bodyEditor.save(args && args.sessionId, args) }",
-    `      case 'saveBodyEdit': {
+  next = applyBodyEditEventTransform(next)
+  return applyVariableConsumerTransform(next)
+}
+
+// 正文编辑真实生命周期事件：新版上游（42852b0/2.5.0）save 之后自带 notifyPluginTimeline('edit')，旧版是单行 return。
+// 双形态各自严格唯一（exclusive once，不用松 regex）；注入体保留 MESSAGE_EDITED 同步派发，旧版**不**假造 notify 调用。
+const BODY_EDIT_EVENT_MARKER = '// [dsh-tavern-body-edit-event:v1]'
+const BODY_EDIT_EVENT_LEGACY = "      case 'saveBodyEdit': return { view: await bodyEditor.save(args && args.sessionId, args) }"
+const BODY_EDIT_EVENT_NEW = `      case 'saveBodyEdit': {
+        const view = await bodyEditor.save(args && args.sessionId, args)
+        notifyPluginTimeline(args && args.sessionId, 'edit', { settled: true })
+        return { view }
+      }`
+function bodyEditEventBody(keepAuthorNotify) {
+  return `      case 'saveBodyEdit': {
+        ${BODY_EDIT_EVENT_MARKER}
         // 正文编辑的服务端事件在作者已同步原生Surface之后派发；只观察最后一楼，不扫描历史。
         const sessionId = args && args.sessionId
         const chatId = (await readSessionMap())[sessionId]
         const before = chatId && await chatPersistence.readWindow(chatId, { limit: 1 })
-        const bodyView = await bodyEditor.save(sessionId, args)
+        const bodyView = await bodyEditor.save(sessionId, args)${keepAuthorNotify ? "\n        notifyPluginTimeline(sessionId, 'edit', { settled: true })" : ''}
         const after = chatId && await chatPersistence.readWindow(chatId, { limit: 1 })
         const oldText = before?.chat?.messages?.[0]?.sourceText ?? before?.chat?.messages?.[0]?.text
         const newText = after?.chat?.messages?.[0]?.sourceText ?? after?.chat?.messages?.[0]?.text
@@ -85,8 +99,56 @@ export function applyHostTransform(source) {
           return { view: await view(latest, await readChatCard(latest)) }
         }
         return { view: bodyView }
-      }`, '正文编辑真实生命周期事件')
-  return applyVariableConsumerTransform(next)
+      }`
+}
+// 新版上游（a2008bf）插件 editTurn → deps.editText → bodyEditor.replaceText：作者只 notify 时间线，
+// **不派发服务端 MESSAGE_EDITED**；此处补同一事件（严格唯一锚点，旧版无此入口则原样通过）。
+const BODY_EDIT_TEXT_ANCHOR = `    editText: async (material, text) => {
+      await bodyEditor.replaceText(material.sessionId, text)
+      notifyPluginTimeline(material.sessionId, 'edit', { settled: true })
+    },`
+const BODY_EDIT_TEXT_MARKER = '// [dsh-tavern-body-edit-text-event:v1]'
+function bodyEditTextBody() {
+  return `    editText: async (material, text) => {
+      ${BODY_EDIT_TEXT_MARKER}
+      // 与 saveBodyEdit 同语义：只观察最后一楼窗口、正文真变化才派发、失败不派发。
+      const sessionId = material && material.sessionId
+      const chatId = sessionId && (await readSessionMap())[sessionId]
+      const before = chatId && await chatPersistence.readWindow(chatId, { limit: 1 })
+      await bodyEditor.replaceText(sessionId, text)
+      notifyPluginTimeline(sessionId, 'edit', { settled: true })
+      const after = chatId && await chatPersistence.readWindow(chatId, { limit: 1 })
+      const oldText = before?.chat?.messages?.[0]?.sourceText ?? before?.chat?.messages?.[0]?.text
+      const newText = after?.chat?.messages?.[0]?.sourceText ?? after?.chat?.messages?.[0]?.text
+      if (before && after && oldText !== newText) {
+        const current = await chatForSession(sessionId)
+        await tavernScriptHostAdapter.dispatchServerEvent({ sessionId, chat: current, event: 'MESSAGE_EDITED', args: [after.to] })
+      }
+    },`
+}
+
+export function applyBodyEditEventTransform(source) {
+  if (source.includes(BODY_EDIT_EVENT_MARKER)) {
+    if (!source.includes(bodyEditEventBody(true)) && !source.includes(bodyEditEventBody(false))) throw new Error('正文编辑接缝已注入但内容不符')
+    // 旧 marker 不得充当新入口的安全证：声明了 editText 属性就必须是**完整已注入体**（半缺/被还原/未知一律拒）
+    const textDeclaredAny = /\beditText\s*:/.test(source)
+    const textInjected = source.split(bodyEditTextBody()).length - 1
+    if (textInjected > 1) throw new Error('正文编辑(editText)接缝注入体重复')
+    if (textDeclaredAny && textInjected !== 1) throw new Error('正文编辑(editText)接缝已声明但未注入或内容不符')
+    if (source.split(BODY_EDIT_TEXT_MARKER).length - 1 > 1) throw new Error('正文编辑(editText)接缝标记重复')
+    return source
+  }
+  const hasNew = source.split(BODY_EDIT_EVENT_NEW).length === 2
+  const hasLegacy = source.split(BODY_EDIT_EVENT_LEGACY).length === 2
+  if (hasNew === hasLegacy) throw new Error('正文编辑接缝锚点缺失或重复')
+  let next = source.replace(hasNew ? BODY_EDIT_EVENT_NEW : BODY_EDIT_EVENT_LEGACY, bodyEditEventBody(hasNew))
+  // 新版独有的插件 editText 入口：出现即必须严格命中一次（未知/重复形态一律拒），旧版无此入口则原样通过。
+  const textHits = next.split(BODY_EDIT_TEXT_ANCHOR).length - 1
+  const textDeclared = /\beditText\s*:/.test(next)
+  if (textHits > 1) throw new Error('正文编辑(editText)接缝锚点重复')
+  if (textHits === 0 && textDeclared) throw new Error('正文编辑(editText)接缝锚点不匹配')
+  if (textHits === 1) next = next.replace(BODY_EDIT_TEXT_ANCHOR, bodyEditTextBody())
+  return next
 }
 
 // R1额外代标记：已装核心Host也必须升级消费者；不依赖重新fork整份作者模块。
