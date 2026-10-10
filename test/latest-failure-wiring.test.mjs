@@ -32,6 +32,7 @@ import { readFailureEvidence } from '../lib/failure-view-evidence.js'
 import { applyNativeMessageHostTransform } from '../deploy/native-data-transform.mjs'
 import { AUTHOR_VERSION } from '../lib/standard-host.js'
 import { activeSource, commentAuthorTreeSource, prepareCommentAuthorTree } from './fixtures/comment-author-tree.mjs'
+import { bumpTreeCopy, composedFailureViewText, readLatestFailureSource } from './support/latest-failure-source.mjs'
 
 const INDEX_REL = 'tavern-plugin/lib/index.js'
 const VIEW_REL = 'tavern-plugin/lib/domain/chat-session-state.js'
@@ -54,11 +55,13 @@ const NARROW_NEEDLES = [
   'const native = inspectNativeFailureTail(chat, evidence, revision)',
 ]
 const trees = []
-/** 真实作者 source fixture → 自有 mkdtemp（helper 只复制维护 targets + 作者包；缺失即响亮失败，不 skip）。 */
+/** 真实作者 source fixture → 自有 mkdtemp（helper 只复制维护 targets + 作者包；缺失即响亮失败，不 skip）。
+ *  只给**真装卸/真 appDir**用例用；只读消费者改走 support/latest-failure-source.mjs 的原文直读。 */
 const buildTree = () => {
   const tree = prepareCommentAuthorTree()
   assert.ok(tree, '缺少作者 source fixture：设 DSH_TAVERN_TEST_APP 或准备本地 author-fixture')
   trees.push(tree)
+  bumpTreeCopy()
   return tree
 }
 const read = (tree, rel) => readFileSync(path.join(tree.appDir, rel), 'utf8')
@@ -78,65 +81,11 @@ const loadHostSession = async () => {
 const loadHostModule = async name => await import(pathToFileURL(requireHost.resolve(name)).href)
 test.after(() => { for (const tree of trees) tree.cleanup() })   // 只清 helper 自建目录
 
-test('最新失败接线：标准完整施缝真作者树含DI与failureTarget并ready', async () => {
-  const tree = buildTree(), app = tree.appDir
-  const applied = applyStandardSeams({ appDir: app, authorVersion: AUTHOR_VERSION, assertStopped: () => true })
-  assert.equal(applied.changed, true, '首装必须产生变更')
-  assert.equal(applied.ready, true, '首装必须 ready')
-  assert.equal(checkStandardSeams({ appDir: app }).ready, true, '严格 check 必须 ready')
-  const record = JSON.parse(readFileSync(path.join(app, COMMENT_SEAMS_RECORD), 'utf8'))
-  assert.equal(record.format, 1)
-  assert.equal(record.owner, 'dsh-tavern-sqlite-v2')
-  assert.ok(Object.hasOwn(record.files, INDEX_REL), 'index 必须记成注释块文件')
-  assert.ok(record.files[INDEX_REL].blocks.length > 0, 'index 必须有接缝块')
-  // 注释块协议：作者旧代码按 '// ' 保留在 ORIGINAL 区 ⇒ 业务接线一律只看 ACTIVE 投影。
-  const index = activeSource(read(tree, INDEX_REL), INDEX_REL)
-  for (const key of DI_KEYS) assert.equal(index.includes(key), true, '宿主 DI 必须接线到真实 index：' + key)
-  assert.equal(index.includes('async function appendMessagesNarrow('), true, 'DI 闭包必须在位（appendMessages）')
-  assert.equal(index.includes('async function setMessageFloorNarrow('), true, 'DI 闭包必须在位（setMessageFloor）')
-  assert.equal(index.includes(FAILURE_RPC), true, 'RPC 必须带 failureTarget 参数接线')
-  const view = activeSource(read(tree, VIEW_REL), VIEW_REL)
-  assert.equal(view.includes('function latestFailureTarget(chat, replayTarget, evidence) {'), true, '视图必须带 latestFailureTarget 助手（含 evidence）')
-  assert.equal(view.includes('function latestFailureCleanupReason(chat, replayTarget, evidence) {'), true, '视图必须带 latestFailureCleanupReason 助手（含 evidence）')
-  for (const needle of NARROW_NEEDLES) assert.equal(view.includes(needle), true, '窄摘要分支缺失：' + needle)
-  for (const field of FAILURE_FIELDS) assert.equal(view.includes(field), true, '视图字段接线缺失：' + field)
-  assert.equal(view.includes("'当前失败缺少可靠发轮前基准或已不是最新尾部，不能安全清理'"), true, '缺基准原因必须如实接线（不猜删）')
-  // owned 垫片：applyStandardSeams 必须**真渲染**出 native-only/RPC 依赖的导出（不只 ready）
-  const shimDomain = read(tree, 'tavern-plugin/lib/domain/storage-rollback.js')
-  assert.equal(shimDomain.includes("import { storagePackage } from './storage-package.js'"), true, 'domain 垫片必须走 storagePackage 转出')
-  assert.equal(shimDomain.includes("export const { cleanRollback, inspectNativeFailureTail, readFailureEvidence } = await storagePackage('clean-rollback')"), true, 'domain 垫片必须导出 cleanRollback/inspectNativeFailureTail/readFailureEvidence')
-  assert.equal(shimDomain.includes('export const { cleanupAfterRollback, cleanupRollbackHeadIndex, preflightRollback, preflightRollbackAtSeq, cleanupAfterRollbackAtSeq } = impl'), true, 'domain 垫片原回退导出不得丢')
-  // 视图就在 lib/domain，`./storage-rollback.js` 相对解析即该 domain 垫片；必须真 import（不是只写在常量里）
-  assert.equal(VIEW_REL.includes('lib/domain/'), true, '被接线的视图必须位于 domain（相对 import 才指到该垫片）')
-  assert.equal(view.includes("import { inspectNativeFailureTail } from './storage-rollback.js'"), true, '视图必须真的 import 该导出')
-  // 该 evidence import 属于 index.js（沿用 :93 的 index）；视图侧只需下一句的 inspectNativeFailureTail
-  assert.equal(index.includes("import { readFailureEvidence as readFailureEvidenceFromQuery } from './domain/storage-rollback.js'"), true, 'index 证据读口必须由 domain 垫片转出')
-  // owned 导出必须是**真 runtime 函数类型**（presence 不等 type），与 core 实际实现对照
-  const coreClean = await import(new URL('../lib/clean-rollback.js', import.meta.url).href)
-  const coreTarget = await import(new URL('../lib/failure-cleanup-target.js', import.meta.url).href)
-  const coreEvidence = await import(new URL('../lib/failure-view-evidence.js', import.meta.url).href)
-  assert.equal(typeof coreClean.cleanRollback, 'function', 'core cleanRollback 必须是函数')
-  assert.equal(typeof coreTarget.inspectNativeFailureTail, 'function', 'core inspectNativeFailureTail 必须是函数')
-  assert.equal(typeof coreEvidence.readFailureEvidence, 'function', 'core readFailureEvidence 必须是函数')
-  assert.equal(coreEvidence.readFailureEvidence.constructor.name, 'AsyncFunction', 'core readFailureEvidence 必须是 async（冷读含 await lease 与 finally 释放）')
-  assert.equal(coreEvidence.readFailureEvidence.length, 3, 'core readFailureEvidence 必须三参（liveEvidence, query, sessionId）')
-  // owned 垫片经 storagePackage('clean-rollback') 转出的必须是**同一实现**（core export 路径严格覆盖）
-  assert.equal(coreClean.readFailureEvidence, coreEvidence.readFailureEvidence, 'core clean-rollback 转出的 readFailureEvidence 必须与 failure-view-evidence 同一函数')
-  assert.equal(coreClean.inspectNativeFailureTail, coreTarget.inspectNativeFailureTail, 'core clean-rollback 转出的 inspectNativeFailureTail 必须与 failure-cleanup-target 同一函数')
-  // index 侧：DI 同时转出证据读口，且证据取用处包成 async（冷档 await 观察口）
-  assert.equal(index.includes('get readFailureEvidence() { return readFailureEvidence }'), true, 'index nativeData DI 必须转出 readFailureEvidence getter')
-  assert.equal(index.includes('const rollbackEvidence = await readFailureEvidence'), true, '证据取用处必须 async 包装')
-  // 幂等：同树复跑不变更
-  assert.equal(applyStandardSeams({ appDir: app, assertStopped: () => true }).changed, false, '复跑必须幂等')
-  // 宿主 DI 与失败接线的转换都必须可判定为"已应用"（复跑不重复插入）
-  assert.equal(applyNativeMessageHostTransform(index), index, '宿主 DI 转换对已施缝 index 必须幂等')
-  assert.equal(applyLatestFailureHostTransform(index), index, '失败宿主转换对已施缝 index 必须幂等')
-  assert.equal(applyLatestFailureViewTransform(view), view, '失败视图转换对已施缝视图必须幂等')
-})
+// 原正向结果迁至 standard-positive.test.mjs；其余场景保留独立现场。
+
 
 test('最新失败接线：RPC与投影幂等及缺块拒绝', async () => {
-  const tree = buildTree()
-  const indexRaw = read(tree, INDEX_REL)
+  const indexRaw = readLatestFailureSource(INDEX_REL)
   // RPC：真完整 index source（含 pending 状态字段所在的整文件）
   const hostOnce = applyLatestFailureHostTransform(indexRaw)
   assert.equal(hostOnce.includes(FAILURE_RPC), true, 'RPC 必须改为 failureTarget 优先')
@@ -146,7 +95,7 @@ test('最新失败接线：RPC与投影幂等及缺块拒绝', async () => {
   assert.throws(() => applyLatestFailureHostTransform(hostOnce + '\n// [dsh-tavern-latest-failure-host:v1]\n'), /不完整/, '标记重复必须拒')
   assert.throws(() => applyLatestFailureHostTransform(indexRaw.replace("case 'rollbackTurn': return { view: await rollbackTurn(args && args.sessionId, args && args.chatId, args && args.expectedTurn) }", '')), /锚点缺失\/不唯一/, '锚点缺失必须拒')
   // 视图：真完整 chat-session-state source；失败视图接缝接在**既有 pending 视图转换产物**之后（真实标准组合顺序）
-  const viewRaw = applyRollbackPendingViewTransform(read(tree, VIEW_REL))
+  const viewRaw = applyRollbackPendingViewTransform(readLatestFailureSource(VIEW_REL))
   const viewOnce = applyLatestFailureViewTransform(viewRaw)
   for (const field of FAILURE_FIELDS) assert.equal(viewOnce.includes(field), true, '视图字段必须接线：' + field)
   assert.equal(viewOnce.includes('// [dsh-tavern-latest-failure-view:v1]'), true, '视图标记必须在位')
@@ -220,7 +169,6 @@ function projectorDeps() {
 }
 
 test('最新失败接线：窗口副本缺 _storageRevision 时以 windowRevision 作 pin（真 store→真投影→真 target 函数）', async (t) => {
-  const tree = buildTree()
   const root = mkdtempSync(path.join(os.tmpdir(), 'window-pin-store-'))
   // 先释放 store 再删目录，避免 Windows 句柄占用（既有真 store 夹具同法）
   t.after(() => { try { store.dispose?.() } catch { /* 已释放 */ } ; rmSync(root, { recursive: true, force: true }) })
@@ -236,7 +184,7 @@ test('最新失败接线：窗口副本缺 _storageRevision 时以 windowRevisio
   mkdirSync(path.join(root, 'chats'), { recursive: true })
   const store = createChatSqliteStore({ dataRoot: root, legacyData: undefined, helpers })
   // 真变换产物 → 真 target 函数（不重造整作者模块、不用 seam.rollback）
-  const viewSeamed = applyLatestFailureViewTransform(applyRollbackPendingViewTransform(read(tree, VIEW_REL)))
+  const viewSeamed = await composedFailureViewText()
   for (const field of FAILURE_FIELDS) assert.equal(viewSeamed.includes(field), true, '注入面必须含字段：' + field)
   const { latestFailureTarget, latestFailureCleanupReason } = failureHelpers(viewSeamed, { inspectNativeFailureTail: await loadInspectNativeFailureTail() })
   // 合成身份（不得复制现场 identities）
@@ -284,10 +232,15 @@ test('最新失败接线：窗口副本缺 _storageRevision 时以 windowRevisio
   assert.equal(summary.branchId, branchId)
   assert.equal(window.chat.messages.at(-1).turn, 41, '窗口尾必须是 assistant turn41')
   // 真投影：真 store 窗口字段 + fixture 依赖；rollbackViewFields 只回真 target 函数结果
+  // 终止失败证据（合成事件对象，不复制现场身份）：新 guard 只认同轮 turn/end reason=aborted/error。
+  // 真投影只回函数结果 ⇒ 证据由 deps 读取口按 chat 上的 `__failureEvidence`（缺省用本轮真实终止证据）传入。
+  const evidence42 = endingEvidence(42, 'aborted')
+  const evidenceById = new Map([[chatId, evidence42]])
+  const evidenceOf = chat => evidenceById.get(chat && chat.id) || evidence42
   const projector = createSessionWindowProjector({ ...projectorDeps(), rollbackViewFields: chat => ({
-    failureTarget: latestFailureTarget(chat, null),
-    canClearIncompleteReply: latestFailureTarget(chat, null) !== null,
-    failureCleanupReason: latestFailureCleanupReason(chat, null),
+    failureTarget: latestFailureTarget(chat, null, evidenceOf(chat)),
+    canClearIncompleteReply: latestFailureTarget(chat, null, evidenceOf(chat)) !== null,
+    failureCleanupReason: latestFailureCleanupReason(chat, null, evidenceOf(chat)),
   }) })
   const project = async source => {
     const result = await projector.project({ chat: source.chat, window: source, activity: source.activity })
@@ -302,18 +255,28 @@ test('最新失败接线：窗口副本缺 _storageRevision 时以 windowRevisio
   assert.equal(windowView.failureCleanupReason, '', '可清理时不得出现通用缺基准文案')
   assert.equal(windowView.canClearIncompleteReply, true, '可清理态必须让 UI 认到可清')
   // ② 摘要 revision 与窗口不符 ⇒ 必须拒（无 replayTarget ⇒ 不产原因，只断言 target 为 null）
+  // 本场景语义＝"摘要过期且无失败证据可用" ⇒ 用无证据投影（投影会丢自定义字段，故走 chatId 侧信道）
+  evidenceById.set(chatId, noEvidence())
   const stale = { ...window, failureCleanup: { ...summary, revision: Number(summary.revision) - 1 } }
   const staleView = await project(stale)
   assert.equal(staleView.failureTarget, null, '过期摘要必须拒')
   assert.equal(staleView.failureCleanupReason, '', '无 replayTarget 时不产通用原因（原语义保持）')
+  evidenceById.set(chatId, evidence42)   // 复原本轮终止证据（②只作用于该次投影）
   // ③ 全档路径：真 store read() 带 _storageRevision 且无摘要 ⇒ 走真 baseline fallback（拿同一轮的真实基准）
   const fullChat = await store.read(chatId)
   assert.equal(Number.isSafeInteger(fullChat._storageRevision), true, '全档必须带存储版本')
   assert.equal(Object.hasOwn(fullChat, 'failureCleanup'), false, '全档本就不带窄摘要')
-  assert.deepEqual(latestFailureTarget(fullChat, { turn: 42 }), {
+  assert.deepEqual(latestFailureTarget(fullChat, { turn: 42 }, evidence42), {
     chatId, sessionId, turn: 42, branchId, revision: fullChat._storageRevision, operationId,
-  }, '全档必须经 replayTarget 走真实基准 fallback 给同一轮目标')
-  assert.equal(latestFailureTarget({ ...fullChat, timeline: { ...fullChat.timeline, operations: {} } }, { turn: 42 }), null, '缺该轮操作 ⇒ 拒绝')
+  }, '全档必须经 replayTarget 走真实基准 fallback 给同一轮目标（带同证据）')
+  assert.equal(latestFailureTarget({ ...fullChat, timeline: { ...fullChat.timeline, operations: {} } }, { turn: 42 }, evidence42), null, '缺该轮操作 ⇒ 拒绝')
+  // 新 guard：非终止生命周期（active / completed / 无事件）一律不签目标、不给原因
+  assert.equal(latestFailureTarget(fullChat, { turn: 42 }, activeEvidence(42)), null, '仍 active（无 turn/end）⇒ 不签目标')
+  assert.equal(latestFailureTarget(fullChat, { turn: 42 }, completedEvidence(42)), null, 'turn/end completed ⇒ 不签目标')
+  assert.equal(latestFailureTarget(fullChat, { turn: 42 }, noEvidence()), null, '无 events ⇒ 不签目标')
+  assert.equal(latestFailureCleanupReason(fullChat, { turn: 42 }, activeEvidence(42)), '', 'active ⇒ 零原因（活动轮不提示清理）')
+  assert.equal(latestFailureCleanupReason(fullChat, { turn: 42 }, completedEvidence(42)), '', 'completed ⇒ 零原因')
+  assert.equal(latestFailureCleanupReason(fullChat, { turn: 42 }, noEvidence()), '', '无证据 ⇒ 零原因')
 })
 
 /** 从变换产物里按花括号配对取出真实函数文本（与 save-ui-seam/extractFunction 同法，不用正则猜边界）。 */
@@ -341,6 +304,32 @@ function failureHelpers(source, deps = null) {
     + '\nreturn { latestFailureTarget, latestFailureCleanupReason }'
   return new Function(...names, text)(...names.map(name => deps[name]))
 }
+/** 真实事件形状的**终止失败证据**：最新 turn/start 之后同轮出现 turn/end 且 reason=error/aborted。
+ *  新 guard 只认这一种生命周期才会签新 body 目标；active/completed/无事件都不许签。 */
+function endingEvidence(turn, kind = 'aborted') {
+  return { events: [
+    { seq: 0, type: 'turn/start', data: { turn } },
+    { seq: 1, type: 'user/message', data: { id: 'u' + turn, role: 'user', content: [{ type: 'text', text: '输入' + turn }] } },
+    { seq: 2, type: 'assistant/message', data: { turn, message: { id: 'a' + turn, role: 'assistant', content: [{ type: 'text', text: '正文' + turn }] } } },
+    { seq: 3, type: 'turn/end', data: { turn, reason: { kind } } },
+  ] }
+}
+/** 仅 turn/start + turn/end 的终止证据（无正文消息 ⇒ native inspector 无正文回退文案），用于原因回落负例。 */
+const endingEvidenceBare = (turn, kind = 'aborted') => ({ events: [
+  { seq: 0, type: 'turn/start', data: { turn } },
+  { seq: 1, type: 'turn/end', data: { turn, reason: { kind } } },
+] })
+
+/** 仍 active（无 end）的证据。 */
+const activeEvidence = turn => ({ events: [{ seq: 0, type: 'turn/start', data: { turn } }] })
+/** 已 completed（非失败终止）的证据。 */
+const completedEvidence = turn => ({ events: [
+  { seq: 0, type: 'turn/start', data: { turn } },
+  { seq: 1, type: 'turn/end', data: { turn, reason: { kind: 'completed' } } },
+] })
+/** 完全没有 events 的证据（冷档/无证据）。 */
+const noEvidence = () => ({ events: [] })
+
 /** 各用例共用的真身取用口（缺导出即响亮失败）。 */
 async function loadInspectNativeFailureTail() {
   const module = await import('../lib/clean-rollback.js')
@@ -349,30 +338,49 @@ async function loadInspectNativeFailureTail() {
 }
 
 test('最新失败接线：窄摘要分支与原因优先级（变换产物内真函数）', async () => {
-  const tree = buildTree()
-  const viewOnce = applyLatestFailureViewTransform(applyRollbackPendingViewTransform(read(tree, VIEW_REL)))
+  const viewOnce = await composedFailureViewText()
   const { latestFailureTarget, latestFailureCleanupReason } = failureHelpers(viewOnce, { inspectNativeFailureTail: await loadInspectNativeFailureTail() })
   const narrow = { cleanable: true, revision: 9, turn: 7, operationId: 'op7', branchId: 'b1' }
-  const chat = { id: 'c1', sessionId: 's1', _storageRevision: 9, failureCleanup: narrow }
-  assert.deepEqual(latestFailureTarget(chat, null),
+  // 该轮是**真实 body 失败**（timeline 内有 body 操作）⇒ 不落 native-only guard 分支；证据仍是同轮终止失败。
+  const chat = { id: 'c1', sessionId: 's1', _storageRevision: 9, failureCleanup: narrow,
+    timeline: { branchId: 'b1', operations: { op7: { kind: 'body', turn: 7, status: 'failed', businessBefore: { hp: 1 } } } } }
+  // 终止失败证据（turn7 aborted，真实事件形状；非 guard 轮的 body 失败，不签 native-only）
+  const evidence7 = endingEvidence(7, 'aborted')
+  assert.deepEqual(latestFailureTarget(chat, null, evidence7),
     { chatId: 'c1', sessionId: 's1', turn: 7, branchId: 'b1', revision: 9, operationId: 'op7' },
-    '窄摘要 cleanable 且 revision 相符 ⇒ 直接给目标（窄视图不再永远 null）')
-  assert.equal(latestFailureTarget({ ...chat, _storageRevision: 10 }, null), null, '窄摘要 revision 与现场不符 ⇒ 不采信')
-  assert.equal(latestFailureTarget({ ...chat, failureCleanup: { ...narrow, turn: 0 } }, null), null, '窄摘要 turn 非安全整数 ⇒ 不采信')
-  assert.equal(latestFailureTarget({ ...chat, failureCleanup: { ...narrow, operationId: '' } }, null), null, '窄摘要缺 operationId ⇒ 不采信')
-  // pending 形态仍优先于窄摘要（半提交只许完成同一清理）。
-  assert.equal(latestFailureTarget({ ...chat, rollbackPending: { id: 'rb1', failureTarget: { turn: 6, operationId: 'op6', branchId: 'b0' } } }, null).turn, 6,
-    'rollbackPending.failureTarget 优先')
-  assert.equal(latestFailureCleanupReason(chat, null), '', '窄摘要 cleanable ⇒ 无原因')
-  assert.equal(latestFailureCleanupReason({ ...chat, failureCleanup: { cleanable: false, reason: '该失败轮缺少发轮前回退基准，不能安全清理' } }, null),
+    '窄摘要 cleanable 且 revision 相符且终止失败 ⇒ 直接给目标（窄视图不再永远 null）')
+  // 负例用**无 timeline** 的同一窄摘要 chat：确保拒绝来自窄摘要校验，而不是被 body fallback 兜住
+  const chatBare = { id: 'c1', sessionId: 's1', _storageRevision: 9, failureCleanup: narrow }
+  assert.equal(latestFailureTarget({ ...chatBare, _storageRevision: 10 }, null, evidence7), null, '窄摘要 revision 与现场不符 ⇒ 不采信')
+  assert.equal(latestFailureTarget({ ...chatBare, failureCleanup: { ...narrow, turn: 0 } }, null, evidence7), null, '窄摘要 turn 非安全整数 ⇒ 不采信')
+  assert.equal(latestFailureTarget({ ...chatBare, failureCleanup: { ...narrow, operationId: '' } }, null, evidence7), null, '窄摘要缺 operationId ⇒ 不采信')
+  // 新 guard：无终止失败生命周期（active / completed / 无事件）⇒ 窄摘要再 cleanable 也不签
+  assert.equal(latestFailureTarget(chat, null, activeEvidence(7)), null, 'active（无 turn/end）⇒ 窄摘要不得签目标')
+  assert.equal(latestFailureTarget(chat, null, completedEvidence(7)), null, 'completed ⇒ 窄摘要不得签目标')
+  assert.equal(latestFailureTarget(chat, null, noEvidence()), null, '无 events ⇒ 窄摘要不得签目标')
+  assert.equal(latestFailureTarget(chat, null, endingEvidence(8, 'error')), null, '终止轮与窄摘要轮不一致 ⇒ 不采信（保守）')
+  // pending 形态仍优先于窄摘要（半提交只许完成同一清理）：active 证据下也优先
+  assert.equal(latestFailureTarget({ ...chat, rollbackPending: { id: 'rb1', failureTarget: { turn: 6, operationId: 'op6', branchId: 'b0' } } }, null, activeEvidence(7)).turn, 6,
+    'rollbackPending.failureTarget 优先（不受终止生命周期限制）')
+  assert.equal(latestFailureCleanupReason(chat, null, evidence7), '', '窄摘要 cleanable ⇒ 无原因')
+  assert.equal(latestFailureCleanupReason(chat, null, activeEvidence(7)), '', 'active ⇒ 零原因（不提示清理活动轮）')
+  assert.equal(latestFailureCleanupReason(chat, null, noEvidence()), '', '无证据 ⇒ 零原因')
+  assert.equal(latestFailureCleanupReason({ ...chat, failureCleanup: { cleanable: false, reason: '该失败轮缺少发轮前回退基准，不能安全清理' } }, null, evidence7),
     '该失败轮缺少发轮前回退基准，不能安全清理', '窄摘要 reason 优先于通用原因')
-  assert.equal(latestFailureCleanupReason({ id: 'c1', sessionId: 's1', _storageRevision: 9 }, { turn: 7 }),
-    '当前失败缺少可靠发轮前基准或已不是最新尾部，不能安全清理', '无窄摘要且 replayTarget 不可清 ⇒ 原因回落')
+  // 原因回落负例（终止失败但无可清目标 ⇒ 必须给出原因、不得静默）：新 guard 下 native inspector 会先报它自己的
+  // 权威原因（本档身份/分支/版本缺失、或正文须按该轮基准清理）；通用文案只在 native 无话可说时出现，故这里断言
+  // "落在已知清理原因集合内且非空"，不把某一条字面量当成唯一正确值。
+  // 严格身份：缺 timeline.branchId（身份/分支/版本）时，真 inspector 先报"缺身份/分支/版本"
+  const reasonFallback = latestFailureCleanupReason({ id: 'c1', sessionId: 's1', _storageRevision: 9 }, { turn: 7 }, endingEvidenceBare(7, 'error'))
+  assert.equal(reasonFallback, '失败清理缺少本档身份、分支或版本', '缺分支身份 ⇒ 必须精确报该原因，实际=' + JSON.stringify(reasonFallback))
+  // 对偶：身份/分支齐备但该轮没有 body 操作 ⇒ 报"正文须按该轮业务回退基准清理"（同一证据、不同形状）
+  const withBranch = latestFailureCleanupReason({ id: 'c1', sessionId: 's1', _storageRevision: 9, timeline: { branchId: 'b1', operations: {} } }, { turn: 7 }, endingEvidenceBare(7, 'error'))
+  // 实测合同（真 inspector，非猜测）：有身份/分支但该轮无 body ⇒ 报"不是可证明未进入正文准备的守卫错误，不能无基准清理"
+  assert.equal(withBranch, '最新轮不是可证明未进入正文准备的守卫错误，不能无基准清理', '有身份/分支但无 body ⇒ 必须精确报该原因，实际=' + JSON.stringify(withBranch))
 })
 
 test('最新失败接线：native-only 尾（guard 失败轮无 op）经注入 inspectNativeFailureTail 成为 ft（合成身份）', async () => {
-  const tree = buildTree()
-  const viewOnce = applyLatestFailureViewTransform(applyRollbackPendingViewTransform(read(tree, VIEW_REL)))
+  const viewOnce = await composedFailureViewText()
   // 真 helper 真身（缺导出会整模块加载失败，故按需 import；签名 chat, evidence, revision）
   const inspectNativeFailureTail = await loadInspectNativeFailureTail()
   // 合成身份（不得复制现场 title/branch/operation 值）
@@ -448,7 +456,6 @@ test('最新失败接线：native-only 尾（guard 失败轮无 op）经注入 i
 test('最新失败接线：冷开只读原生事件签发43且清后暴露42', async (t) => {
   // 本条**整合原 native-only 用例的全部协议断言**（真 helper 无 events/缺 events/坐标/无 operationId/身份），
   // 故独立的 native-only 用例不再单独执行；不新增文件、不扩用例数。
-  const tree = buildTree()
   const { Session } = await loadHostSession()
   // 冷 helper 不构造 Session：不需要 projections/Context/z 管理器
   // 真 Session → 真 SqliteSessionDb（events 从 seq 0，materialize 一次全量）
@@ -511,7 +518,7 @@ test('最新失败接线：冷开只读原生事件签发43且清后暴露42', a
     },
   }
   const readFailureEvidenceDI = id => readFailureEvidence({ loaded: false, events: [] }, coldQuery, id)
-  const viewSeamed = applyLatestFailureViewTransform(applyRollbackPendingViewTransform(read(tree, VIEW_REL)))
+  const viewSeamed = await composedFailureViewText()
   const { latestFailureTarget, latestFailureCleanupReason } = failureHelpers(viewSeamed, { inspectNativeFailureTail: await loadInspectNativeFailureTail() })
   const evidence = await readFailureEvidenceDI(sessionId)
   assert.equal(evidence.loaded, true, '冷证据必须标记 loaded')

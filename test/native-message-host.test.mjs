@@ -24,6 +24,7 @@ import { createChatSqliteStore } from '../chat-sqlite-store.js'
 import { COMMENT_SEAMS_RECORD } from '../deploy/comment-seam-files.mjs'
 import { activeSource, prepareCommentAuthorTree } from './fixtures/comment-author-tree.mjs'
 import { applyStandardSeams, uninstallStandardSeams, maintenanceTargets } from '../deploy/standard-seams.mjs'
+import { S5_DOMAIN_FILES, S5_NAME_OF, disposeS5Lifecycle, s5Lifecycle, s5SourcePath } from './support/native-message-lifecycle.mjs'
 import { AUTHOR_VERSION } from '../lib/standard-host.js'
 
 const AUTHOR25 = '../../../tmp/upstream25-author-fixture/src/dsh-tavern-5d2ffacf4231c9f45dc641b9db9e0286c4fa5f60/tavern-plugin/lib/domain/'
@@ -71,9 +72,18 @@ function markedBlock(source, marker, terminator) {
 /** A 段：块内 `return result` 即"真值早退"；否则返回 { fellThrough:true }（＝作者会续跑 attempt）。 */
 function runAppendBlock({ source, store, before, revision, changes, metadata, result }) {
   const block = markedBlock(source, MESSAGE_MARKER.appendMessages, '})()) return result')
-  const fn = new Function('store', 'before', 'revision', 'changes', 'metadata', 'result',
+  // 作者块外闭包：count 来自保存前楼数；head 是作者已应用头写集的最终头。
+  const count = before.messages?.length ?? 2
+  const head = { ...before }
+  for (const change of changes) {
+    if (change.path?.length === 1 && change.path[0] !== 'messages') {
+      if (change.op === 'delete') delete head[change.path[0]]
+      else if (change.op === 'set') head[change.path[0]] = change.value
+    }
+  }
+  const fn = new Function('store', 'before', 'revision', 'changes', 'metadata', 'result', 'count', 'head',
     'return (async function () {\n' + block + '\nreturn { fellThrough: true }\n})()')
-  return fn(store, before, revision, changes, metadata, result)
+  return fn(store, before, revision, changes, metadata, result, count, head)
 }
 
 /** B 段：返回 { saved }（作者紧接着 `if (saved) return`；falsy ⇒ 原体 updateChat 兜底）。 */
@@ -118,33 +128,34 @@ test('S5追加一楼items与headerSets保序透传且不直连patchChat', async 
   assert.deepEqual(call.args[2].headerSets, { settleStatus: 'pending', settleError: null, promptTemplateInput: undefined }, 'headerSets 必须是顶层普通对象（含 undefined 值项）')
   assert.equal(Array.isArray(call.args[2].headerSets), false, 'headerSets 不得是数组（store 直接拒数组）')
   assert.deepEqual(Object.keys(call.args[2].headerSets), ['settleStatus', 'settleError', 'promptTemplateInput'], '顶层键必须保序')
-  assert.equal(Object.keys(call.args[2]).sort().join(','), 'headerSets,items', '载荷只含 {items,headerSets}')
+  assert.equal(Object.keys(call.args[2]).sort().join(','), 'headerSets,items,timelineUpdate', '载荷保留同事务timelineUpdate入口')
+  assert.equal(call.args[2].timelineUpdate, undefined, '无timeline写集时不提交timeline变更')
   assert.equal(call.args[3], metadata, 'metadata 必须原样透传（同一对象引用）')
-  // 无 splice（纯头字段提交）时 items 为空数组，仍走同一出口
+  // 完整追加站点必须带唯一尾splice；缺失不能伪装成头字段提交。
   spy.calls.length = 0
-  await runAppendBlock({ source, store, before, revision: 4, changes: [changes[0]], metadata, result: {} })
-  assert.deepEqual(spy.calls[0].args[2], { items: [], headerSets: { settleStatus: 'pending' } }, '纯头字段提交 ⇒ items=[]、headerSets 对象')
-  // 顶层 delete ⇒ undefined（store 视为删除该头键）
-  spy.calls.length = 0
-  await runAppendBlock({ source, store, before, revision: 4, changes: [{ op: 'delete', path: ['settleError'] }], metadata, result: {} })
+  await assert.rejects(() => runAppendBlock({ source, store, before, revision: 4, changes: [changes[0]], metadata, result: {} }), /必须恰好一条完整尾 splice/)
+  assert.equal(spy.calls.length, 0, '几何被拒不得触达出口')
+  // 顶层 delete ⇒ undefined（store 视为删除该头键）；仍带合法尾几何。
+  await runAppendBlock({ source, store, before, revision: 4, changes: [{ op: 'delete', path: ['settleError'] }, changes.at(-1)], metadata, result: {} })
   assert.deepEqual(Object.keys(spy.calls[0].args[2].headerSets), ['settleError'], 'delete 必须落键')
   assert.equal(spy.calls[0].args[2].headerSets.settleError, undefined, 'delete ⇒ undefined（store 删除语义）')
   // 不可表示项必须**响亮拒**（不 patchChat 兜底、不静默丢写集）
   const callsBeforeRejects = spy.calls.length
   for (const [label, bad] of [
-    ['深层路径', [{ op: 'set', path: ['timeline', 'operations', 'op-1'], value: { kind: 'body' } }]],
+    ['非法深层路径', [{ op: 'set', path: ['state', '__proto__', 'value'], value: 'x' }]],
     ['保留键 timeline', [{ op: 'set', path: ['timeline'], value: {} }]],
     ['保留键 messages', [{ op: 'set', path: ['messages'], value: [] }]],
     ['命令自管键', [{ op: 'set', path: ['_storageRevision'], value: 9 }]],
     ['非法键', [{ op: 'set', path: ['__proto__'], value: {} }]],
-    ['重复顶层键', [{ op: 'set', path: ['settleStatus'], value: 'a' }, { op: 'set', path: ['settleStatus'], value: 'b' }]],
-    ['非 messages 的 splice', [{ op: 'splice', path: ['timeline', 'checkpoints'], index: 0, deleteCount: 0, items: [{}] }]],
+    ['非法头字段深路径 splice', [{ op: 'splice', path: ['state', 'checkpoints'], index: 0, deleteCount: 0, items: [{}] }]],
     ['未知操作', [{ op: 'move', path: ['settleStatus'], value: 'x' }]],
   ]) {
-    await assert.rejects(() => runAppendBlock({ source, store, before, revision: 4, changes: bad, metadata, result: {} }),
+    await assert.rejects(() => runAppendBlock({ source, store, before, revision: 4, changes: [...bad, changes.at(-1)], metadata, result: {} }),
       /追加命令不接受/, label + ' 必须响亮拒（不得 patchChat 兜底）')
   }
   assert.equal(spy.calls.length, callsBeforeRejects, '被拒项不得触达出口（合法提交计数不变）')
+  await runAppendBlock({ source, store, before, revision: 4, changes: [{ op: 'set', path: ['settleStatus'], value: 'a' }, { op: 'set', path: ['settleStatus'], value: 'b' }, changes.at(-1)], metadata, result: {} })
+  assert.equal(spy.calls.at(-1).args[2].headerSets.settleStatus, 'b', '同根多变更按作者最终完整头归并，不丢最终值')
   void t
 })
 
@@ -293,90 +304,70 @@ test('S5单楼写入转换幂等半应用拒与锚点唯一', async t => {
 })
 
 test('S5装配侧按MESSAGE_FILES对两domain文件施缝且字节可复原', async t => {
-  // 夹具＝磁盘上的**真实作者 source 树**（tavern-plugin/{lib,src,packages,prompts,…} 全量，无 node_modules），
-  // 复制到自有 tmp 后跑**真实 applyStandardSeams**。真实树含 domain/background-task-coordinator.js ⇒ 它已是受管目标。
-  const TARGET_COMMIT = '68215e47516637e00c75d2b4bba3192679559425'
-  const RECORD_FILE = COMMENT_SEAMS_RECORD
-  const DOMAIN_FILES = { turnOrchestration: 'tavern-plugin/lib/domain/turn-orchestration.js', backgroundCoordinator: 'tavern-plugin/lib/domain/background-task-coordinator.js' }
-  const NAME_OF = { turnOrchestration: 'appendMessages', backgroundCoordinator: 'setMessageFloor' }
-  const sourceTree = fileURLToPath(AUTHOR_ROOT)
-  assert.equal(existsSync(path.join(sourceTree, 'lib', 'domain', 'background-task-coordinator.js')), true, '缺作者树夹具：' + sourceTree)
-  const appDir = mkdtempSync(path.join(tmpdir(), 'native-message-seams-'))
-  t.after(() => rmSync(appDir, { recursive: true, force: true }))
-  cpSync(sourceTree, path.join(appDir, 'tavern-plugin'), { recursive: true })
-  const fileOf = rel => path.join(appDir, ...rel.split('/'))
-  const before = {}
-  for (const [key, rel] of Object.entries(DOMAIN_FILES)) {
-    before[key] = readFileSync(fileOf(rel))
-    assert.equal(isNativeMessageApplied(before[key].toString('utf8'), NAME_OF[key]), false, '前置：作者原字节不应已应用 S5 转换（' + rel + '）')
-    assert.equal(MESSAGE_FILES[rel], NAME_OF[key], 'MESSAGE_FILES 必须把该文件映到 ' + NAME_OF[key])
+  // 夹具＝磁盘上的**真实作者 source 树**（682 代）。T2 起由 support 做**有限复制**（受管目标＋作者 package.json），
+  // 复制字节逐文件与源字节比对（来源＋bytes 都可证）；不再整目录搬运，也不再用提交号字面量自比较。
+  // 真实施缝/卸载只跑一次（懒 singleton），本用例从 before/installed/record/restored 快照断言。
+  void t
+  const life = await s5Lifecycle()
+  for (const [key, rel] of Object.entries(S5_DOMAIN_FILES)) {
+    assert.equal(life.copied.has(rel), true, '有限复制必须含受管目标 ' + rel)
+    assert.equal(life.copied.get(rel), readFileSync(s5SourcePath(life.appTree, rel), 'utf8'), rel + ' 复制字节必须等于真实作者源字节')
+    assert.deepEqual(life.sourceBytes[rel], readFileSync(s5SourcePath(life.appTree, rel)), rel + ' 源字节快照必须等于当前作者源字节（来源稳定可证）')
+    assert.equal(isNativeMessageApplied(life.before[rel].text, S5_NAME_OF[key]), false, '前置：作者原字节不应已应用 S5 转换（' + rel + '）')
+    assert.equal(MESSAGE_FILES[rel], S5_NAME_OF[key], 'MESSAGE_FILES 必须把该文件映到 ' + S5_NAME_OF[key])
     assert.equal(maintenanceTargets.includes(rel), true, rel + ' 必须进 TARGETS（真实作者树含该文件，已为受管目标）')
   }
-  assert.equal(applyStandardSeams({ appDir, authorVersion: AUTHOR_VERSION, assertStopped: () => true }).changed, true, '真实施缝必须产生变更')
-  for (const [key, rel] of Object.entries(DOMAIN_FILES)) {
-    const seamed = readFileSync(fileOf(rel), 'utf8')
-    assert.equal(isNativeMessageApplied(seamed, NAME_OF[key]), true, '装配后 ' + rel + ' 必须已应用 S5 转换')
+  assert.equal(life.applyResult.changed, true, '真实施缝必须产生变更')
+  for (const [key, rel] of Object.entries(S5_DOMAIN_FILES)) {
     // 注释块协议：ORIGINAL 区按 '// ' 逐行保留作者旧调用 ⇒ "旧调用零残留" 只能对 ACTIVE 投影断言；
     // 反过来，S5 标记必须显式活在 ACTIVE 里（不能被块渲染吞成注释外文本）。
-    const active = activeSource(seamed, rel)
-    assert.equal(active.split(MESSAGE_ANCHORS[NAME_OF[key]]).length - 1, 0, rel + ' ACTIVE 投影里旧调用行残留必须为 0')
-    assert.equal(active.split(MESSAGE_MARKER[NAME_OF[key]]).length - 1, 1, rel + ' ACTIVE 投影里 S5 标记必须恰一处')
-    assert.equal(seamed.split(MESSAGE_MARKER[NAME_OF[key]]).length - 1, 1, rel + ' 原始文件里 S5 标记恰一处')
+    assert.equal(isNativeMessageApplied(life.installed[rel].text, S5_NAME_OF[key]), true, '装配后 ' + rel + ' 必须已应用 S5 转换')
+    assert.equal(life.installed[rel].activeOldCallCount, 0, rel + ' ACTIVE 投影里旧调用行残留必须为 0')
+    assert.equal(life.installed[rel].activeMarkerCount, 1, rel + ' ACTIVE 投影里 S5 标记必须恰一处')
+    assert.equal(life.installed[rel].markerCount, 1, rel + ' 原始文件里 S5 标记恰一处')
   }
-  const record = JSON.parse(readFileSync(path.join(appDir, RECORD_FILE), 'utf8'))
-  assert.equal(record.format, 1)
-  assert.equal(record.owner, 'dsh-tavern-sqlite-v2')
-  for (const rel of Object.values(DOMAIN_FILES)) {
-    assert.ok(Object.hasOwn(record.files, rel), '注释块记录必须含实际施缝文件 ' + rel)
-    assert.ok(record.files[rel].blocks.length > 0, rel + ' 必须有接缝块')
+  assert.equal(life.record.format, 1)
+  assert.equal(life.record.owner, 'dsh-tavern-sqlite-v2')
+  for (const rel of Object.values(S5_DOMAIN_FILES)) {
+    assert.ok(Object.hasOwn(life.record.files, rel), '注释块记录必须含实际施缝文件 ' + rel)
+    assert.ok(life.record.files[rel].blocks.length > 0, rel + ' 必须有接缝块')
   }
   // 卸载：逐字节回原、标记不残留、记录清理
-  assert.equal(uninstallStandardSeams({ appDir, assertStopped: () => true }).changed, true, '卸载必须产生变更')
-  for (const [key, rel] of Object.entries(DOMAIN_FILES)) {
-    assert.deepEqual(readFileSync(fileOf(rel)), before[key], rel + ' 卸载后必须逐字节回原')
-    assert.equal(isNativeMessageApplied(readFileSync(fileOf(rel), 'utf8'), NAME_OF[key]), false, rel + ' 卸载后不得残留 S5 标记')
+  assert.equal(life.uninstallResult.changed, true, '卸载必须产生变更')
+  for (const [key, rel] of Object.entries(S5_DOMAIN_FILES)) {
+    assert.deepEqual(life.restored[rel].bytes, life.before[rel].bytes, rel + ' 卸载后必须逐字节回原')
+    assert.equal(isNativeMessageApplied(life.restored[rel].text, S5_NAME_OF[key]), false, rel + ' 卸载后不得残留 S5 标记')
   }
-  assert.equal(existsSync(path.join(appDir, RECORD_FILE)), false, '卸载后不得残留标准记录')
-  assert.equal(TARGET_COMMIT, '68215e47516637e00c75d2b4bba3192679559425', '夹具提交固定为作者代')
-  void t
+  assert.equal(life.recordExistsAfter, false, '卸载后不得残留标准记录')
 })
 
 test('S5装配侧coordinator是真实受管目标且原字节可复原', async t => {
   // 真实作者 source fixture **含** domain/background-task-coordinator.js ⇒ 它现在就是受管目标：
   // 必须落可写注释块、进 record.files，卸载后逐字节回原（不再有"随包资产缺该文件"的旧假设）。
-  const RECORD_FILE = COMMENT_SEAMS_RECORD
-  const TURN = 'tavern-plugin/lib/domain/turn-orchestration.js'
-  const COORDINATOR = 'tavern-plugin/lib/domain/background-task-coordinator.js'
-  const tree = prepareCommentAuthorTree()
-  assert.ok(tree, '缺少作者 source fixture：设 DSH_TAVERN_TEST_APP 或准备本地 author-fixture')
-  t.after(tree.cleanup)                                              // 只删 helper 自己的 mkdtemp 目录
-  const fileOf = rel => path.join(tree.appDir, ...rel.split('/'))
+  // 与上一用例共用同一次真实生命周期的快照（各自独立断言，不互相消费状态）。
+  void t
+  const life = await s5Lifecycle()
+  const TURN = S5_DOMAIN_FILES.turnOrchestration
+  const COORDINATOR = S5_DOMAIN_FILES.backgroundCoordinator
   assert.equal(maintenanceTargets.includes(COORDINATOR), true, 'coordinator 必须是受管目标')
-  assert.equal(existsSync(fileOf(COORDINATOR)), true, '前置：真实作者树含 background-task-coordinator.js')
-  const turnBefore = readFileSync(fileOf(TURN))
-  const coordinatorBefore = readFileSync(fileOf(COORDINATOR), 'utf8')
-  assert.equal(isNativeMessageApplied(turnBefore.toString('utf8'), 'appendMessages'), false, '前置：作者原字节未施缝')
-  // 真实装配
-  const result = applyStandardSeams({ appDir: tree.appDir, authorVersion: AUTHOR_VERSION, assertStopped: () => true })
-  assert.equal(result.changed, true, '真实源装配必须成功并产生变更')
+  assert.equal(life.copied.has(COORDINATOR), true, '前置：真实作者树含 background-task-coordinator.js（有限复制已含）')
+  assert.equal(isNativeMessageApplied(life.before[TURN].text, 'appendMessages'), false, '前置：作者原字节未施缝')
   for (const [rel, name] of [[TURN, 'appendMessages'], [COORDINATOR, 'setMessageFloor']]) {
-    const seamed = readFileSync(fileOf(rel), 'utf8')
-    assert.equal(isNativeMessageApplied(seamed, name), true, rel + ' 必须已应用 S5 转换')
-    assert.equal(seamed.split(MESSAGE_MARKER[name]).length - 1, 1, rel + ' S5 标记恰一处')
-    assert.match(seamed, /\[dsh-tavern-seam:ACTIVE_BEGIN\]/, rel + ' 必须有可写注释块')
+    assert.equal(isNativeMessageApplied(life.installed[rel].text, name), true, rel + ' 必须已应用 S5 转换')
+    assert.equal(life.installed[rel].markerCount, 1, rel + ' S5 标记恰一处')
+    assert.equal(life.installed[rel].hasActiveBlock, true, rel + ' 必须有可写注释块')
   }
-  const record = JSON.parse(readFileSync(path.join(tree.appDir, RECORD_FILE), 'utf8'))
   for (const rel of [TURN, COORDINATOR]) {
-    assert.ok(Object.hasOwn(record.files, rel), '注释块记录必须含 ' + rel)
-    assert.ok(record.files[rel].blocks.length > 0, rel + ' 必须有接缝块')
+    assert.ok(Object.hasOwn(life.record.files, rel), '注释块记录必须含 ' + rel)
+    assert.ok(life.record.files[rel].blocks.length > 0, rel + ' 必须有接缝块')
   }
   // 卸载：两文件逐字节回原、记录清理
-  assert.equal(uninstallStandardSeams({ appDir: tree.appDir, assertStopped: () => true }).changed, true, '卸载必须产生变更')
-  assert.deepEqual(readFileSync(fileOf(TURN)), turnBefore, TURN + ' 卸载后必须逐字节回原')
-  assert.equal(readFileSync(fileOf(COORDINATOR), 'utf8'), coordinatorBefore, COORDINATOR + ' 卸载后必须逐字节回原')
-  assert.equal(existsSync(path.join(tree.appDir, RECORD_FILE)), false, '卸载后不得残留标准记录')
-  void t
+  assert.deepEqual(life.restored[TURN].bytes, life.before[TURN].bytes, TURN + ' 卸载后必须逐字节回原')
+  assert.equal(life.restored[COORDINATOR].text, life.before[COORDINATOR].text, COORDINATOR + ' 卸载后必须逐字节回原')
+  assert.equal(life.recordExistsAfter, false, '卸载后不得残留标准记录')
 })
+
+test.after(() => { disposeS5Lifecycle() })   // 只删本模块自建 mkdtemp
 
 // ══════════════════════════════════════════════════════════════════════════════════
 // 宿主 DI（S5）：把 index.js 两个 factory 的窄 store 字面量补上 appendMessages/setMessageFloor，
@@ -512,4 +503,11 @@ test('S5宿主DI：窄命令无head时响亮拒且不读数整档', async t => {
   const guarded = hostDiClosures({ source: guardSource, chatJournalStore: noHeadStore, deletedChatIds: new Set([CHAT_ID]), notifications: notes })
   await assert.rejects(() => guarded.appendMessagesNarrow(CHAT_ID, 4, { items: [], headerSets: {} }, {}), /对话已删除/)
   void t
+})
+
+// S5 共享准备 guard 并入同一进程（共用同一 s5Lifecycle promise，不新增完整 cycle）。
+import { registerSharedPreparation } from './support/shared-preparation.mjs'
+registerSharedPreparation(test)
+test('S5文件收尾：未选生命周期不准备且诊断走测试协议', t => {
+  t.diagnostic('S5文件收尾已选择，业务生命周期不在此重复执行')
 })

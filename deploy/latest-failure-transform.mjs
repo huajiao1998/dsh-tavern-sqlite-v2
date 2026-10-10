@@ -66,14 +66,20 @@ function once(source, before, after) {
   return source.replace(before, after)
 }
 export function applyLatestFailureHostTransform(source) {
+  // 双形态严格唯一：新版上游（42852b0/2.5.0）rollbackTurn 为多行块（save/回执后自带 notifyPluginTimeline('rollback')），旧版为单行 return。
   const before = "case 'rollbackTurn': return { view: await rollbackTurn(args && args.sessionId, args && args.chatId, args && args.expectedTurn) }"
   const after = "case 'rollbackTurn': return { view: await rollbackTurn(args && args.sessionId, args && args.chatId, args && (args.failureTarget || args.expectedTurn)) }"
+  const beforeNew = "        const view = await rollbackTurn(args && args.sessionId, args && args.chatId, args && args.expectedTurn)"
+  const afterNew = "        const view = await rollbackTurn(args && args.sessionId, args && args.chatId, args && (args.failureTarget || args.expectedTurn))"
   if (source.includes(HOST_MARKER)) {
-    if (source.split(HOST_MARKER).length !== 2 || !source.includes(after) || !source.includes(EVIDENCE_IMPORT)
+    if (source.split(HOST_MARKER).length !== 2 || !(source.includes(after) || source.includes(afterNew)) || !source.includes(EVIDENCE_IMPORT)
       || !source.includes(EVIDENCE_METHOD) || !source.includes(EVIDENCE_CALL_AFTER)) throw new Error('最新失败宿主接线不完整')
     return source
   }
-  let next = HOST_MARKER + '\n' + once(source, before, after)
+  const hasNew = source.split(beforeNew).length === 2
+  const hasLegacy = source.split(before).length === 2
+  if (hasNew === hasLegacy) throw new Error('最新失败接缝锚点缺失/不唯一：' + before.slice(0, 90))
+  let next = HOST_MARKER + '\n' + (hasNew ? source.replace(beforeNew, afterNew) : source.replace(before, after))
   next = once(next, EVIDENCE_CALL_BEFORE, EVIDENCE_CALL_AFTER)
   next = once(next, EVIDENCE_ANCHOR, '  ' + EVIDENCE_METHOD + '\n' + EVIDENCE_ANCHOR)
   return EVIDENCE_IMPORT + next

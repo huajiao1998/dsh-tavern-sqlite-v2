@@ -120,37 +120,18 @@ const PLAY_ONTOGGLE_NEXT = `${MARKER_PLAY}
                     get failureTarget() { return failureViewRef.current.view && failureViewRef.current.view.failureTarget || null },
                     get failureCleanupReason() { return failureViewRef.current.view && failureViewRef.current.view.failureCleanupReason || '' },
                     onPurge: async function (turn, failureTarget) {
-                        ${targetCompareText(' '.repeat(24))}
+                        // 清理的**唯一实现**在自有 UI 服务（tavernStorageUi.cleanFailure）。SupersededTurnErrors
+                        // 定义在 register(ctx) 之外，函数体内拿不到 ctx ⇒ 由注册语句注入 storageUi 取用函数
+                        // （registration 闭包里的 ctx 合法），这里只经 props 调用，不假设存在全局 ctx。
                         var current = failureViewRef.current.view;
                         var liveTarget = (current && current.failureTarget) || null;
-                        var ft = failureTarget || liveTarget;
-                        if (!ft || !liveTarget) throw new Error('当前视图没有可清理的失败目标，拒绝清理');
-                        if (!Number.isSafeInteger(turn) || turn < 1 || turn !== Number(ft.turn) || turn !== Number(liveTarget.turn)) throw new Error('清理目标不是当前最新失败轮，拒绝清理');
-                        // 请求目标必须与当前视图目标同一身份（kind/turn/branchId/revision/native 身份 + rollbackId）：旧 ft 一律拒。
-                        if (ft !== liveTarget) {
-                            var staleReason = targetCompare(ft, liveTarget);
-                            if (staleReason !== "") throw new Error('清理目标已过期（与当前视图不一致），拒绝清理：' + staleReason);
-                            if ((ft.rollbackId || null) !== (liveTarget.rollbackId || null)) throw new Error('清理目标已过期（重试身份不一致），拒绝清理');
-                        }
-                        if (typeof props.sessions?.waitForTavernRollbackSync !== "function") throw new Error("回退同步尚未接线或尚未就绪，未执行清理");
-                        var resp = await rpc("rollbackTurn", { expectedTurn: turn, failureTarget: ft }, props.sessionId);
-                        var rb = resp && resp.view && resp.view.rolledBack;
-                        if (!rb || !rb.cleanedFailureTarget) throw new Error('清理未确认目标失败轮，不更新本地状态');
-                        // 回执身份：body 认 operationId 非空串、native-only 认 endSeq/eventCount 安全整数；
-                        // kind+turn+branch+revision 必须 exact —— 不得用 String(undefined) 让不同目标互相恒等放行。
-                        var cft = rb.cleanedFailureTarget;
-                        var targetMismatch = targetCompare(ft, cft);
-                        if (targetMismatch !== "") throw new Error('清理回执目标与请求不一致，拒绝更新：' + targetMismatch);
-                        if (rb.alreadyClean === true) {
-                            liveTavernView.rebase(props.sessionId);
-                            tavernCoordination.invalidate(props.sessionId);
-                            return resp;
-                        }
-                        await props.sessions.waitForTavernRollbackSync(rb.sync);
+                        if (!liveTarget) throw new Error('当前视图没有可清理的失败目标，拒绝清理');
+                        if (!Number.isSafeInteger(turn) || turn < 1 || turn !== Number(liveTarget.turn)) throw new Error('清理目标不是当前最新失败轮，拒绝清理');
+                        var storageUi = typeof props.storageUi === "function" ? props.storageUi() : undefined;
+                        if (!storageUi || typeof storageUi.cleanFailure !== "function") throw new Error("精简清理未接线：找不到共享 tavernStorageUi.cleanFailure，拒绝清理");
+                        var resp = await storageUi.cleanFailure(props.sessionId, turn, failureTarget || liveTarget);
+                        // 目标已清：关闭仍指向旧目标的候选/重生成面板选择，避免面板停留在过期身份上。
                         setCandidatePanel(null); setRegenPanel(null); setCandidateGuidePanel(null);
-                        // 落盘且同连接同步到达后按 revision 定向重投影：下一目标（43 之后的 42）必须立刻重算，不能只等 render。
-                        liveTavernView.rebase(props.sessionId);
-                        tavernCoordination.invalidate(props.sessionId);
                         return resp;
                     },`
 // 菜单清未完成：与 sync guard 已施加形态兼容——仅替换 exact RPC 行，不动 guard/其余回调。
@@ -194,60 +175,8 @@ function withDedentedBlock(source, startNeedle, endNeedle, fn) {
   const restored = out.split('\n').map(l => l.length === 0 ? l : '\t\t' + l).join('\n')
   return head + restored + tail
 }
-// turn-error-controls 的"插件自有失败提示行"：宿主只在 turn/end.error 上渲染错误行，
-// aborted 类失败（如 42）在 43 清完后页面上没有任何可点行；该行让最新失败目标仍然可见可清。
-// 不用 data-chat-flow-kind="turn-error"（不冒充宿主错误行），不写持久/软隐藏状态，仅内存态。
-const MARKER_FALLBACK = '// [dsh-tavern-failure-fallback:v1]'
-const FALLBACK_OWNED_ANCHOR = '// Cleared or superseded failures fold by default; revealing one is a local glance.'
-const FALLBACK_ROWS_ANCHOR = 'const rows = new Set(root.querySelectorAll(\'[data-chat-flow-kind="turn-error"]\'));'
-const FALLBACK_DISPOSE_ANCHOR = 'if (turnErrorControlOwners.get(root) === controls) turnErrorControlOwners.delete(root);'
-const FALLBACK_LINES = [
-  MARKER_FALLBACK,
-  '// 只由当前视图 failureTarget（最新失败目标）驱动：历史 aborted 轮永不造提示；同轮已有可见原生错误行则不重复。',
-  'let failureRow = null;',
-  'function removeFailureRow() {',
-  '    if (!failureRow) return;',
-  '    const entry = owned.get(failureRow);',
-  '    if (entry) { remove(failureRow, entry); owned.delete(failureRow); }',
-  '    if (typeof failureRow.remove === \'function\') failureRow.remove();',
-  '    failureRow = null;',
-  '}',
-  'function syncFailureRow(rows) {',
-  '    const target = Number(options.failureTarget && options.failureTarget.turn);',
-  '    const needed = Number.isSafeInteger(target) && target > 0;',
-  '    const covered = needed && [...rows].some(row => row.hidden !== true && (!row.style || row.style.display !== \'none\') && turnErrorRowTurn(row) === target);',
-  '    if (failureRow && (!needed || covered || turnErrorRowTurn(failureRow) !== target)) removeFailureRow();',
-  '    if (!needed || covered) return;',
-  '    // 容器不支持挂载（无 append）就不能造提示行：拒绝造出挂不上的孤立节点。',
-  '    if (typeof root.append !== \'function\') return;',
-  '    if (!failureRow) {',
-  '        failureRow = root.ownerDocument.createElement(\'div\');',
-  '        failureRow.className = \'dsh-tavern-failure-cleanup\';',
-  '        failureRow.setAttribute(\'data-tavern-failure-cleanup\', \'\');',
-  '        failureRow.hidden = false;',
-  '        root.append(failureRow);',
-  '    }',
-  '    const text = \'第\' + target + \'轮未完成，请清理本轮后继续。\';',
-  '    // 同值 setAttribute 也会产生 MutationRecord：作者的 observeTurnErrorProjection watch 该属性 ⇒ 每帧 rAF→apply→写属性循环。同 text guard 一样先比再写。',
-  '    if (failureRow.getAttribute(\'data-chat-turn\') !== String(target)) failureRow.setAttribute(\'data-chat-turn\', String(target));',
-  '    if (failureRow.textContent !== text) failureRow.textContent = text;',
-  '    rows.add(failureRow);',
-  '}'
-]
-// 行插入：按锚点行自身缩进补齐（作者 source 为空格、built 产物带 \t\t 前缀），锚点必须唯一，否则拒绝半块。
-function insertLines(source, anchor, lines, position, label) {
-  if (source.split(anchor).length !== 2) throw new Error('干净清理锚点缺失/不唯一：' + label)
-  const index = source.indexOf(anchor)
-  const lineStart = source.lastIndexOf('\n', index) + 1
-  const indent = source.slice(lineStart, index)
-  const text = lines.map(line => line === '' ? line : indent + line).join('\n')
-  if (position === 'after') {
-    const lineEnd = source.indexOf('\n', index + anchor.length)
-    if (lineEnd < 0) throw new Error('干净清理锚点缺行尾：' + label)
-    return source.slice(0, lineEnd + 1) + text + '\n' + source.slice(lineEnd + 1)
-  }
-  return source.slice(0, lineStart) + text + '\n' + source.slice(lineStart)
-}
+// 旧"插件自有失败提示行" DOM 兜底（MARKER_FALLBACK / FALLBACK_* 锚点 / FALLBACK_LINES / insertLines）
+// 已**完全退出**：当前失败由自有输入 dock 的 FailureCleanupStrip（client.js）承担，本变换只做 toggle/文案/协调接线。
 // SupersededTurnErrors 内三处注入（均在真函数内；source/built 共用带缩进归一的形式）。
 // ① state 之后挂稳定 ref；② 可清理资格的 disabled 每次 apply 双向写；③ effect deps 换成带目标身份的稳定字符串，getter/onPurge 读 ref。
 const PLAY_STATE_ANCHOR = `\t\t\tconst state = useLiveTavernView(props.sessionId, "suppression:" + String(latestMessageId || "") + ":" + String(running));`
@@ -275,7 +204,7 @@ ${PLAY_EFFECT_DECL_ANCHOR}`
 // 等都注入了 sessions，唯独 SupersededTurnErrors 只传 key ⇒ 控件内 props.sessions 恒 undefined，清理 guard 直接拒绝（RPC 都发不出）。
 // 该注册行三种布局（inline 作者 main.js / split 单文件 / built lib/client.js）文本相同，缩进由所在行原样保留。
 const SUPERSEDED_SESSIONS_OLD = 'React.createElement(SupersededTurnErrors, Object.assign({}, props, { key: props.sessionId }))'
-const SUPERSEDED_SESSIONS_NEW = 'React.createElement(SupersededTurnErrors, Object.assign({}, props, { key: props.sessionId, sessions: ctx.sessions }))'
+const SUPERSEDED_SESSIONS_NEW = 'React.createElement(SupersededTurnErrors, Object.assign({}, props, { key: props.sessionId, sessions: ctx.sessions, storageUi: function () { return ctx.get("tavernStorageUi") } }))'
 // 幂等接线（必须在 marker 早返回之前）：旧产物只带 play marker 而无该接线时**就地补齐**，不静默放过、也不重施其余变换。
 function ensureSupersededSessionsWiring(source, label) {
   // 唯一准入：old 与 new 各自计数，只有 (old=1,new=0) 才替换、(old=0,new=1) 才原样通过；其余（0/0、>1、混合）一律 fail-closed。
@@ -294,7 +223,17 @@ function ensurePurgeCoordinationWiring(source) {
   const oldHits = source.split(oldCall).length - 1
   const pairs = [...source.matchAll(oldPair)].length
   const newHits = [...source.matchAll(newPair)].length
-  if (oldHits !== pairs || pairs + newHits !== 4) throw new Error('干净清理协调接线缺失/归属不明确：旧调用=' + oldHits + '，旧配对=' + pairs + '，新配对=' + newHits)
+  // 2026-10-10 变更：失败清理已拆到共享客户端服务（client.js 的 tavernStorageUi.cleanFailure 经桥做
+  // live.rebase + coordination.invalidate），组件内的 rebase→invalidate 配对由 4 减到 2 ⇒ 期望值随之收窄；
+  // 同时要求**共享消费者在位**（ctx.get('tavernStorageUi') / storageUi.cleanFailure），否则视为接线不完整。
+  const sharedHits = (source.match(/storageUi\.cleanFailure\(|ctx\.get\("tavernStorageUi"\)|ctx\.get\('tavernStorageUi'\)/g) || []).length
+  if (oldHits !== pairs) throw new Error('干净清理协调接线缺失/归属不明确：旧调用=' + oldHits + '，旧配对=' + pairs + '，新配对=' + newHits)
+  if (oldHits === 0) {
+    // 严格 2：拆出共享清理后组件内只应剩 2 对（4 说明未拆干净，0 说明接线缺失）；共享消费者必须在位。
+    if (newHits !== 2 || sharedHits < 1) throw new Error('干净清理协调接线缺失/归属不明确：旧调用=0，新配对=' + newHits + '，共享消费者=' + sharedHits)
+    return source
+  }
+  if (newHits !== 0 || pairs !== oldHits) throw new Error('干净清理协调接线缺失/归属不明确：旧调用=' + oldHits + '，旧配对=' + pairs + '，新配对=' + newHits)
   return source.replace(oldPair, 'liveTavernView.rebase(props.sessionId);$1tavernCoordination.invalidate(props.sessionId);')
 }
 // SupersededTurnErrors 生效点（真作者函数内）：ref + 目标身份 deps + ref 读视图。source/built 同形，幂等。
@@ -317,30 +256,27 @@ function applyPlayControlsSupersededState(source, label) {
 }
 export function applyErrorPurgeTurnControlsTransform(source) {
   if (source.includes(MARKER_TURN)) {
-    if (source.split(MARKER_TURN).length !== 3 || !source.includes('options.onPurge') || !source.includes('干净清理错误') || !source.includes('无法清理此错误') || !source.includes('entry.toggle.disabled = !purgeActive;')
-      || source.split(MARKER_FALLBACK).length !== 2 || !source.includes('let failureRow = null;') || !source.includes('syncFailureRow(rows);')
-      || !source.includes('removeFailureRow();') || !source.includes("setAttribute('data-tavern-failure-cleanup', '')")) throw new Error('干净清理标记不完整（turn-error-controls）')
-    return source
+    // 幂等：不要求兜底块存在（它已退役）；只核仍在位的 toggle/文案接线（marker 恰两处：onclick + 文案）。
+    if (source.split(MARKER_TURN).length !== 3 || !source.includes('options.onPurge') || !source.includes('干净清理错误')
+      || !source.includes('无法清理此错误') || !source.includes('purgeActive ?')) throw new Error('干净清理标记不完整（turn-error-controls）')
   }
-  let out = withDedentedBlock(source, 'toggle.onclick = function () {', `const toggleText = folded(id) ? '查看错误' : dismissed ? '恢复错误提示' : '隐藏此错误';`, (block) => {
+  let out = source.includes(MARKER_TURN) ? source : withDedentedBlock(source, 'toggle.onclick = function () {', `const toggleText = folded(id) ? '查看错误' : dismissed ? '恢复错误提示' : '隐藏此错误';`, (block) => {
     let blockOut = once(block, TOGGLE_ONCLICK_OLD, TOGGLE_ONCLICK_NEXT, 'toggle.onclick')
     blockOut = once(blockOut, TOGGLE_TEXT_OLD, TOGGLE_TEXT_NEXT, 'toggleText')
     return blockOut
   })
-  // 插件自有失败提示行：helper/var 前置在 apply 之前；调用插在原生 rows 读入之后（同轮原生行可见则不造、不重复）；
-  // dispose 内一并清（面板走 remove、DOM 行真删、owned 条目删净），重建控制器经同一 dispose 不留残。
-  out = insertLines(out, FALLBACK_DISPOSE_ANCHOR, ['removeFailureRow();'], 'before', 'fallback-dispose')
-  out = insertLines(out, FALLBACK_ROWS_ANCHOR, ['syncFailureRow(rows);'], 'after', 'fallback-call')
-  out = insertLines(out, FALLBACK_OWNED_ANCHOR, FALLBACK_LINES, 'before', 'fallback-helper')
+  // DOM 兜底已完全退出：这里不再插入任何失败提示行（历史块由卸载/comment engine 处理，不就地刨代码）。
   return out
 }
 export function applyErrorPurgePlayControlsTransform(source) {
   if (source.includes(MARKER_PLAY)) {
+    // 核实际共享消费者及各布局等待合同；不要求已经退出算法的说明文字，也不禁止旧内联布局必需的 clear-only wait。
     if (source.split(MARKER_PLAY).length !== 4 || !source.includes('onToggle: undefined,') || !source.includes('get failureTarget()')
       || !source.includes('menuFailureTarget') || source.includes(PLAY_ONTOGGLE_OLD)
       || !source.includes('const failureViewRef = React.useRef(state);')
       || !source.includes('get failureTarget() { return failureViewRef.current.view && failureViewRef.current.view.failureTarget || null }')
-      || !source.includes('const failureTargetKey = (function (view) {') || !source.includes('field(target.endSeq)') || !source.includes('var targetCompare = function (ft, cft) {') || !source.includes('var menuMismatch = targetCompare(menuFailureTarget, cft);') || !source.includes('清理目标已过期（与当前视图不一致）') || !source.includes('清理未确认目标失败轮，不更新本地状态') || !source.includes('回退同步尚未接线') || !(source.includes(MENU_WAIT_ANCHOR) || source.includes('alreadyClean === true)) await props.sessions.waitForTavernRollbackSync') || source.includes('await props.sessions.waitForTavernRollbackSync(result && result.view && result.view.rolledBack && result.view.rolledBack.sync);')) || !source.includes('按 revision 定向重投影')
+      || !source.includes('const failureTargetKey = (function (view) {') || !source.includes('field(target.endSeq)') || !source.includes('var targetCompare = function (ft, cft) {') || !source.includes('var menuMismatch = targetCompare(menuFailureTarget, cft);') || !source.includes('storageUi.cleanFailure(props.sessionId, turn, failureTarget || liveTarget)') || !source.includes('精简清理未接线') || !source.includes('清理未确认目标失败轮，不更新本地状态') || !(source.includes('回退同步尚未接线') || source.includes('回退已落盘，但宿主缺少同连接同步消费者')) || !(source.includes(MENU_WAIT_ANCHOR) || (source.includes(MENU_CLEAR_GUARD.trim()) && source.includes('await props.sessions.waitForTavernRollbackSync(result && result.view && result.view.rolledBack && result.view.rolledBack.sync);') && source.includes('if (clearIncomplete && !(result && result.view && result.view.rolledBack && result.view.rolledBack.alreadyClean === true)) {')))
+      || !source.includes('var storageUi = typeof props.storageUi === "function" ? props.storageUi() : undefined;')
       || source.split('[props.sessionId, revision, failureTargetKey]);').length !== 2
       || source.includes(PLAY_DEPS_ANCHOR)) throw new Error('干净清理标记不完整（play-controls）')
     if (source.split(PLAY_STATE_ANCHOR).length !== 2) throw new Error('干净清理锚点缺失/不唯一：play-controls-state')

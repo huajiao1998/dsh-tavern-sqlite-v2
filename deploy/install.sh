@@ -3,7 +3,7 @@
 set -eu
 RELEASE_URL='__DSH_RELEASE_URL__'
 RELEASE_SHA256='__DSH_RELEASE_SHA256__'
-VERSION='0.4.0'
+VERSION='0.4.3'
 SCRIPT_DIR=''
 case "$0" in
   *install.sh) SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) ;;
@@ -69,6 +69,13 @@ export function installedPackage(pass, env = process.env, { action = 'install' }
   const manifest=JSON.parse(fs.readFileSync(manifestFile,'utf8')),dir=path.join(profileDir,'node_modules',NAME)
   for (const name of OTHER_LINES) if (manifest.dependencies?.[name] || manifest.dsh?.profile?.bundles?.includes(name)) throw Error('已装旧包名或另一版本线：' + name + '；先用其所属旧安装器卸载，不自动迁移/共装')
   const present=!!manifest.dependencies?.[NAME],listed=(manifest.dsh?.profile?.bundles||[]).includes(NAME)
+  const standardDir=path.join(candidates[0],'profile-data','tavern','data','plugins',NAME)
+  if (fs.existsSync(standardDir)) {
+    if(present||listed||fs.existsSync(dir))throw Error('标准插件目录与同名profile装配共存，拒绝双源')
+    const pkg=JSON.parse(fs.readFileSync(path.join(standardDir,'package.json'),'utf8'))
+    if(pkg.name!==NAME)throw Error('标准目录属于其他包，拒绝认领')
+    return usablePackage(standardDir)
+  }
   if (action !== 'uninstall') {
     if(present!==listed||present!==fs.existsSync(dir))throw Error('已装依赖/bundle/链接不一致，拒绝猜测缺包下载或已卸载')
     return present ? fs.realpathSync(dir) : undefined

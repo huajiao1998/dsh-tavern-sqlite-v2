@@ -30,7 +30,7 @@ const READ_SOURCE_TITLE_DEP = `    readSourceSessionTitle: async sessionId => aw
 `
 const SAVE_SERVICE = `  // [dsh-tavern-save-actions:v3] 唯一同源占位与新档命名；只写目标。
   ctx.provide('tavernSaveActions', createAuthorSaveActions({
-    chats: chatPersistence,
+    chats: chatPersistence, runtimeGeneration,
     resolveChatId: async sessionId => (await readSessionMap())[str(sessionId)],
     prepareFork: prepareConversationFork, completeFork: forkChat,
 ${READ_SOURCE_TITLE_DEP}    validateTargetNaming: async () => {
@@ -69,24 +69,14 @@ function upgradeSaveActions(source) {
   } else {
     out = replace(out, OLD_SAVE_SERVICE, SAVE_SERVICE, '保存动作 v3 升级')
   }
-  if (!out.includes("case 'sqliteSaveClaim':")) out = replace(out, "      case 'sqliteSavePrepare': return await ctx.get('tavernSaveActions').prepare(args)", "      case 'sqliteSavePrepare': return await ctx.get('tavernSaveActions').prepare(args)\n      case 'sqliteSaveClaim': return await ctx.get('tavernSaveActions').claim(args)", '用户点击占位 RPC')
-  // 显式释放 RPC（2026-10-01）：只对 complete + 目标确证 missing 生效（实现见 lib/legacy-view-seams.js release）。
-  // 守卫式追加：老树（只有 claim 的形态）就地升级；**不**加入上面 v3 必填串，否则老树会先报"实现不完整"而无法升级。
-  if (!out.includes("case 'sqliteSaveRelease':")) out = replace(out, "      case 'sqliteSaveClaim': return await ctx.get('tavernSaveActions').claim(args)", "      case 'sqliteSaveClaim': return await ctx.get('tavernSaveActions').claim(args)\n      case 'sqliteSaveRelease': return await ctx.get('tavernSaveActions').release(args)", '显式释放已完成关系 RPC')
-  if (!out.includes("case 'sqliteSaveRecover':")) out = replace(out, "      case 'sqliteSaveRelease': return await ctx.get('tavernSaveActions').release(args)", "      case 'sqliteSaveRelease': return await ctx.get('tavernSaveActions').release(args)\n      case 'sqliteSaveRecover': return await ctx.get('tavernSaveActions').recover(args)", '同冻结SID恢复 RPC')
+  // 七项请求由插件自己的路由调用该服务，不再向作者switch插入转发case。
   return out
 }
 
 export const LEGACY_VIEW_SHIM = `${MARKER}
 // 作者树薄垫片：全部实现由插件拥有，缺包时响亮失败，不能降级为可写原档。
-import { createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
-import os from 'node:os'
-import path from 'node:path'
-// 作者应用树与 profile 包不在同一解析祖先链，必须按安装 profile 定位，缺包直接失败。
-const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh-tavern')
-const profileRequire = createRequire(path.join(home, 'profiles', 'tavern', 'package.json'))
-const loadOwnedModule = name => import(pathToFileURL(profileRequire.resolve('dsh-tavern-sqlite-v2/' + name)).href)
+// 所有薄垫片走同一个标准目录解析器；原件只读服务与后端不允许加载第二份模块。
+import { storagePackage as loadOwnedModule } from './storage-package.js'
 const { createLegacyViewSeams, withObservedForkSource, createLegacySaveActions } = await loadOwnedModule('legacy-view-seams')
 const { legacyBindingForChat, listLegacyBindings, overlayLegacyLinks, projectLegacyEnvelope } = await loadOwnedModule('legacy-bindings')
 const { createForkRecords } = await loadOwnedModule('legacy-fork-records')
@@ -112,7 +102,7 @@ export async function installAuthorHostSessionPatch(ctx) {
   return await mod.installSharedHostSessionPatch({ ctx })
 }
 export function createAuthorSaveActions(deps) {
-  return createLegacySaveActions({ ...deps, forkRecords: createForkRecords(), describeSaveFormat, formatSaveResult, queryVariables, formatVariableResult })
+  return Object.freeze({ ...createLegacySaveActions({ ...deps, forkRecords: createForkRecords(), describeSaveFormat, formatSaveResult, queryVariables, formatVariableResult }), runtimeGeneration: deps.runtimeGeneration })
 }
 `
 
@@ -163,7 +153,7 @@ function upgradeInstallerCall(source) {
   return out
 }
 export function transformLegacyIndex(source) {
-  if (patched(source, ["from './domain/legacy-view-seams.js'", "ctx.provide('tavernSaveActions'", 'wrapStore(chatJournalStore)', "case 'sqliteSaveStatus':", "case 'sqliteVariablesQuery':", 'withObservedForkSource({', 'isReadOnlySession(sessionId)', 'await initializeAuthorLegacyWorkspaces(ctx)', "export const inject = ['sessionPersistence', 'workspaceRegistry']", '原件禁止启动迁移'])) {
+  if (patched(source, ["from './domain/legacy-view-seams.js'", "ctx.provide('tavernSaveActions'", 'wrapStore(chatJournalStore)', 'withObservedForkSource({', 'isReadOnlySession(sessionId)', 'await initializeAuthorLegacyWorkspaces(ctx)', "export const inject = ['sessionPersistence', 'workspaceRegistry']", '原件禁止启动迁移'])) {
     if (/migrateInstalledLegacySessions\s*\(/.test(source)) throw new Error('原件接缝仍有启动迁移调用，拒绝部署')
     return upgradeSaveActions(upgradeInstallerCall(source))
   }
@@ -184,7 +174,6 @@ export function transformLegacyIndex(source) {
   out = replace(out, '    const { state, turn } = await conversationStateAtTurn(source, requestedTurn, readChatRevision)\n    let handle', "    const {state,turn}=await conversationStateAtTurn(source,requestedTurn,readChatRevision)\n    if (legacyViewSeams.readOnlyChat(source)) {\n      return await withObservedForkSource({ query: ctx.get('sessionQuery'), sessionId: source.sessionId,\n        work: session => ({ source, state, turn, atSeq: conversationForkBoundary(session, state, turn) }) })\n    }\n    let handle", '原件分叉不 resume')
   out = replace(out, "    const targetEnd = sessionEvents(target).findLast(event => event.type === 'turn/end')", "    if (legacyViewSeams.readOnlyChat(source) && target?.header?.parentSession !== source.sessionId) throw new Error('另存目标不是源原生 Session 的真实分叉')\n    const targetEnd = sessionEvents(target).findLast(event => event.type === 'turn/end')", '分叉亲本 guard')
   out = replace(out, '  const chatHistoryImporter = createChatHistoryImportService({', "  ctx.provide('tavernSaveActions', createAuthorSaveActions({\n    chats: chatPersistence,\n    resolveChatId: async sessionId => (await readSessionMap())[str(sessionId)],\n    prepareFork: prepareConversationFork, completeFork: forkChat\n  }))\n  const chatHistoryImporter = createChatHistoryImportService({", '唯一另存 service')
-  out = replace(out, "      case 'prepareConversationFork': {", "      case 'sqliteSaveStatus': return await ctx.get('tavernSaveActions').status(args)\n      case 'sqliteSavePrepare': return await ctx.get('tavernSaveActions').prepare(args)\n      case 'sqliteSaveComplete': return await ctx.get('tavernSaveActions').complete(args)\n      case 'sqliteVariablesQuery': return await ctx.get('tavernSaveActions').variables(args)\n      case 'prepareConversationFork': {", 'RPC 只转 service')
   if (/migrateInstalledLegacySessions\s*\(/.test(out)) throw new Error('原件接缝仍有启动迁移调用，拒绝部署')
   return upgradeSaveActions(out)
 }

@@ -11,6 +11,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { maintenanceAdapter as adapter } from '../deploy/maintenance.mjs'
+import { parsePatch } from '../deploy/maintenance/standard-installation.mjs'
 import { createWindowsCliDriver, createDriver } from '../deploy/maintenance/driver.mjs'
 import { copyPackage } from '../deploy/maintenance/runner.mjs'
 import { windowsCliTavernProcesses } from '../deploy/maintenance/process.mjs'
@@ -171,15 +172,14 @@ test('WinCLI driver: 装卸不动原依赖/bundle与SDK源码，本包junction�
   const state = await driver.preflight('install')
   assert.equal(state.noop, false); assert.equal(state.runningNow, false)
   await driver.manage('install')
-  const installDir = path.join(f.home, 'plugins', adapter.packageName), junction = path.join(f.profileDir, 'node_modules', adapter.packageName)
+  const installDir = path.join(f.home, 'profile-data', 'tavern', 'data', 'plugins', adapter.packageName), junction = path.join(f.profileDir, 'node_modules', adapter.packageName)
   const profile = JSON.parse(read(f.profileFile).toString('utf8'))
   assert.equal(profile.dependencies.keep, '1', '非目标依赖必须原样')
-  assert.equal(profile.dependencies[adapter.packageName], linkValue(installDir))
-  assert.deepEqual(profile.dsh.profile.bundles, ['keep', adapter.packageName])
+  assert.equal(profile.dependencies[adapter.packageName], undefined, '标准布局不得再往 profile 写同名依赖')
+  assert.deepEqual(profile.dsh.profile.bundles, ['keep'], '标准布局不得再往 profile 写本包 bundle')
   assert.deepEqual(profile.settings, { preserve: true })
-  assert.ok(lstatSync(junction).isSymbolicLink(), '本包必须以 junction 挂进 profile')
-  assert.equal(realpathSync(junction), realpathSync(installDir))
-  assert.deepEqual(read(path.join(junction, 'package.json')), read(path.join(product, 'package.json')), '装配字节＝选定本地代')
+  assert.equal(existsSync(junction), false, '标准布局不得在 profile 内留 junction')
+  assert.deepEqual(read(path.join(installDir, 'package.json')), read(path.join(product, 'package.json')), '装配字节＝选定本地代')
   for (const peer of peers) {
     const leaf = path.join(installDir, 'node_modules', ...peer.split('/'))
     assert.ok(lstatSync(leaf).isSymbolicLink(), '宿主 peer 必须链接，不复制第二份：' + peer)
@@ -202,21 +202,30 @@ test('WinCLI driver: 合法非空profile覆盖不再拒绝预检，install/unins
   const f = fixture(t)
   const patchFile = path.join(f.profileDir, 'cordis.patch.yml')
   writeFileSync(patchFile, USER_PATCH, 'utf8')
-  const patchBytes = read(patchFile)
   const driver = f.make()
+  // 两种真实形态都要认：顶层就是条目（用户手写的 `- id: …`）与包裹在 `insert:` 序列里的条目。
+  const userOps = text => parsePatch(text).toJS().flatMap(op => (op && Array.isArray(op.insert)) ? op.insert : (op && typeof op === 'object' ? [op] : []))
+  const userBefore = userOps(USER_PATCH)
+  assert.ok(userBefore.length >= 1, '夹具必须含用户条目（否则本叶无对账面）')
   const installState = await driver.preflight('install') // 旧实现：非空 patch 在此抛"profile自定义patch非空"
   assert.equal(installState.noop, false)
   assert.ok(f.probes.length >= 2, '预检仍走既有能力探针调用路径（外部执行沿用桩），未被新分支短路')
   await driver.manage('install')
-  assert.deepEqual(read(patchFile), patchBytes, '安装真实链不得改写用户层 patch')
+  // 安装会追加本包 early 行（预期），因此改为**语义比较**用户条目：id/字段/注释逐字保留，不做整份字节比较。
+  const afterInstall = userOps(read(patchFile).toString('utf8'))
+  for (const op of userBefore) assert.ok(afterInstall.some(item => JSON.stringify(item) === JSON.stringify(op)), '安装不得改写用户条目：' + JSON.stringify(op.id))
+  assert.equal(read(patchFile).toString('utf8').includes('# 用户自有覆盖'), true, '用户注释必须保留')
   const uninstallState = await driver.preflight('uninstall')
   assert.equal(uninstallState.noop, false)
   await driver.manage('uninstall')
-  assert.deepEqual(read(patchFile), patchBytes, '卸载真实链不得改写/删除用户层 patch')
+  const afterUninstall = userOps(read(patchFile).toString('utf8'))
+  for (const op of userBefore) assert.ok(afterUninstall.some(item => JSON.stringify(item) === JSON.stringify(op)), '卸载不得改写/删除用户条目：' + JSON.stringify(op.id))
+  assert.equal(read(patchFile).toString('utf8').includes('# 用户自有覆盖'), true, '卸载后用户注释仍须保留')
   assert.deepEqual(JSON.parse(read(f.profileFile).toString('utf8')).dsh.profile.bundles, ['keep'], '目标 bundle 撤净（沿用原装配语义）')
-  // 停态护栏沿用：同一非空覆盖现场下，运行中写前仍拒绝（未被新逻辑旁路）。
+  // 停态护栏沿用：同一非空覆盖现场下，运行中写前仍拒绝（未被新逻辑旁路）；比较基线是**卸载后现场**，不是最初格式化文本。
+  const uninstallBytes = read(patchFile)
   await assert.rejects(f.make({ presence: runningPresence }).preflight('install'), /正在运行/)
-  assert.deepEqual(read(patchFile), patchBytes)
+  assert.deepEqual(read(patchFile), uninstallBytes, '运行中拒绝时不得改写 patch（与卸载后基线比较）')
 })
 
 test('WinCLI driver: 工厂路由只认注入的目标平台，不静默回退POSIX', t => {
@@ -247,14 +256,14 @@ test('WinCLI driver: 工厂路由只认注入的目标平台，不静默回退PO
   assert.throws(() => createDriver(desktopOp, seams(true), product, f.evidence, budget(), { ...base, platform: 'win32', runtimeResolver: () => winRuntime }), /运行时描述缺失/)
 })
 test('WinCLI driver: 模拟 adapter verify 失败后 restorePackage 恢复旧安装代或未安装', async t => {
-  // ① 操作前已装旧代：验收失败 ⇒ 恢复预检抓下的旧代字节与装配
+  // ① 操作前已装旧代：验收失败 ⇒ 按 preflight 捕获的 before 状态字节还原（原位置/包/配置）
   const f = fixture(t, { installed: 'generation' })
   const driver = f.make()
+  const patchFile = path.join(f.profileDir, 'cordis.patch.yml')
   const oldManifest = read(path.join(f.installedDir, 'package.json')), oldMarker = read(path.join(f.installedDir, 'marker.txt'))
+  const beforeProfileBytes = read(f.profileFile), beforePatchBytes = read(patchFile)
   assert.equal((await driver.preflight('uninstall')).noop, false)
-  assert.ok(driver.recoveryPackage && driver.recoveryPackage.startsWith(f.evidence), '旧代须归档成恢复材料，不覆盖包源')
-  assert.deepEqual(read(path.join(driver.recoveryPackage, 'package.json')), oldManifest)
-  assert.deepEqual(read(path.join(driver.recoveryPackage, 'marker.txt')), oldMarker)
+  // 恢复材料由 helper 在 preflight 内部持有（不再暴露 driver.recoveryPackage，也不提前归档到 evidence）。
   await driver.manage('uninstall')
   assert.equal(existsSync(f.installedDir), false)
   driver.verify = async () => { throw Error('合成验收失败') } // 模拟 adapter 验收失败
@@ -262,15 +271,14 @@ test('WinCLI driver: 模拟 adapter verify 失败后 restorePackage 恢复旧安
   await driver.restorePackage()
   assert.deepEqual(read(path.join(f.installedDir, 'package.json')), oldManifest, '旧安装代必须字节还原')
   assert.deepEqual(read(path.join(f.installedDir, 'marker.txt')), oldMarker)
-  const restored = JSON.parse(read(f.profileFile).toString('utf8'))
-  assert.equal(restored.dependencies[adapter.packageName], linkValue(f.installedDir))
-  assert.deepEqual(restored.dsh.profile.bundles, ['keep', adapter.packageName])
+  assert.deepEqual(read(f.profileFile), beforeProfileBytes, 'profile 配置必须回到最初字节')
+  assert.deepEqual(read(patchFile), beforePatchBytes, 'profile patch 必须回到最初字节')
   // ② 操作前未安装：adapter 验收（源码接缝）失败 ⇒ restorePackage 回到未安装
   const clean = fixture(t)
   const cleanDriver = clean.make({ adapter: seams(false) }) // 该驱动认的 adapter 就是验收失败的那个
   assert.equal((await cleanDriver.preflight('install')).noop, false)
   await cleanDriver.manage('install')
-  const cleanDir = path.join(clean.home, 'plugins', adapter.packageName)
+  const cleanDir = path.join(clean.home, 'profile-data', 'tavern', 'data', 'plugins', adapter.packageName)
   assert.ok(existsSync(cleanDir))
   await assert.rejects(cleanDriver.verify('install', seams(false), {}), /完整源码接缝未ready/)
   await cleanDriver.restorePackage()
@@ -314,19 +322,21 @@ test('WinCLI driver: 兜底卸载坏旧包不要求 SDK peers/探针/包管理�
   const brokenManifest = read(path.join(f.installedDir, 'package.json'))
   const cleaned = Buffer.from(JSON.stringify({ name: 'dsh-profile-tavern', dependencies: { keep: '1' }, dsh: { profile: { bundles: ['keep'] } }, settings: { preserve: true } }, null, 2) + '\n', 'utf8')
   assert.equal(existsSync(f.peerRoot), false, '夹具里没有任何 SDK peer/node_modules')
+  const profileBefore = read(f.profileFile)
   const state = await driver.preflight('uninstall', { residual: true })
   assert.equal(state.assemblyPresent, true); assert.equal(state.noop, false)
   assert.equal(existsSync(path.join(f.profileDir, '.dsh-module-fallback')), false)
   await driver.manageResidual('uninstall')
   assert.equal(existsSync(f.installedDir), false)
-  const archive = path.join(f.evidence, 'residual-packages', '0-' + adapter.packageName)
-  assert.deepEqual(read(path.join(archive, 'package.json')), brokenManifest, '残留包必须字节归档')
-  assert.deepEqual(read(f.profileFile), cleaned)
-  assert.deepEqual(read(path.join(f.evidence, 'residual-profile-before.json')), f.profileBytes)
+  // 新契约：本次 before 由 helper 在内存/自有归档位持有（`assembly-before/<ordinal>`），不再落 profile-before 资产文件。
+  const archive = path.join(f.evidence, 'assembly-before', '0')
+  assert.deepEqual(read(path.join(archive, 'package.json')), brokenManifest, '残留包必须字节归档到 helper 自有档位')
+  assert.deepEqual(read(f.profileFile), cleaned, '兜底卸载必须清掉依赖/bundle 同名痕迹，只留非目标字段')
+  assert.equal(existsSync(path.join(f.profileDir, 'node_modules', adapter.packageName)), false, 'profile 内同名链接必须撤净')
   await driver.manageResidual('restore')
-  assert.deepEqual(read(f.profileFile), f.profileBytes, 'restore 必须逐字还原原 profile')
-  assert.deepEqual(read(path.join(f.installedDir, 'package.json')), brokenManifest, 'restore 必须逐字还原坏旧包')
-  assert.equal(existsSync(archive), false)
+  assert.deepEqual(read(f.profileFile), profileBefore, 'restore 必须逐字还原原 profile')
+  assert.deepEqual(read(path.join(f.installedDir, 'package.json')), brokenManifest, 'restore 必须逐字还原坏旧包且回到原位置')
+  assert.equal(existsSync(archive), false, 'restore 必须把归档位搬回原位（不留副本）')
 })
 
 // 新块机制换代：同名不同包不再直接拒（preflight 标 upgrading、noop=false），装配真实装卸可回原代。
@@ -340,11 +350,13 @@ test('现场驱动1 新块换代预检允许且装配回原代', async t => {
   const state = await driver.preflight('install')
   assert.equal(driver.upgrading, true, '同名不同包必须标 upgrading（不再直接拒）')
   assert.equal(state.noop, false, 'upgrading 时不得报 noop')
-  await driver.manage('uninstall') // 真文件系统：官方卸旧装配
+  await driver.manage('uninstall') // 真文件系统：卸旧装配（旧代按 helper 的自有归档位持有，不留 profile 资产）
   await driver.manage('install') // 真文件系统：装新代
-  assert.ok(existsSync(path.join(f.profileDir, 'node_modules', adapter.packageName)), '装新代后装配必须存在')
-  await driver.restorePackage() // 真文件系统：按 recoveryPackage 恢复原代装配
+  const stdDir = path.join(f.home, 'profile-data', 'tavern', 'data', 'plugins', adapter.packageName)
+  assert.equal(existsSync(path.join(stdDir, 'package.json')), true, '装新代后本包必须落在标准目录（data/plugins）')
+  assert.equal(existsSync(path.join(f.profileDir, 'node_modules', adapter.packageName)), false, '标准布局不得在 profile 内留同名链接')
+  await driver.restorePackage() // 真文件系统：按 preflight 的 before 状态恢复原代（不再依赖 recoveryPackage 路径）
   assert.deepEqual(read(f.profileFile), profileBefore, 'profile 字节必须回到升级前')
-  assert.deepEqual(read(oldPkgFile), oldPkgBytes, '恢复后装配包字节必须是升级前那一代')
+  assert.deepEqual(read(oldPkgFile), oldPkgBytes, '恢复后装配包字节必须是升级前那一代，且回到原位置')
   assert.ok(f.probes.every(item => item.exe === process.execPath), '只允许 fake runPackage 记录的能力探针（无真实包管理）')
 })

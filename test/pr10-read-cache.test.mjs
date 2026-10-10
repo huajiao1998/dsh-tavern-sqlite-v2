@@ -13,9 +13,10 @@ import { createChatSqliteStore } from '../chat-sqlite-store.js'
 import { createChatProjectionReads } from '../lib/chat-projection-reads.js'
 import { readdirSync } from 'node:fs'
 
-const repo = fileURLToPath(new URL('../', import.meta.url))
+// 本地布局：workspace root（plugins/<plugin>/test/ 往上三级）＋ 已知 682 夹具；env 优先（与既有项目 author-root 同式）
+const workspace = fileURLToPath(new URL('../../../', import.meta.url))
 const author = path.resolve(process.env.TAVERN_PROJECTION_AUTHOR_ROOT || path.join(
-  repo, '../release-034-20261008/author-fixture/src/dsh-tavern-68215e47516637e00c75d2b4bba3192679559425/tavern-plugin/lib/domain'))
+  workspace, 'tmp/release-034-20261008/author-fixture/src/dsh-tavern-68215e47516637e00c75d2b4bba3192679559425/tavern-plugin/lib/domain'))
 assert.ok(existsSync(path.join(author, 'chat-session-state.js')), '需要 682 作者源码（只读）：' + author)
 
 const load = name => import(pathToFileURL(path.join(author, name + '.js')).href)

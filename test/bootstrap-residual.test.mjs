@@ -6,6 +6,10 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { bootstrapOptions, installedPackage, validatePackage, selectLocal, bootstrap } from '../deploy/bootstrap.mjs'
+import { createStandardInstallation, installOwnedRows, pluginDirFor } from '../deploy/maintenance/standard-installation.mjs'
+import { copyPackage } from '../deploy/maintenance/runner.mjs'
+import { fileURLToPath } from 'node:url'
+const product = fileURLToPath(new URL('../', import.meta.url))
 
 const NAME = 'dsh-tavern-sqlite-v2'
 const VENDOR = ['lib/vendor/lodash/lodash.min.js', 'lib/vendor/json5/index.mjs', 'lib/vendor/jsonrepair/esm/index.js', 'lib/vendor/yaml/dist/index.js', 'lib/vendor/acorn/acorn.mjs']
@@ -127,4 +131,62 @@ test('⑤foreign family保拒：旧包名/另一版本线不迁移不共装不�
       assert.throws(() => installedPackage(['--home', other.home], {}, { action: 'uninstall' }), new RegExp(foreign))
     }
   } finally { drop(root) }
+})
+
+// 标准目录（data/plugins）本地执行器定位：真 product 复制到标准目录后，装/卸都必须复用同一位置；
+// 双源（标准目录 + profile 同名 dep/bundle）必须拒绝；foreign manifest 与损坏 manifest 都不得被当成可用包。
+test('获取器：标准目录本地执行器复用且双源拒绝', async () => {
+  const root = temp()
+  try {
+    // ① 真 product 经 helper 装进本用例自有 home 的标准目录（不走 profile 同名 dep/bundle）
+    const home = path.join(root, 'home'), profileDir = path.join(home, 'profiles', 'tavern')
+    fs.mkdirSync(profileDir, { recursive: true })
+    const profile = { name: 'dsh-profile-tavern', dependencies: {}, dsh: { profile: { bundles: [] } } }
+    fs.writeFileSync(path.join(profileDir, 'package.json'), JSON.stringify(profile, null, 2) + '\n', 'utf8')
+    const pluginDir = pluginDirFor({ home, packageName: NAME })
+    const packageRoot = path.join(root, 'selected-package')
+    copyPackage(product, packageRoot)
+    const seeded = installOwnedRows('[]\n', { pluginDir, home })
+    fs.writeFileSync(path.join(profileDir, 'cordis.patch.yml'), seeded.text, 'utf8')
+    await createStandardInstallation({ op: { home, profileDir }, adapter: { packageName: NAME }, packageRoot, evidence: path.join(root, 'evidence'), linkPeers: () => {} }).manage('install')
+    assert.equal(fs.existsSync(path.join(pluginDir, 'package.json')), true, '标准目录必须已装（真 product 复制）')
+    const afterInstall = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'))
+    assert.deepEqual(Object.keys(afterInstall.dependencies), [], '标准装配不得写 profile 同名 dep')
+    assert.deepEqual(afterInstall.dsh.profile.bundles, [], '标准装配不得写 profile 同名 bundle')
+    // ② install / uninstall 都必须定位到同一个标准目录并可复用（同一物理路径）
+    const located = installedPackage(['--home', home], {}, { action: 'install' })
+    assert.equal(fs.realpathSync(located), fs.realpathSync(pluginDir), 'install 必须定位标准目录并复用同一程序')
+    assert.equal(installedPackage(['--home', home], {}, { action: 'uninstall' }), located, 'uninstall 必须复用同一本地执行器')
+    assert.equal(validatePackage(located).name, NAME, '标准目录包必须通过完整性校验（真 product，vendor 齐备）')
+    // ③ 双源：标准目录之外再补 profile 同名 dep+bundle ⇒ 必须拒绝（不猜哪一份权威）
+    const dual = { dependencies: { [NAME]: 'file:x' }, dsh: { profile: { bundles: [NAME] } } }
+    fs.writeFileSync(path.join(profileDir, 'package.json'), JSON.stringify(dual, null, 2) + '\n', 'utf8')
+    assert.throws(() => installedPackage(['--home', home], {}, { action: 'install' }), Error, '标准目录与 profile 同名装配同时存在必须拒绝')
+    // ④ foreign manifest：标准目录里换成别的包名 ⇒ 不得被当作可用本地程序
+    const foreignDir = path.join(root, 'foreign-std')
+    fs.mkdirSync(foreignDir, { recursive: true })
+    fs.writeFileSync(path.join(foreignDir, 'package.json'), JSON.stringify({ name: 'dsh-tavern-sqlite-v1', version: '0.0.1' }) + '\n', 'utf8')
+    const foreignHome = path.join(root, 'foreign-home'), foreignProfile = path.join(foreignHome, 'profiles', 'tavern')
+    fs.mkdirSync(foreignProfile, { recursive: true })
+    fs.writeFileSync(path.join(foreignProfile, 'package.json'), JSON.stringify({ name: 'dsh-profile-tavern', dependencies: {}, dsh: { profile: { bundles: [] } } }, null, 2) + '\n', 'utf8')
+    const foreignPluginDir = pluginDirFor({ home: foreignHome, packageName: NAME })
+    fs.mkdirSync(path.dirname(foreignPluginDir), { recursive: true })
+    fs.cpSync(foreignDir, foreignPluginDir, { recursive: true })
+    assert.throws(() => installedPackage(['--home', foreignHome], {}, { action: 'install' }), Error, 'foreign manifest 不得冒认可用本包')
+    // ⑤ 损坏 manifest：解析即抛（危险未知归属不得被静默当成 usable）
+    fs.writeFileSync(path.join(foreignPluginDir, 'package.json'), '{ 不是合法 JSON\n', 'utf8')
+    assert.throws(() => installedPackage(['--home', foreignHome], {}, { action: 'install' }), /JSON|Unexpected|Syntax/i, '损坏 manifest 必须解析失败而非静默可用')
+  } finally { drop(root) }
+})
+
+// 静态文本对齐：install.sh 内嵌的获取器必须与 bootstrap.mjs 同一函数**同文本**（单次比对，不执行发行构建、不算 SHA）。
+test('获取器：install.sh 内嵌体与 bootstrap 源同文本', () => {
+  const read = rel => fs.readFileSync(path.join(product, rel), 'utf8')
+  const slice = (text, source) => {
+    const start = text.indexOf('export function installedPackage')
+    assert.notEqual(start, -1, source + ' 必须含 export function installedPackage')
+    const stop = text.indexOf('\n//', start)
+    return text.slice(start, stop === -1 ? text.length : stop).trimEnd()
+  }
+  assert.equal(slice(read('deploy/install.sh'), 'deploy/install.sh'), slice(read('deploy/bootstrap.mjs'), 'deploy/bootstrap.mjs'), '内嵌获取器与源必须逐字一致')
 })
