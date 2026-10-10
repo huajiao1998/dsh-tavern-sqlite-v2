@@ -1478,7 +1478,7 @@ export function createChatSqliteStore(options = {}) {
   /** S5：追加楼层（纯尾 splice，对应 finalizeAppend 的 patch 形态）。
    *  零完整态：事务内窄读＋prepareLocalWrite（同 store 变量归档实例）＋行 UPSERT；
    *  CAS 不符返回 undefined（同 patch:722），不抛。提交完成逻辑与 update/patch 同块。 */
-  async function appendMessages(chatId, expectedRevision, { items, headerSets } = {}, metadata = {}) {
+  async function appendMessages(chatId, expectedRevision, { items, headerSets, timelineUpdate } = {}, metadata = {}) {
     return serialize(chatId, async () => {
       assertActive()
       assertWritableChat(chatId)
@@ -1488,19 +1488,27 @@ export function createChatSqliteStore(options = {}) {
       if (!existsSync(dbFile(id))) throw new Error('追加命令：目标档不存在（无 archive.db）')
       const db = handle(id)
       if (db === null) throw new Error('追加命令：拿不到库句柄')
-      const outcome = commandAppendMessages(db, { chatId: id, sessionId: metadata.sessionId, revision: expectedRevision, items, headerSets }, {
-        assertWritableChat, now,
-        archiveLocalWrite: (targetDb, targetChatId, touchedRows, messageCount, options) =>
-          variables.prepareLocalWrite(targetDb, targetChatId, touchedRows, messageCount, options),
-        applyMessageWrite: ({ revision, keys, messages, timeline, changes }) => {
-          bumpGeneration(id)
-          const compRev = componentRevisions(db)
-          if (keys.length > 0) compRev.header++
-          if (messages) compRev.messages++
-          projectionReads.invalidate(id, { revision, keys, messages, timeline })
-          forgetState(id)
-        },
-      })
+      let outcome
+      try {
+        outcome = commandAppendMessages(db, { chatId: id, sessionId: metadata.sessionId, revision: expectedRevision, items, headerSets, timelineUpdate }, {
+          assertWritableChat, now,
+          archiveLocalWrite: (targetDb, targetChatId, touchedRows, messageCount, options) =>
+            variables.prepareLocalWrite(targetDb, targetChatId, touchedRows, messageCount, options),
+          applyMessageWrite: ({ revision, keys, messages, timeline, changes }) => {
+            bumpGeneration(id)
+            const compRev = componentRevisions(db)
+            if (keys.length > 0) compRev.header++
+            if (messages) compRev.messages++
+            projectionReads.invalidate(id, { revision, keys, messages, timeline })
+            forgetState(id)
+          },
+        })
+      } catch (error) {
+        // 命令在 SQL COMMIT 前可能已 bumpRevision + 刷新变量热 cache；事务已 ROLLBACK ⇒ 同实例缓存必须清掉，
+        // 否则 SQL 干净而 API 仍见未提交的变量 ghost。只清变量缓存，不动 CAS/算法/成功分支。
+        variables.forget(id)
+        throw error
+      }
       // CAS 不符＝undefined（零写，钩子未跑）；成功时 recentChanges 保守退场（提交证据无完整态可记）。
       return outcome === undefined ? undefined : { ...outcome, revision: outcome.revision }
     })

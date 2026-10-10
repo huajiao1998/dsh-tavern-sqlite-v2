@@ -108,13 +108,13 @@ function makeOnPurge(deps) {
     if (mismatch !== '') throw new Error('清理回执目标与请求不一致，拒绝更新：' + mismatch)
     if (rb.alreadyClean === true) {
       liveTavernView.rebase(props.sessionId)
-      tavernCoordination.refresh(props.sessionId)
+      tavernCoordination.invalidate(props.sessionId) // 作者真接口（服务级 refresh 不存在）
       return resp
     }
     await sessions.waitForTavernRollbackSync(rb.sync)
     setCandidatePanel(null); setRegenPanel(null); setCandidateGuidePanel(null)
     liveTavernView.rebase(props.sessionId)
-    tavernCoordination.refresh(props.sessionId)
+    tavernCoordination.invalidate(props.sessionId)
     return resp
   }
 }
@@ -125,7 +125,7 @@ test('干净清理5 onPurge真实执行：附参+同连接等待+成功路径（
   const rpc = async (method, args, sid)=>{ calls.push([method,args,sid]); return {view:{rolledBack:{sync:{id:'r1'},cleanedFailureTarget:{turn:7,operationId:'op1',branchId:'b1',revision:3}}}} }
   const sessions = {waitForTavernRollbackSync: async (r)=>{ waited = r }}
   let panels = 0, rebased = 0, refreshed = 0
-  const deps = {rpc, sessions, state:{view:{failureTarget:ft}}, props:{sessionId:'s1', sessions}, setCandidatePanel:()=>{panels++}, setRegenPanel:()=>{panels++}, setCandidateGuidePanel:()=>{panels++}, liveTavernView:{invalidate:()=>{throw new Error('不应invalidate')}, rebase:()=>{rebased++}}, tavernCoordination:{invalidate:()=>{throw new Error('不应invalidate')}, refresh:()=>{refreshed++}}}
+  const deps = {rpc, sessions, state:{view:{failureTarget:ft}}, props:{sessionId:'s1', sessions}, setCandidatePanel:()=>{panels++}, setRegenPanel:()=>{panels++}, setCandidateGuidePanel:()=>{panels++}, liveTavernView:{invalidate:()=>{throw new Error('不应invalidate')}, rebase:()=>{rebased++}}, tavernCoordination:{invalidate:()=>{refreshed++}}}
   const onPurge = makeOnPurge(deps)
   const ret = await onPurge(7, ft)
   assert.deepEqual(calls[0], ['rollbackTurn', {expectedTurn:7, failureTarget:ft}, 's1'])
@@ -292,19 +292,23 @@ function createSupersededHarness(source, dom, run) {
     submitFailedTurnReplay: async () => {},
     rpc: (...args) => run.rpc(...args),
     liveTavernView: {invalidate: () => { run.invalidated++ }, rebase: () => { run.rebased++ }, setView: () => {}},
-    tavernCoordination: {invalidate: () => {}, refresh: () => { run.refreshed++ }},
+    // 真协调服务可注入（run.tavernCoordination，如 18）；缺省只给作者真接口确有的 invalidate。
+    // **不提供 refresh**：作者 EventModule 只导出 getSnapshot/setView/subscribe/invalidate，
+    // 给假 refresh 会遮蔽线上 `tavernCoordination.refresh is not a function`（2026-10-10 现场）。
+    tavernCoordination: run.tavernCoordination || {invalidate: () => { run.refreshed++ }},
     historyProjection: {rolledBack: () => {}},
     tavernErrorHub: {report: (label, error) => { if (run.reported) run.reported.push([label, error]); else if (error) throw error }},
     tavernProviderRefusalNotice: () => '',
     setCandidatePanel: () => {}, setRegenPanel: () => {}, setCandidateGuidePanel: () => {},
     window: {...DOM, localStorage: {getItem: () => null, setItem: () => {}}},
   }
-  function render(state) {
+  function render(state, registeredProps) {
     cursor = 0
     // 订阅者通知：state 已换，但 effect 是否重建只由 deps 决定。
     for (const listener of run.listeners) listener(state)
-    const element = sandbox(...sandboxKeys.map(key => sandboxEnv[key]))
-      ({sessionId:'s1', sessions:run.sessions, useSession:subscribe => subscribe({running:false}), useChat:selector => selector({}), useInput:selector => selector({draft:''})})
+    // 可选 registeredProps：把**真注册语句产出的 element props** 原样喂组件（不断开注册→props 链）；缺省保持旧行为。
+    const props = registeredProps || {sessionId:'s1', sessions:run.sessions, useSession:subscribe => subscribe({running:false}), useChat:selector => selector({}), useInput:selector => selector({draft:''})}
+    const element = sandbox(...sandboxKeys.map(key => sandboxEnv[key]))(props)
     // commit：ref 在 effect 之前赋值（作者 closest 依赖它）
     if (element.ref) element.ref.current = dom.row
     for (const slot of stores) slot.snapshot = slot.getSnapshot()
@@ -329,7 +333,7 @@ test('干净清理6 onPurge真实执行：alreadyClean分支+旧target零调用+
   let rpcCalls = 0, waited = 0, rebased = 0
   const rpc = async ()=>{ rpcCalls++; return {view:{rolledBack:{alreadyClean:true,cleanedFailureTarget:{turn:7,operationId:'op1',branchId:'b1',revision:3}}}} }
   const sessions = {waitForTavernRollbackSync: async ()=>{ waited++ }}
-  const deps = {rpc, sessions, state:{view:{failureTarget:ft}}, props:{sessionId:'s1', sessions}, setCandidatePanel:()=>{}, setRegenPanel:()=>{}, setCandidateGuidePanel:()=>{}, liveTavernView:{rebase:()=>{rebased++}}, tavernCoordination:{refresh:()=>{rebased++}}}
+  const deps = {rpc, sessions, state:{view:{failureTarget:ft}}, props:{sessionId:'s1', sessions}, setCandidatePanel:()=>{}, setRegenPanel:()=>{}, setCandidateGuidePanel:()=>{}, liveTavernView:{rebase:()=>{rebased++}}, tavernCoordination:{invalidate:()=>{rebased++}}}
   const onPurge = makeOnPurge(deps)
   await onPurge(7, ft)
   assert.equal(rpcCalls, 1)
@@ -694,4 +698,320 @@ test('干净清理14 无原生错误行的失败42提示：43清后42可点，�
   assert.equal(disposedPrompt.removed, true)
   assert.equal(domDispose.panelOf(disposedPrompt).removed, true, 'dispose 必须一并移除面板')
   controls.dispose(); native42Controls.dispose(); hiddenControls.dispose()
+})
+// 从真产物裁出 dock 注册**语句**（不是回调片段）：整条 ctx.effect(() => slots.inject(name, () => slots.register(meta, render)), label)
+// 执行它才能同时核「注册元数据」与「真回调产出的元素 props」；锚点丢失/不唯一即抛，不手抄替代实现。
+function extractDockRegisterStatement(source, label) {
+  const hits = source.split(label).length - 1
+  if (hits === 0) throw new Error('裁注册语句失败：找不到注册说明 ' + label)
+  if (hits !== 1) throw new Error('裁注册语句失败：注册说明不唯一（' + hits + ' 次）' + label)
+  const at = source.indexOf(label)
+  const start = source.lastIndexOf('ctx.effect(', at)
+  if (start < 0) throw new Error('裁注册语句失败：注册说明之前没有 ctx.effect(')
+  const stop = source.indexOf(');', at)
+  if (stop < 0) throw new Error('裁注册语句失败：注册语句未闭合')
+  const statement = source.slice(start, stop + 2)
+  // 混合 OLD+NEW / 重复注册：一次注册说明里必须恰好一次 register、恰好一次 SupersededTurnErrors 引用。
+  const registers = statement.split('slots.register(').length - 1
+  if (registers !== 1) throw new Error('裁注册语句失败：注册调用不为 1（' + registers + '）')
+  const superseded = statement.split('SupersededTurnErrors').length - 1
+  if (superseded !== 1) throw new Error('裁注册语句失败：SupersededTurnErrors 引用不为 1（' + superseded + '）')
+  return statement
+}
+// 真注册语句 + 只观测的 React/slots/ctx 桩：执行语句，从 wrapper 已记录的结果返回（不在 new Function 内引用外部变量）。
+// 本用例只验证「注册注入」；不做卸载验收，故不收集/断言 disposer（slots.inject 桩不是真卸载通道）。
+function runDockRegister(source, label, { sessions, components }) {
+  const statement = extractDockRegisterStatement(source, label)
+  const registered = []
+  const ctx = { sessions, effect: fn => { fn(); return () => {} } }
+  const slots = { inject: (name, fn) => { fn(); return { name } }, register: (meta, render) => { registered.push({ meta, render }); return { meta } } }
+  // 只记录 element props；Fragment 用独立标记，便于按 type 找子元素。
+  const React = { Fragment: Symbol('React.Fragment'), createElement: (type, props, ...children) => ({ type, props: props || {}, children }) }
+  const names = Object.keys(components)
+  new Function('ctx', 'slots', 'React', ...names, statement)(ctx, slots, React, ...names.map(name => components[name]))
+  return { registered, statement, ctx }
+}
+// 精确取出产物里某一处调用的**原文**（括号配平；要求唯一命中）——用于只替换这一处，不用全局删除正则。
+function callText(source, prefix) {
+  const hits = source.split(prefix).length - 1
+  if (hits === 0) throw new Error('取注册调用失败：找不到 ' + prefix)
+  if (hits !== 1) throw new Error('取注册调用失败：不唯一（' + hits + ' 次）' + prefix)
+  const at = source.indexOf(prefix)
+  let depth = 0
+  for (let i = source.indexOf('(', at); i < source.length; i++) {
+    if (source[i] === '(') depth++
+    else if (source[i] === ')' && --depth === 0) return source.slice(at, i + 1)
+  }
+  throw new Error('取注册调用失败：括号未闭合 ' + prefix)
+}
+// 递归收集 element 树里指定 type 的元素（createElement 的 rest children 形状）。
+function elementsOfType(element, type, out = []) {
+  if (!element || typeof element !== 'object') return out
+  if (element.type === type) out.push(element)
+  if (Array.isArray(element.children)) for (const child of element.children) elementsOfType(child, type, out)
+  const nested = element.props && element.props.children
+  if (Array.isArray(nested)) for (const child of nested) elementsOfType(child, type, out)
+  return out
+}
+// 干净清理17（根因回归）：作者 dock 注册把 sessions 丢了 ——
+//   play-controls.js:1382 React.createElement(SupersededTurnErrors, Object.assign({}, props, { key: props.sessionId }))
+// 旁侧 CandidateQuestion/CandidateDockActions 显式带 sessions: ctx.sessions（:1370/:1374-1375/:1384）。
+// 后果：SupersededTurnErrors→turn-error-controls 的 props 无 sessions ⇒ 清理守卫在 RPC 前抛（server/clientReady 都 true 也发不出清理）。
+// 本用例执行**真实注册语句**（React/slots/ctx 桩只观测 element props）并复用真产物控件回调，覆盖：源码与 built 的注册注入、
+// 注入后能发 rpc/wait/rebase、缺同步消费者时零 rpc 不删。每个场景用全新输入，不共享可变现场。
+test('干净清理17 真实注册为失败提示控件注入同步服务', async ()=>{
+  const LABEL = '"dsh-tavern: candidate question panel"'
+  let waited = null
+  // 同步服务桩：记录收到的 sync 回执；身份即 ctx.sessions（注册注入与 run.sessions 必须是同一对象）。
+  const SESSIONS = { waitForTavernRollbackSync: async sync => { waited = sync }, subagentAddress: () => null }
+  const types = { SupersededTurnErrors: Symbol('SupersededTurnErrors'), TurnHistoryProjection: Symbol('TurnHistoryProjection'), CandidateQuestion: Symbol('CandidateQuestion') }
+  // 原始 slot props 刻意不含 sessions：复现作者 Object.assign({}, props, {key}) 丢字段的现场。
+  const slotProps = () => ({ sessionId: 's1', useSession: subscribe => subscribe({running:false}), useChat: selector => selector({}), useInput: selector => selector({draft:''}) })
+  // 产物：split＝真功能文件直接产物；built＝同链施缝的内联产物（现场部署形态，含作者 guard 与 clear-only guard）。
+  const direct = applyErrorPurgePlayControlsTransform(readFileSync(new URL(FIX + 'features/play-controls.js', import.meta.url), 'utf8'))
+  const {mkdtempSync, mkdirSync, writeFileSync: writeFs, readFileSync: readFs, rmSync} = await import('node:fs')
+  const {tmpdir} = await import('node:os')
+  const path = (await import('node:path')).default
+  const {clientCoreWrites} = await import('../deploy/client-seams.mjs')
+  const fixRoot = new URL('../../../tmp/release-034-20261008/author-fixture/src/dsh-tavern-68215e47516637e00c75d2b4bba3192679559425/tavern-plugin/', import.meta.url)
+  const base = mkdtempSync(path.join(tmpdir(), 'tavern-error-purge-reg17-'))
+  try {
+    for (const rel of ['lib/client.js', 'src/client/main.js', 'src/client/turn-error-controls.js', 'src/client/features/play-controls.js', 'src/client/features/turn-history.js', 'src/client/ui/error-center.js', 'src/client/helper-resources.js', 'src/client/runtime/helper-bootstrap.js', 'src/client/runtime/helper-script-runtime.js', 'src/client/modules/tavern-coordination.js']) {
+      const dst = path.join(base, 'tavern-plugin', rel)
+      mkdirSync(path.dirname(dst), {recursive:true})
+      writeFs(dst, readFs(new URL(rel, fixRoot), 'utf8'))
+    }
+    const built = clientCoreWrites(base).get('tavern-plugin/lib/client.js')
+
+    // 真注册语句 → 只观测的 element props（① 与 ②/③ 共用同一份，② 用它喂组件，不断开注册→props 链）。
+    const registeredPropsOf = product => {
+      const dock = runDockRegister(product, LABEL, { sessions: SESSIONS, components: types })
+      assert.equal(dock.registered.length, 1, '对话 dock 必须注册一次 candidate question panel')
+      assert.equal(dock.registered[0].meta.id, 'dsh-tavern-question', '注册元数据不变')
+      assert.equal(dock.registered[0].meta.name, 'conversation.input.dock', '注册槽位不变')
+      const tree = dock.registered[0].render(slotProps())
+      const superseded = elementsOfType(tree, types.SupersededTurnErrors)
+      assert.equal(superseded.length, 1, '注册回调必须创建 SupersededTurnErrors 元素')
+      assert.equal(elementsOfType(tree, types.TurnHistoryProjection).length, 1, '同回调的其它元素身份不变')
+      assert.equal(elementsOfType(tree, types.CandidateQuestion)[0].props.sessions, SESSIONS, '旁证：CandidateQuestion 本就显式传 sessions')
+      return { dock, tree, superseded, props: superseded[0].props }
+    }
+
+    // ① 注册注入（fresh，split 与 built 双路径都核）：SupersededTurnErrors 元素必须拿到 ctx.sessions
+    const splitCase = registeredPropsOf(direct)
+    const builtCase = registeredPropsOf(built)
+    for (const [layout, item] of [['split', splitCase], ['built', builtCase]]) {
+      assert.equal(item.props.sessions, SESSIONS, layout + '：根因——SupersededTurnErrors 元素必须注入 ctx.sessions（原实现丢字段）')
+    }
+    // ④ 变换接线与锚点合同（**产品级**，不用 helper 自测）：幂等；旧 marker 但注册缺 sessions 必须重接；锚点被删/重复 NEW/混合 OLD+NEW 必须 fail-closed
+    assert.equal(applyErrorPurgePlayControlsTransform(direct), direct, '幂等：二次施缝必须字节不变')
+    const OLD_REGISTRATION = 'React.createElement(SupersededTurnErrors, Object.assign({}, props, { key: props.sessionId }))' // 作者原样（fixture play-controls.js:1382）
+    const NEW_REGISTRATION = callText(direct, 'React.createElement(SupersededTurnErrors') // 从产物精确取该处调用原文
+    assert.notEqual(NEW_REGISTRATION, OLD_REGISTRATION, '前提：产物该处注册必须已改成带 sessions 的新形态')
+    assert.ok(built.includes(NEW_REGISTRATION), '前提：built 产物同处注册文本与 split 一致')
+    const legacy = direct.replace(NEW_REGISTRATION, OLD_REGISTRATION) // 只替这一处，不动旁控件 sessions
+    assert.notEqual(legacy, direct, '前提：旧形态替换必须命中（NEW 文本须与产物一致）')
+    const rejoined = applyErrorPurgePlayControlsTransform(legacy)
+    assert.equal(registeredPropsOf(rejoined).props.sessions, SESSIONS, '旧 marker 但注册缺 sessions：必须重接（不得只凭标记早 return）')
+    assert.equal(applyErrorPurgePlayControlsTransform(rejoined), rejoined, '重接后仍幂等')
+    // fail-closed 一律由**产品变换**报错（marker 原样保留，不做撤标记前置）
+    const refusal = fn => { try { fn(); return null } catch (error) { return String((error && error.message) || error || '') } }
+    for (const [label, mutate] of [
+      ['该处注册调用被删（锚点 0）', text => text.replace(NEW_REGISTRATION, '')],
+      ['重复 NEW 注册调用', text => text + '\n' + NEW_REGISTRATION],
+      ['混合 OLD+NEW 注册调用', text => text + '\n' + OLD_REGISTRATION],
+    ]) {
+      const message = refusal(() => applyErrorPurgePlayControlsTransform(mutate(direct)))
+      assert.ok(message !== null && message !== '', label + '：产品变换必须 fail-closed 抛错（保留 marker 原样）')
+    }
+
+    // ② 42 无原生错误行（真提示行）＋真注册 props 喂组件：真按钮 await click 即走完 rpc/等 sync/rebase+refresh
+    const view = target => ({view:{failureTarget:target, failureCleanupReason:'', suppressedDshErrorTurns:[], hiddenDshErrorTurns:[], staleDshErrorTurns:[], filteredFailureStreak:0, canRegenerate:false, canReplayFailedTurn:true, replayFailedTurn:42}})
+    const dom = createFallbackDom([])
+    const calls = []
+    const run = { currentState: null, listeners: [], sessions: SESSIONS, created: 0, invalidated: 0, rebased: 0, refreshed: 0, reported: [],
+      rpc: async (method, args, sid) => { calls.push([method, args, sid])
+        return {view:{rolledBack:{sync:{id:'r1'}, cleanedFailureTarget:{turn:args.failureTarget.turn, operationId:args.failureTarget.operationId, branchId:args.failureTarget.branchId, revision:args.failureTarget.revision}}}} } }
+    const harness = createSupersededHarness(built, dom, run)
+    const target = failureItem(42, 'op42')
+    run.currentState = view(target)
+    harness.render(run.currentState, builtCase.props) // 真注册产出的 props（含 ctx.sessions），不用手填
+    const options = harness.captures.at(-1)
+    assert.equal(options.failureTarget, target, '真产物控件必须拿到当前 42 目标')
+    const controls = realTurnErrorControls(applyErrorPurgeTurnControlsTransform(readFileSync(new URL(FIX + 'turn-error-controls.js', import.meta.url), 'utf8')))(dom.root, options)
+    controls.apply()
+    const prompts = dom.fallbackRows()
+    assert.equal(prompts.length, 1, '42 无原生错误行：必须出现插件自有提示行')
+    assert.equal(prompts[0].textContent, '第42轮未完成，请清理本轮后继续。')
+    assert.equal(prompts[0].getAttribute('data-chat-flow-kind'), null, '不得冒充 data-chat-flow-kind=turn-error')
+    assert.equal(dom.toggleOf(prompts[0]).disabled, false, '注入 sessions 后提示按钮必须可点')
+    await dom.toggleOf(prompts[0]).click()
+    assert.deepEqual(run.reported, [], 'onError 不得被触发（否则清理链已中断）')
+    assert.deepEqual(calls[0], ['rollbackTurn', {expectedTurn:42, failureTarget:target}, 's1'], '注入的 props.sessions 必须让清理发出 RPC')
+    assert.deepEqual(waited, {id:'r1'}, '必须等待同连接同步回执')
+    assert.equal(run.rebased, 1, 'sync 等待后必须定向 rebase')
+    assert.equal(run.refreshed, 1)
+    controls.dispose()
+    assert.equal(dom.fallbackRows().length, 0, 'dispose 后提示行必须清净')
+
+    // ③ 负例（在**同一真注册 props** 上故意删/破坏 sessions，每次全新输入）：零 RPC、零局部更新，且暴露“同步未接线/未就绪”
+    const negatives = [
+      ['sessions 被删（原实现丢字段形态）', props => { const copy = {...props}; delete copy.sessions; return copy }],
+      ['sessions 在但缺 waitForTavernRollbackSync（同步未接线）', props => ({...props, sessions: {}})],
+    ]
+    for (const [label, mutate] of negatives) {
+      const domNoSync = createFallbackDom([])
+      const nocalls = []
+      const runNoSync = { currentState: null, listeners: [], sessions: SESSIONS, created: 0, invalidated: 0, rebased: 0, refreshed: 0, reported: [],
+        rpc: async (...args) => { nocalls.push(args); throw new Error('缺同步时必须零 RPC') } }
+      const harnessNoSync = createSupersededHarness(built, domNoSync, runNoSync)
+      const targetNoSync = failureItem(42, 'op42')
+      runNoSync.currentState = view(targetNoSync)
+      harnessNoSync.render(runNoSync.currentState, mutate(builtCase.props))
+      const controlsNoSync = realTurnErrorControls(applyErrorPurgeTurnControlsTransform(readFileSync(new URL(FIX + 'turn-error-controls.js', import.meta.url), 'utf8')))(domNoSync.root, harnessNoSync.captures.at(-1))
+      controlsNoSync.apply()
+      const promptsNoSync = domNoSync.fallbackRows()
+      assert.equal(promptsNoSync.length, 1, label + '：真提示行必须仍在（只在派发时受阻）')
+      // 作者控件把异步失败交给 options.onError；若实现改为同步抛，本处接住 → 两种暴露路径都算，但必须恰好一次。
+      let thrown = null
+      try { await domNoSync.toggleOf(promptsNoSync[0]).click() } catch (error) { thrown = error }
+      assert.equal(nocalls.length, 0, label + '：必须零 RPC（不删不改）')
+      assert.equal(runNoSync.rebased, 0, label + '：零 RPC 就不得 rebase')
+      assert.equal(runNoSync.refreshed, 0, label + '：零 RPC 就不得 refresh')
+      assert.equal(runNoSync.reported.length + (thrown ? 1 : 0), 1, label + '：失败必须恰好暴露一次（onError 或同步抛）')
+      if (runNoSync.reported.length === 1) assert.equal(runNoSync.reported[0][0], '保存错误提示状态失败', label + '：走作者 onError 时标签须与现场截图同名')
+      const surfaced = runNoSync.reported.length === 1
+        ? String(runNoSync.reported[0][1] && runNoSync.reported[0][1].message)
+        : String(thrown && thrown.message)
+      assert.match(surfaced, /尚未接线|未就绪/, label + '：必须暴露“同步未接线/未就绪”而不是静默')
+      controlsNoSync.dispose()
+    }
+  } finally {
+    rmSync(base, {recursive:true, force:true})
+  }
+})
+// 干净清理18（真协调服务接缝，2026-10-10 线上 `tavernCoordination.refresh is not a function`）：
+//   作者 EventModule 只导出 getSnapshot/setView/subscribe/invalidate（服务级 refresh 不存在），清理回执后必须走 invalidate；
+//   真模块再触发该 sid 连接 handle.refresh 推下一状态帧。用真工厂文本 + 真 built 注册链 + 真控件 click，不挂任何 refresh 桩。
+test('干净清理18 真协调服务：清理回执后定向失效并刷新下一状态', async ()=>{
+  const LABEL = '"dsh-tavern: candidate question panel"'
+  const coordinationText = readFileSync(new URL('../../../tmp/release-034-20261008/author-fixture/src/dsh-tavern-68215e47516637e00c75d2b4bba3192679559425/tavern-plugin/src/client/modules/tavern-coordination.js', import.meta.url), 'utf8')
+  const createCoordination = new Function(coordinationText + '\nreturn createTavernCoordinationEventModule;')() // 真工厂（该文件无 export）
+  const transports = new Map()
+  const service = createCoordination({connect: (sid, handlers) => {
+    const item = {id: sid, refresh: 0, close: 0, frames: []}
+    transports.set(sid, item)
+    return {refresh: () => { item.refresh += 1; const frame = {cleanable: false, turn: null, reason: ''}; item.frames.push(frame); handlers.message(frame) }, close: () => { item.close += 1 }, supersede: () => {}}
+  }})
+  assert.equal(typeof service.invalidate, 'function', '真模块必须暴露 invalidate')
+  assert.equal(Object.hasOwn(service, 'refresh'), false, '真模块不得暴露服务级 refresh（线上 TypeError 来源）')
+  service.subscribe('s1', () => {})
+  service.subscribe('s2', () => {})
+  service.setView('s1', {cleanable: true, turn: 42, reason: ''})
+  service.setView('s2', {cleanable: true, turn: 9, reason: ''})
+  const baseline = {s1: transports.get('s1').refresh, s2: transports.get('s2').refresh}
+  const {mkdtempSync, mkdirSync, writeFileSync: writeFs, readFileSync: readFs, rmSync} = await import('node:fs')
+  const {tmpdir} = await import('node:os')
+  const path = (await import('node:path')).default
+  const {clientCoreWrites} = await import('../deploy/client-seams.mjs')
+  const fixRoot = new URL('../../../tmp/release-034-20261008/author-fixture/src/dsh-tavern-68215e47516637e00c75d2b4bba3192679559425/tavern-plugin/', import.meta.url)
+  const base = mkdtempSync(path.join(tmpdir(), 'tavern-error-purge-coord18-'))
+  try {
+    for (const rel of ['lib/client.js', 'src/client/main.js', 'src/client/turn-error-controls.js', 'src/client/features/play-controls.js', 'src/client/features/turn-history.js', 'src/client/ui/error-center.js', 'src/client/helper-resources.js', 'src/client/runtime/helper-bootstrap.js', 'src/client/runtime/helper-script-runtime.js', 'src/client/modules/tavern-coordination.js']) {
+      const dst = path.join(base, 'tavern-plugin', rel)
+      mkdirSync(path.dirname(dst), {recursive: true})
+      writeFs(dst, readFs(new URL(rel, fixRoot), 'utf8'))
+    }
+    const built = clientCoreWrites(base).get('tavern-plugin/lib/client.js')
+    assert.ok(built.includes('tavernCoordination.invalidate('), '清理链必须调用作者真接口 invalidate')
+    assert.ok(!built.includes('tavernCoordination.refresh('), '清理链不得调用不存在的服务级 refresh')
+    // ⑤ 旧私有版本迁移（仅文本级、不改产品）：**只把 paired 的 `liveTavernView.rebase(props.sessionId); tavernCoordination.invalidate(props.sessionId);` 翻回旧 refresh**
+    //    （作者另外 5 处 invalidate 不动，绝不全局 split）；施缝后必须全迁回且与真产物逐字一致/幂等；混合 2old+2new 不得重复；额外 stray 必须 fail-closed。
+    const PAIRED_NEW = /liveTavernView\.rebase\(props\.sessionId\);(\s*)tavernCoordination\.invalidate\(props\.sessionId\);/g
+    const PAIRED_OLD = /liveTavernView\.rebase\(props\.sessionId\);(\s*)tavernCoordination\.refresh\(props\.sessionId\);/g
+    const countPairs = (text, pattern) => (text.match(pattern) || []).length
+    assert.equal(countPairs(built, PAIRED_NEW), 4, '真产物必须恰有 4 处 paired rebase+invalidate')
+    assert.equal(countPairs(built, PAIRED_OLD), 0, '真产物不得残留 paired 旧 refresh')
+    let flipped = 0
+    const legacyProduct = built.replace(PAIRED_NEW, (_all, whitespace) => { flipped += 1; return 'liveTavernView.rebase(props.sessionId);' + whitespace + 'tavernCoordination.refresh(props.sessionId);' })
+    assert.equal(flipped, 4, 'legacy 构造必须恰好翻回 4 处 paired（实际 ' + flipped + '）')
+    assert.equal(countPairs(legacyProduct, PAIRED_OLD), 4, 'legacy 必须＝4 处旧 paired')
+    assert.equal(countPairs(legacyProduct, PAIRED_NEW), 0, 'legacy 不得残留新 paired')
+    assert.equal(legacyProduct.split('tavernCoordination.invalidate(').length - 1, built.split('tavernCoordination.invalidate(').length - 1 - 4, 'legacy 只少 4 处 paired invalidate（作者其它 5 处不动）')
+    const migrated = applyErrorPurgePlayControlsTransform(legacyProduct)
+    assert.equal(countPairs(migrated, PAIRED_OLD), 0, '迁移后不得残留旧 paired refresh')
+    assert.equal(countPairs(migrated, PAIRED_NEW), 4, '迁移后必须恢复 4 处 paired invalidate')
+    assert.equal(migrated, built, '迁移后必须与真产物逐字一致（strict same product）')
+    assert.equal(applyErrorPurgePlayControlsTransform(migrated), migrated, '再 apply 必须幂等')
+    let mixedSeen = 0
+    const mixed = legacyProduct.replace(PAIRED_OLD, (_all, whitespace) => { mixedSeen += 1; return mixedSeen <= 2 ? 'liveTavernView.rebase(props.sessionId);' + whitespace + 'tavernCoordination.invalidate(props.sessionId);' : _all })
+    assert.equal(mixedSeen, 4, '混合输入必须命中 4 处旧 paired')
+    assert.equal(countPairs(mixed, PAIRED_NEW), 2, '混合输入＝2 new + 2 old')
+    const mixedOut = applyErrorPurgePlayControlsTransform(mixed)
+    assert.equal(countPairs(mixedOut, PAIRED_OLD), 0, '混合输入也必须全部迁移')
+    assert.equal(countPairs(mixedOut, PAIRED_NEW), 4, '混合输入不得产生重复 paired')
+    assert.equal(mixedOut, built, '混合迁移结果必须与真产物逐字一致')
+    let unpairedError = null
+    try { applyErrorPurgePlayControlsTransform(built + '\n\t\t\tif (ready) tavernCoordination.refresh(props.sessionId);\n') } catch (error) { unpairedError = error }
+    assert.ok(unpairedError instanceof Error, '额外 unpaired stray refresh 必须 fail-closed')
+    assert.match(String(unpairedError.message), /归属|唯一|配对|paired|不明确|refresh/, 'fail-closed 原因必须指明归属不明确')
+    const types = {SupersededTurnErrors: Symbol('SupersededTurnErrors'), TurnHistoryProjection: Symbol('TurnHistoryProjection'), CandidateQuestion: Symbol('CandidateQuestion')}
+    const slotProps = () => ({sessionId: 's1', useSession: s => s({running: false}), useChat: s => s({}), useInput: s => s({draft: ''})})
+    let waitCount = 0
+    const sessions = {waitForTavernRollbackSync: async sync => { waitCount += 1; return sync }, subagentAddress: () => null}
+    const dock = runDockRegister(built, LABEL, {sessions, components: types})
+    const props = elementsOfType(dock.registered[0].render(slotProps()), types.SupersededTurnErrors)[0].props
+    const controlsSource = applyErrorPurgeTurnControlsTransform(readFileSync(new URL(FIX + 'turn-error-controls.js', import.meta.url), 'utf8'))
+    const target = failureItem(42, 'op42')
+    const receiptOf = cleaned => ({view: {rolledBack: {sync: {id: 'r1'}, ...(cleaned ? {cleanedFailureTarget: cleaned} : {})}}})
+    const caseRun = async (label, respond) => {
+      const dom = createFallbackDom([])
+      const calls = []
+      const waitBefore = waitCount
+      // 每 case 独立观测窗口：delta 必须相对**本 case 开始前**的 SSE 计数，不能用全局 baseline（否则累计）。
+      const caseBaseline = {s1: transports.get('s1').refresh, s2: transports.get('s2').refresh}
+      const run = {currentState: null, listeners: [], sessions, created: 0, invalidated: 0, rebased: 0, refreshed: 0, reported: [], tavernCoordination: service,
+        rpc: async (method, args, sid) => { calls.push([method, args, sid]); return respond() }}
+      const harness = createSupersededHarness(built, dom, run)
+      run.currentState = {view: {failureTarget: target, failureCleanupReason: '', suppressedDshErrorTurns: [], hiddenDshErrorTurns: [], staleDshErrorTurns: [], filteredFailureStreak: 0, canRegenerate: false, canReplayFailedTurn: true, replayFailedTurn: 42}}
+      harness.render(run.currentState, props)
+      const controls = realTurnErrorControls(controlsSource)(dom.root, harness.captures.at(-1))
+      controls.apply()
+      const prompt = dom.fallbackRows()[0]
+      assert.ok(prompt, label + '：必须有真提示行')
+      let thrown = null
+      try { await dom.toggleOf(prompt).click() } catch (error) { thrown = error }
+      controls.dispose()
+      const delta = {s1: transports.get('s1').refresh - caseBaseline.s1, s2: transports.get('s2').refresh - caseBaseline.s2}
+      return {label, dom, calls, run, waited: waitCount - waitBefore, thrown, delta}
+    }
+    // ① 正常清理：rpc 1 / 等 sync 1 / rebase 1 / 真 invalidate→s1 handle.refresh 1 / s2 0 / 下一状态帧 / 不毁视图 / 无 onError
+    const ok = await caseRun('正常清理', () => receiptOf({turn: target.turn, operationId: target.operationId, branchId: target.branchId, revision: target.revision}))
+    assert.deepEqual(ok.calls[0], ['rollbackTurn', {expectedTurn: 42, failureTarget: target}, 's1'])
+    assert.equal(ok.waited, 1, '正常清理必须等同连接同步')
+    assert.equal(ok.run.rebased, 1, '收据核通过后必须定向 rebase')
+    assert.equal(ok.run.reported.length, 0, '成功路径不得触发作者 onError（保存错误提示状态失败）')
+    assert.equal(ok.run.invalidated, 0, '不得用 liveTavernView.invalidate 毁掉新视图')
+    assert.deepEqual(ok.delta, {s1: 1, s2: 0}, '只失效本档 sid：s1 连接 refresh 1、s2 仍 0')
+    assert.deepEqual(service.getSnapshot('s1').view, {cleanable: false, turn: null, reason: ''}, '下一状态必须来自真服务帧')
+    assert.equal(ok.thrown, null, '正常清理不得抛（线上即此处 TypeError）')
+    // ② alreadyClean：真实收据形状＝`rolledBack.alreadyClean=true`（目标本身不含 alreadyClean）⇒ 不等 sync，但仍 rebase + 真 invalidate
+    const clean = await caseRun('alreadyClean', () => ({view: {rolledBack: {alreadyClean: true, sync: {id: 'r1'}, cleanedFailureTarget: {turn: target.turn, operationId: target.operationId, branchId: target.branchId, revision: target.revision}}}}))
+    assert.equal(clean.waited, 0, 'alreadyClean 不等待')
+    assert.equal(clean.run.rebased, 1, 'alreadyClean 仍需 rebase')
+    assert.deepEqual(clean.delta, {s1: 1, s2: 0}, 'alreadyClean 仍须定向失效')
+    // ③ RPC 失败：零失效、零 rebase、经作者 onError 上报，且不得返回成功
+    const failed = await caseRun('RPC 失败', () => { throw new Error('RPC 语法失败') })
+    assert.deepEqual(failed.delta, {s1: 0, s2: 0}, 'RPC 失败不得失效/刷新')
+    assert.equal(failed.run.rebased, 0, 'RPC 失败不得 rebase')
+    assert.equal(failed.run.reported.length + (failed.thrown ? 1 : 0), 1, '失败必须恰好暴露一次')
+    if (failed.run.reported.length === 1) assert.equal(failed.run.reported[0][0], '保存错误提示状态失败', '作者 onError 标签')
+    // ④ 收据不匹配：同③（不冒认成功、不失效）
+    const mismatch = await caseRun('收据不匹配', () => receiptOf({turn: 42, operationId: 'other-op', branchId: target.branchId, revision: target.revision}))
+    assert.deepEqual(mismatch.delta, {s1: 0, s2: 0}, '收据不匹配不得失效/刷新')
+    assert.equal(mismatch.run.rebased, 0, '收据不匹配不得 rebase')
+    assert.equal(mismatch.run.reported.length + (mismatch.thrown ? 1 : 0), 1, '收据不匹配必须暴露一次')
+  } finally {
+    rmSync(base, {recursive: true, force: true})
+  }
 })

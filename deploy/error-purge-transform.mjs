@@ -37,14 +37,14 @@ const targetCompareText = indent => TARGET_COMPARE_LINES.join('\n' + indent)
 // 菜单：split 单文件与 built 产物都经作者动作变换（built 走 core-host-transform:138 → rollback-sync-author:58）
 // 按 exact RPC 插入该 wait 行；只有 inline（作者 main.js 无 include）没有它。
 const MENU_WAIT_ANCHOR = 'await props.sessions.waitForTavernRollbackSync(result?.view?.rolledBack?.sync);'
-const MENU_WAIT_NEXT = 'if (!(result && result.view && result.view.rolledBack && result.view.rolledBack.alreadyClean === true)) await props.sessions.waitForTavernRollbackSync(result?.view?.rolledBack?.sync); if (clearIncomplete && result && result.view && result.view.rolledBack) { liveTavernView.rebase(props.sessionId); tavernCoordination.refresh(props.sessionId); }'
+const MENU_WAIT_NEXT = 'if (!(result && result.view && result.view.rolledBack && result.view.rolledBack.alreadyClean === true)) await props.sessions.waitForTavernRollbackSync(result?.view?.rolledBack?.sync); if (clearIncomplete && result && result.view && result.view.rolledBack) { liveTavernView.rebase(props.sessionId); tavernCoordination.invalidate(props.sessionId); }'
 // built/inline 布局（无作者 wait）追加的 clearIncomplete 专用 wait+refresh：alreadyClean 不等待，normal rollback 原逻辑不动。
 // 正常等待一律 await（不做 typeof 跳过）：缺 sync 消费者由 RPC 前的 clear-only guard 响亮失败，绝不静默越过。
 const MENU_CLEAR_WAIT_BLOCK = [
   'if (clearIncomplete && !(result && result.view && result.view.rolledBack && result.view.rolledBack.alreadyClean === true)) {',
   '\tawait props.sessions.waitForTavernRollbackSync(result && result.view && result.view.rolledBack && result.view.rolledBack.sync);',
   '\tliveTavernView.rebase(props.sessionId);',
-  '\ttavernCoordination.refresh(props.sessionId);',
+  '\ttavernCoordination.invalidate(props.sessionId);',
   '}',
 ].map(line => '\n\t\t\t\t\t' + line).join('')
 // built/inline 布局的 clear-only 同步消费者守卫（RPC 前即抛）；split 布局作者 guard 已在位 ⇒ 不重复插。
@@ -143,14 +143,14 @@ const PLAY_ONTOGGLE_NEXT = `${MARKER_PLAY}
                         if (targetMismatch !== "") throw new Error('清理回执目标与请求不一致，拒绝更新：' + targetMismatch);
                         if (rb.alreadyClean === true) {
                             liveTavernView.rebase(props.sessionId);
-                            tavernCoordination.refresh(props.sessionId);
+                            tavernCoordination.invalidate(props.sessionId);
                             return resp;
                         }
                         await props.sessions.waitForTavernRollbackSync(rb.sync);
                         setCandidatePanel(null); setRegenPanel(null); setCandidateGuidePanel(null);
                         // 落盘且同连接同步到达后按 revision 定向重投影：下一目标（43 之后的 42）必须立刻重算，不能只等 render。
                         liveTavernView.rebase(props.sessionId);
-                        tavernCoordination.refresh(props.sessionId);
+                        tavernCoordination.invalidate(props.sessionId);
                         return resp;
                     },`
 // 菜单清未完成：与 sync guard 已施加形态兼容——仅替换 exact RPC 行，不动 guard/其余回调。
@@ -168,7 +168,7 @@ var menuFailureTarget = clearIncomplete ? (rollbackViewState.view && rollbackVie
 					}
 					if (clearIncomplete && result && result.view && result.view.rolledBack && result.view.rolledBack.alreadyClean === true) {
 						liveTavernView.rebase(props.sessionId);
-						tavernCoordination.refresh(props.sessionId);
+						tavernCoordination.invalidate(props.sessionId);
 						return result;
 					}/*DSH_PURGE_CLEAR_WAIT*/`
 function once(source, anchor, replacement, label) {
@@ -271,6 +271,32 @@ const PLAY_EFFECT_DECL_NEXT = `\t\t\t// 目标身份/reason 的稳定 key：目�
 \t\t\t\t\tfield(target.branchId), field(target.revision), field(target.endSeq), field(target.eventCount), field(target.rollbackId), reason]);
 \t\t\t})(state.view);
 ${PLAY_EFFECT_DECL_ANCHOR}`
+// 2026-10-10 修「控件拿不到 sessions」：作者在 conversation.input.dock 的同一次注册里给 CandidateQuestion/CandidateDockActions
+// 等都注入了 sessions，唯独 SupersededTurnErrors 只传 key ⇒ 控件内 props.sessions 恒 undefined，清理 guard 直接拒绝（RPC 都发不出）。
+// 该注册行三种布局（inline 作者 main.js / split 单文件 / built lib/client.js）文本相同，缩进由所在行原样保留。
+const SUPERSEDED_SESSIONS_OLD = 'React.createElement(SupersededTurnErrors, Object.assign({}, props, { key: props.sessionId }))'
+const SUPERSEDED_SESSIONS_NEW = 'React.createElement(SupersededTurnErrors, Object.assign({}, props, { key: props.sessionId, sessions: ctx.sessions }))'
+// 幂等接线（必须在 marker 早返回之前）：旧产物只带 play marker 而无该接线时**就地补齐**，不静默放过、也不重施其余变换。
+function ensureSupersededSessionsWiring(source, label) {
+  // 唯一准入：old 与 new 各自计数，只有 (old=1,new=0) 才替换、(old=0,new=1) 才原样通过；其余（0/0、>1、混合）一律 fail-closed。
+  const oldHits = source.split(SUPERSEDED_SESSIONS_OLD).length - 1
+  const newHits = source.split(SUPERSEDED_SESSIONS_NEW).length - 1
+  if (oldHits === 0 && newHits === 1) return source
+  if (oldHits === 1 && newHits === 0) return source.replace(SUPERSEDED_SESSIONS_OLD, SUPERSEDED_SESSIONS_NEW)
+  throw new Error('干净清理锚点缺失/不唯一：' + label + '-superseded-sessions(old=' + oldHits + ',new=' + newHits + ')')
+}
+// 协调模块的公开接口是 invalidate；refresh 仅属于它管理的连接 handle。
+// 已带PLAY标记的旧产物也须精确迁移：只接管本变换的四个 rebase→协调调用，不泛改作者调用或补假接口。
+function ensurePurgeCoordinationWiring(source) {
+  const oldCall = 'tavernCoordination.refresh(props.sessionId);'
+  const oldPair = /liveTavernView\.rebase\(props\.sessionId\);(\s*)tavernCoordination\.refresh\(props\.sessionId\);/g
+  const newPair = /liveTavernView\.rebase\(props\.sessionId\);\s*tavernCoordination\.invalidate\(props\.sessionId\);/g
+  const oldHits = source.split(oldCall).length - 1
+  const pairs = [...source.matchAll(oldPair)].length
+  const newHits = [...source.matchAll(newPair)].length
+  if (oldHits !== pairs || pairs + newHits !== 4) throw new Error('干净清理协调接线缺失/归属不明确：旧调用=' + oldHits + '，旧配对=' + pairs + '，新配对=' + newHits)
+  return source.replace(oldPair, 'liveTavernView.rebase(props.sessionId);$1tavernCoordination.invalidate(props.sessionId);')
+}
 // SupersededTurnErrors 生效点（真作者函数内）：ref + 目标身份 deps + ref 读视图。source/built 同形，幂等。
 function applyPlayControlsSupersededState(source, label) {
   if (source.split(PLAY_STATE_ANCHOR).length !== 2) throw new Error('干净清理锚点缺失/不唯一：' + label + '-state')
@@ -318,7 +344,9 @@ export function applyErrorPurgePlayControlsTransform(source) {
       || source.split('[props.sessionId, revision, failureTargetKey]);').length !== 2
       || source.includes(PLAY_DEPS_ANCHOR)) throw new Error('干净清理标记不完整（play-controls）')
     if (source.split(PLAY_STATE_ANCHOR).length !== 2) throw new Error('干净清理锚点缺失/不唯一：play-controls-state')
-    return source
+    // 旧版已施缝（PLAY marker 齐全）但缺 sessions 接线：仍过 helper **精确补齐一次**，再次调用 no-op；
+    // 不新增 PLAY marker（marker 统计恒为 4），也不重施其余变换。
+    return ensurePurgeCoordinationWiring(ensureSupersededSessionsWiring(source, 'play-controls'))
   }
   let out = once(source, PLAY_ONTOGGLE_OLD, PLAY_ONTOGGLE_NEXT, 'onToggle→onPurge')
   // 菜单 RPC 行：built 经 sync 链后带 \t 缩进与混合换行，仅行内容替换，不碰行首缩进。
@@ -348,5 +376,5 @@ export function applyErrorPurgePlayControlsTransform(source) {
     if (softHits > 1) throw new Error('干净清理锚点缺失/不唯一：menu-soft-view')
     if (softHits === 1) out = out.slice(0, lineStart) + region.replace(SOFT_VIEW_ANCHOR, SOFT_VIEW_NEXT) + out.slice(end)
   }
-  return applyPlayControlsSupersededState(out, 'play-controls')
+  return ensurePurgeCoordinationWiring(ensureSupersededSessionsWiring(applyPlayControlsSupersededState(out, 'play-controls'), 'play-controls'))
 }

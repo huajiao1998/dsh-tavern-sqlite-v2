@@ -481,23 +481,54 @@ export const MESSAGE_FILES = Object.freeze({
 export const MESSAGE_REQUIRED_BLOCKS = Object.freeze({
   appendMessages: Object.freeze({
     guard: "if (typeof store.appendMessages !== 'function') throw new Error('宿主接线缺失：store.appendMessages 未装配，拒绝静默走整档 patch')",
-    items: "const appended = changes.filter(change => change.op === 'splice' && change.path.length === 1 && change.path[0] === 'messages').flatMap(change => Array.isArray(change.items) ? change.items : [])",
-    // 头写集＝**普通对象**（store normalizeHeaderSets 只收顶层普通对象，:137-232）；不可表示项一律响亮拒（不 patchChat 兜底）。
-    headerSets: [
-      'const headerSets = {}',
-      "for (const change of changes) {",
-      "  if (change.op === 'splice' && Array.isArray(change.path) && change.path.length === 1 && change.path[0] === 'messages') continue",
-      "  if (!Array.isArray(change.path) || change.path.length !== 1) throw new Error('追加命令不接受非顶层头改动：' + String(change.path && change.path.join('.')))",
-      "  const key = change.path[0]",
-      "  if (key === 'messages' || key === 'timeline') throw new Error('追加命令不接受保留头键：' + key)",
-      "  if (key === '_storageRevision' || key === 'updatedAt') throw new Error('追加命令不接受命令自管头键：' + key)",
-      "  if (key === '__proto__' || key === 'prototype' || key === 'constructor') throw new Error('追加命令不接受非法头键：' + key)",
-      "  if (Object.prototype.hasOwnProperty.call(headerSets, key)) throw new Error('追加命令不接受重复头键：' + key)",
-      "  if (change.op !== 'set' && change.op !== 'delete') throw new Error('追加命令不接受该头改动操作：' + String(change.op))",
-      "  headerSets[key] = change.op === 'delete' ? undefined : change.value",
-      '}',
+    // 追加几何：必须**恰好一条完整尾 splice**（path=['messages']、index===count、deleteCount===0、items 数组）⇒ appended 保序全文。
+    items: [
+      "const splices = changes.filter(change => change.op === 'splice' && Array.isArray(change.path) && change.path.length === 1 && change.path[0] === 'messages')",
+      "if (splices.length !== 1) throw new Error('追加命令必须恰好一条完整尾 splice（实际 ' + splices.length + '）')",
+      "const spliced = splices[0]",
+      "if (spliced.index !== count || spliced.deleteCount !== 0 || !Array.isArray(spliced.items)) throw new Error('追加命令 splice 几何不合法（index=' + String(spliced.index) + '，deleteCount=' + String(spliced.deleteCount) + '）')",
+      'const appended = spliced.items',
     ].join('\n        '),
-    wire: 'return await store.appendMessages(before.id, before._storageRevision, { items: appended, headerSets }, metadata)',
+    // 头写集＝**普通对象**（store normalizeHeaderSets 只收顶层普通对象，:137-232）；不可表示项一律响亮拒（不 patchChat 兜底）。
+    // 允许作者 diffJson 的**深路径**（数组数字段合法），但按 **path[0] 顶层根**归并：整根取 `head[root]` 的完整值
+    // （key 缺失 ⇒ undefined ⇒ 命令侧 delete），**不做逐 deep-apply**，同根多 depth 只归一次；重复顶层根改动异常仍拒。
+    headerSets: [
+      'const headerRoots = new Set()',
+      'const timelineChanges = changes.filter(change => Array.isArray(change.path) && change.path.length >= 2 && change.path[0] === \'timeline\')',
+      'for (const change of changes) {',
+      "  if (change.op === 'splice' && Array.isArray(change.path) && change.path.length === 1 && change.path[0] === 'messages') continue",
+      "  if (!Array.isArray(change.path) || change.path.length === 0) throw new Error('追加命令不接受空头改动路径：' + String(change.path && change.path.join('.')))",
+      "  for (const part of change.path) {",
+      "    if (part === undefined || part === null || part === '') throw new Error('追加命令不接受空头改动脉节：' + String(change.path.join('.')))",
+      "    if (typeof part !== 'string' && !(typeof part === 'number' && Number.isInteger(part) && part >= 0)) throw new Error('追加命令不接受该头改动脉节类型：' + String(change.path.join('.')))",
+      "    if (part === '__proto__' || part === 'prototype' || part === 'constructor') throw new Error('追加命令不接受非法改动脉节：' + String(change.path.join('.')))",
+      '  }',
+      "  const key = change.path[0]",
+      "  if (key === 'timeline') {",
+      "    if (change.path.length >= 2) continue",
+      "    throw new Error('追加命令不接受整根 timeline 变更（必须深路径子行改动）：' + String(change.path.join('.')))",
+      '  }',
+      "  if (key === 'messages') throw new Error('追加命令不接受保留头键：' + key)",
+      "  if (typeof key !== 'string') throw new Error('追加命令头根必须是字符串：' + String(change.path.join('.')))",
+      "  if (key === '_storageRevision' || key === 'updatedAt') throw new Error('追加命令不接受命令自管头键：' + key)",
+      "  if (change.op === 'splice') {",
+      "    if (change.path.length !== 1) throw new Error('追加命令不接受头字段深路径 splice：' + String(change.path.join('.')))",
+      "    if (!Array.isArray(change.items)) throw new Error('追加命令头字段 splice 必须带数组 items：' + String(change.path.join('.')))",
+      "    if (!Number.isSafeInteger(change.index) || change.index < 0) throw new Error('追加命令头字段 splice index 必须是安全整数：' + String(change.path.join('.')))",
+      "    if (!Number.isSafeInteger(change.deleteCount) || change.deleteCount < 0) throw new Error('追加命令头字段 splice deleteCount 必须是安全整数：' + String(change.path.join('.')))",
+      '    headerRoots.add(key)',                        // 头数组根：仍按**顶层整值**归并（head[key]），不做逐 deep-apply
+      '    continue',
+      '  }',
+      '  if (change.op !== \'set\' && change.op !== \'delete\') throw new Error(\'追加命令不接受该头改动操作：\' + String(change.op))',
+      '  headerRoots.add(key)',
+      '}',
+      'const headerSets = {}',
+      'for (const key of headerRoots) {',
+      '  headerSets[key] = Object.prototype.hasOwnProperty.call(head, key) ? head[key] : undefined',
+      '}',
+      'const timelineUpdate = timelineChanges.length === 0 ? undefined : { value: head.timeline, changes: timelineChanges, expected: { branchId: before.timeline.branchId, revision: before.timeline.revision } }',
+    ].join('\n        '),
+    wire: 'return await store.appendMessages(before.id, before._storageRevision, { items: appended, headerSets, timelineUpdate }, metadata)',
     falsyShape: '})()) return result'
   }),
   setMessageFloor: Object.freeze({
@@ -509,19 +540,130 @@ export const MESSAGE_REQUIRED_BLOCKS = Object.freeze({
 const countIn = (source, needle) => source.split(needle).length - 1
 
 function assertMessageBlocks(source, name) {
-  const missing = Object.entries(MESSAGE_REQUIRED_BLOCKS[name]).filter(([, text]) => !source.includes(text)).map(([key]) => key)
+  assertMessageBlocksAt(source, name)
+}
+
+/** 同上；块匹配**缩进无关**（逐行去前导空白同形），因为现场各代块缩进可能不同（marker 与块甚至不同代）。 */
+function assertMessageBlocksAt(source, name, _baseIndent) {
+  const blocks = name === 'appendMessages' ? MESSAGE_REQUIRED_BLOCKS.appendMessages : MESSAGE_REQUIRED_BLOCKS[name]
+  const missing = Object.entries(blocks).filter(([key, text]) => {
+    if (key === 'guard' || key === 'falsyShape' || key === 'wire') return !sameBlockIn(source, text)
+    return sameBlockIndex(source, text) < 0
+  }).map(([key]) => key)
   if (missing.length > 0) throw new Error('native-message 生成物缺块（' + name + '）: ' + missing.join(', '))
 }
 
-function appendMessagesReplacement() {
-  return `      ${MESSAGE_MARKER.appendMessages}\n` +
-    `      if (await (async () => {\n` +
-    `        ${MESSAGE_REQUIRED_BLOCKS.appendMessages.guard}\n` +
-    `        // changes 形态＝头字段 sets ＋ 一条完整尾 splice：两者分开交出，items 保序原样、headerSets 保序原样。\n` +
-    `        ${MESSAGE_REQUIRED_BLOCKS.appendMessages.items}\n` +
-    `        ${MESSAGE_REQUIRED_BLOCKS.appendMessages.headerSets}\n` +
-    `        ${MESSAGE_REQUIRED_BLOCKS.appendMessages.wire}\n` +
-    `      ${MESSAGE_REQUIRED_BLOCKS.appendMessages.falsyShape}`
+/** 追加块按 baseIndent 生成（子行 = baseIndent + 2 空格；内层再 +2）。返回值与 MESSAGE_REQUIRED_BLOCKS.appendMessages 同键。 */
+function appendBlocksAt(baseIndent) {
+  const inner = baseIndent + '  '
+  return {
+    guard: MESSAGE_REQUIRED_BLOCKS.appendMessages.guard,
+    items: MESSAGE_REQUIRED_BLOCKS.appendMessages.items.split('\n').map(line => inner + line).join('\n'),
+    headerSets: MESSAGE_REQUIRED_BLOCKS.appendMessages.headerSets.split('\n').map(line => inner + line).join('\n'),
+    wire: MESSAGE_REQUIRED_BLOCKS.appendMessages.wire,
+    falsyShape: MESSAGE_REQUIRED_BLOCKS.appendMessages.falsyShape,
+  }
+}
+
+function appendMessagesReplacement(baseIndent = '      ') {
+  const inner = baseIndent + '  '
+  const blocks = appendBlocksAt(baseIndent)
+  return `${baseIndent}${MESSAGE_MARKER.appendMessages}\n` +
+    `${baseIndent}if (await (async () => {\n` +
+    `${inner}${blocks.guard}\n` +
+    `${inner}// changes 形态＝头字段 sets ＋ 一条完整尾 splice：两者分开交出，items 保序原样、headerSets 保序原样。\n` +
+    `${inner}${blocks.items}\n` +
+    `${inner}${blocks.headerSets}\n` +
+    `${inner}${blocks.wire}\n` +
+    `${baseIndent}${blocks.falsyShape}`
+}
+
+/** 旧代（已安装现场）append 块的两块**精确**字面量（基准缩进）；现场缩进不同时按「去前导空白逐行同形」认定。 */
+const LEGACY_APPEND_BLOCKS = Object.freeze({
+  items: "const appended = changes.filter(change => change.op === 'splice' && change.path.length === 1 && change.path[0] === 'messages').flatMap(change => Array.isArray(change.items) ? change.items : [])",
+  headerSets: [
+    'const headerSets = {}',
+    "for (const change of changes) {",
+    "  if (change.op === 'splice' && Array.isArray(change.path) && change.path.length === 1 && change.path[0] === 'messages') continue",
+    "  if (!Array.isArray(change.path) || change.path.length !== 1) throw new Error('追加命令不接受非顶层头改动：' + String(change.path && change.path.join('.')))",
+    "  const key = change.path[0]",
+    "  if (key === 'messages' || key === 'timeline') throw new Error('追加命令不接受保留头键：' + key)",
+    "  if (key === '_storageRevision' || key === 'updatedAt') throw new Error('追加命令不接受命令自管头键：' + key)",
+    "  if (key === '__proto__' || key === 'prototype' || key === 'constructor') throw new Error('追加命令不接受非法头键：' + key)",
+    "  if (Object.prototype.hasOwnProperty.call(headerSets, key)) throw new Error('追加命令不接受重复头键：' + key)",
+    "  if (change.op !== 'set' && change.op !== 'delete') throw new Error('追加命令不接受该头改动操作：' + String(change.op))",
+    "  headerSets[key] = change.op === 'delete' ? undefined : change.value",
+    '}',
+  ].join('\n  '),
+  wire: "return await store.appendMessages(before.id, before._storageRevision, { items: appended, headerSets }, metadata)",
+})
+
+/** 去前导空白后逐行同形（缩进无关的精确块匹配；不做结构解析、不猜）。 */
+function sameBlockTrimmed (source, block) {
+  return sameBlockIndex(source, block) >= 0
+}
+
+/** 返回「去前导空白逐行同形」的起始行号；找不到返回 -1。 */
+function sameBlockIndex (source, block) {
+  const lines = source.split('\n')
+  const wanted = block.split('\n').map(line => line.trim())
+  for (let index = 0; index + wanted.length <= lines.length; index++) {
+    let hit = true
+    for (let offset = 0; offset < wanted.length; offset++) {
+      if (lines[index + offset].trim() !== wanted[offset]) { hit = false; break }
+    }
+    if (hit) return index
+  }
+  return -1
+}
+
+/**
+ * 已打 marker 的来源：若仍是**旧代块** ⇒ 就地迁移成新块；新旧都不匹配 ⇒ 响亮拒。
+ * 匹配与替换都**按现场旧块自身的缩进**（marker 行缩进与旧块缩进可能不同代：实测 188 现场 marker=6 空格、旧块=8 空格），
+ * 新块写到**旧块所在行的缩进**上；只碰旧 items / 旧 headerSets / 旧 wire 三段字面量，不动几何/CAS/其它工具。
+ */
+function migrateLegacyAppendBlock(source, _baseIndent = '      ') {
+  const canonical = MESSAGE_REQUIRED_BLOCKS.appendMessages
+  if (sameBlockIndex(source, canonical.items) >= 0 && sameBlockIndex(source, canonical.headerSets) >= 0) return source
+  if (sameBlockIndex(source, LEGACY_APPEND_BLOCKS.items) < 0 && !sameBlockIn(source, LEGACY_APPEND_BLOCKS.items)) {
+    throw new Error('native-message 已应用但块既非新代也非旧代精确块：拒绝迁移（appendMessages）')
+  }
+  if (sameBlockIndex(source, LEGACY_APPEND_BLOCKS.headerSets) < 0) {
+    throw new Error('native-message 已应用但头块既非新代也非旧代精确块：拒绝迁移（appendMessages）')
+  }
+  let migrated = replaceBlockByTrimmed(source, LEGACY_APPEND_BLOCKS.items, canonical.items)
+  migrated = replaceBlockByTrimmed(migrated, LEGACY_APPEND_BLOCKS.headerSets, canonical.headerSets)
+  if (sameBlockIn(migrated, LEGACY_APPEND_BLOCKS.wire)) migrated = replaceBlockByTrimmed(migrated, LEGACY_APPEND_BLOCKS.wire, canonical.wire)
+  if (sameBlockIn(migrated, LEGACY_APPEND_BLOCKS.items) || sameBlockIndex(migrated, LEGACY_APPEND_BLOCKS.headerSets) >= 0) {
+    throw new Error('native-message 旧块迁移后仍残留（appendMessages）')
+  }
+  return migrated
+}
+
+/** 源里是否含该单行（缩进无关）。 */
+function sameBlockIn (source, line) {
+  return source.split('\n').some(item => item.trim() === line.trim())
+}
+
+/** 用「去前导空白同形」定位并把**所有**匹配整段替换成 replacement（缩进取现场匹配行；无匹配⇒抛）。 */
+function replaceBlockByTrimmed (source, legacyTrimmed, replacement) {
+  const legacyLines = legacyTrimmed.split('\n').map(line => line.trim())
+  let lines = source.split('\n')
+  let replaced = 0
+  for (let index = 0; index + legacyLines.length <= lines.length;) {
+    let hit = true
+    for (let offset = 0; offset < legacyLines.length; offset++) {
+      if (lines[index + offset].trim() !== legacyLines[offset]) { hit = false; break }
+    }
+    if (!hit) { index++; continue }
+    const indent = lines[index].slice(0, lines[index].length - lines[index].trimStart().length)
+    const block = replacement.split('\n').map(line => indent + line)
+    lines = [...lines.slice(0, index), ...block, ...lines.slice(index + legacyLines.length)]
+    index += block.length
+    replaced++
+  }
+  if (replaced === 0) throw new Error('native-message 旧块定位失败（拒绝迁移）')
+  return lines.join('\n')
 }
 
 function setMessageFloorReplacement() {
@@ -540,15 +682,31 @@ export function applyNativeMessageTransform(source, name) {
   if (!Object.hasOwn(MESSAGE_ANCHORS, name)) throw new Error('native-message 转换未知目标: ' + String(name))
   const marker = MESSAGE_MARKER[name], anchor = MESSAGE_ANCHORS[name]
   const markers = countIn(source, marker)
-  if (markers === 1) { assertMessageBlocks(source, name); return source }
+  if (markers === 1) {
+    const baseIndent = name === 'appendMessages' ? indentOfAnchorLine(source) : '      '
+    const applied = name === 'appendMessages' ? migrateLegacyAppendBlock(source, baseIndent) : source
+    assertMessageBlocksAt(applied, name, baseIndent)
+    return applied
+  }
   if (markers !== 0) throw new Error('native-message 转换标记数异常（半应用，' + name + '=' + markers + '）')
   const hits = countIn(source, anchor)
   if (hits !== 1) throw new Error('native-message 锚点不唯一（' + name + '=' + hits + '）: ' + anchor.slice(0, 60))
-  const next = source.replace(anchor, name === 'appendMessages' ? appendMessagesReplacement() : setMessageFloorReplacement())
+  const next = source.replace(anchor, name === 'appendMessages' ? appendMessagesReplacement(indentOfAnchorLine(source)) : setMessageFloorReplacement())
   if (countIn(next, marker) !== 1) throw new Error('native-message 转换结果标记数异常（' + name + '=' + countIn(next, marker) + '）')
   if (countIn(next, anchor) !== 0) throw new Error('native-message 锚点在替换后仍存在（' + name + '）')
-  assertMessageBlocks(next, name)
+  assertMessageBlocksAt(next, name, indentOfAnchorLine(source))
   return next
+}
+
+/** 现场块缩进：优先取**已应用 marker 行**的前导空白（迁移路径），否则取锚点行的（首次施缝路径）。 */
+function indentOfAnchorLine (source) {
+  for (const line of source.split('\n')) {
+    if (line.trim() === MESSAGE_MARKER.appendMessages) return line.slice(0, line.length - line.trimStart().length)
+  }
+  for (const line of source.split('\n')) {
+    if (line.trim() === MESSAGE_ANCHORS.appendMessages.trim()) return line.slice(0, line.length - line.trimStart().length)
+  }
+  return '      '
 }
 
 export function isNativeMessageApplied(source, name) {

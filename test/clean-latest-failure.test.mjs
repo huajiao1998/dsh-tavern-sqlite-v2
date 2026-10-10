@@ -42,7 +42,7 @@ function rowsUpTo(turn){
  }
  return rows
 }
-async function fixture(){
+async function fixture(options={}){
  const root=mkdtempSync(path.join(os.tmpdir(),'tavern-clean-latest-'))
  const raw=readFileSync(new URL('../../../tmp/projection-baseline-1001/clean-session.js',import.meta.url),'utf8').replace(/from "(@deepseek-ai\/[^\"]+)"/g,(_all,name)=>'from '+JSON.stringify(pathToFileURL(requireHost.resolve(name)).href))
  const file=path.join(root,'session.mjs');writeFileSync(file,raw,'utf8');const {Session}=await import(pathToFileURL(file).href)
@@ -61,7 +61,7 @@ async function fixture(){
  const boundary24=session.seq
  const mainDb=new SqliteSessionDb(path.join(root,'session.db'))
  mainDb.materialize(session.header,session.inheritedEventCount,session.snapshotEvents())
- turn(TARGET_TURN,'轮'+TARGET_TURN,true)
+ turn(TARGET_TURN,'轮'+TARGET_TURN,options.nativeFailedTarget!==false)
  mainDb.appendBatch(session.snapshotEvents(boundary24),boundary24)
  const oldOps=Object.fromEntries(OLD_FAILED_TURNS.map(n=>['op'+n,{kind:'body',turn:n,status:'failed',businessBefore:{version:1,fields:{variables:{hp:1}},messageCount:1,participants:{},operationIds:[],operationStates:{}}}]))
  const messagesBefore24=rowsUpTo(TARGET_TURN-1)
@@ -122,11 +122,11 @@ test('失败清理只清最新失败轮24：历史失败2..22与完成轮23的�
  }finally{await f.cleanup()}
 })
 
-test('失败清理拒绝降级：failedTurns 为空而目标未清 ⇒ 拒绝且目标零改',async()=>{
- const f=await fixture()
+test('失败清理拒绝降级：表面无失败且原生已完成 ⇒ 拒绝且目标零改',async()=>{
+ const f=await fixture({nativeFailedTarget:false})
  try{
   const before=snapshot(await f.read()),events=f.mainDb.db.prepare('SELECT count(*) n FROM events').get().n
-  await assert.rejects(cleanRollback({...f.args,availability:()=>({failedTurns:[],canRollback:true}),failureTarget:f.target()}),/当前没有失败轮；拒绝降级为正常轮回退/)
+  await assert.rejects(cleanRollback({...f.args,availability:()=>({failedTurns:[],canRollback:true}),failureTarget:f.target()}),/原生目标轮不是失败结束；拒绝降级为正常轮回退/)
   assert.equal(snapshot(await f.read()),before,'拒绝路径不得写任何业务字段')
   assert.equal(f.mainDb.db.prepare('SELECT count(*) n FROM events').get().n,events)
  }finally{await f.cleanup()}

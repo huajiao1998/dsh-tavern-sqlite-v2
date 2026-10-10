@@ -669,6 +669,99 @@ test('最新失败接线：queryFailureCleanup 真实SQLite五场景', async () 
   }
 })
 
+// 活动轮失败提示：真实 Session events 终止生命周期未结束（无 end）或已 completed 都不得签新 body 目标；
+// 只有"最新 turn/start 之后同轮 turn/end 且 reason error/aborted"才可签；旧失败不得跨新轮。
+test('活动轮失败提示：生成中不签目标且失败结束后才可清理', async () => {
+  const viewSource = [
+    'function view(chat, replayTarget, rollbackState, previous, evidence) {',
+    '  return {',
+    '      canReplayFailedTurn: replayTarget !== null,',
+    '      canClearIncompleteReply: rollbackState.canClearIncompleteReply,',
+    '      undoRollbackTurn: canUndoRollback(chat, evidence.session) ? chat.rollbackUndo.turn : null,',
+    '      rollbackUnavailableReason: rollbackState.reason',
+    '  }',
+    '}',
+    'function hit(copyRollback, chat, replayTarget, previous, evidence) { return {...copyRollback(previous.value),undoRollbackTurn: 1} }',
+    'const pendingForm = { canRollback: true, canClearIncompleteReply: false, }',
+  ].join('\n')
+  const wired = applyLatestFailureViewTransform(viewSource)
+  const deps = { inspectNativeFailureTail: () => null }
+  const { latestFailureTarget } = failureHelpers(wired, deps)
+  const root = mkdtempSync(path.join(os.tmpdir(), 'tavern-active-failure-'))
+  try {
+    const raw = readFileSync(new URL('../../../tmp/projection-baseline-1001/clean-session.js', import.meta.url), 'utf8')
+      .replace(/from "(@deepseek-ai\/[^"]+)"/g, (_all, name) => 'from ' + JSON.stringify(pathToFileURL(requireHost.resolve(name)).href))
+    const sessionFile = path.join(root, 'session.mjs')
+    writeFileSync(sessionFile, raw, 'utf8')
+    const { Session } = await import(pathToFileURL(sessionFile).href)
+    const turn = 43
+    const base = {id: 'active-chat', sessionId: 'active-session', _storageRevision: 5, windowRevision: 5, messages: [], timeline: {branchId: 'b1', revision: 5, checkpoints: [], participants: {},
+      operations: {body: {kind: 'body', turn, status: 'failed', businessBefore: {version: 1, fields: {}, messageCount: 0, participants: {}, operationIds: [], operationStates: {}}}}}}
+    const build = close => {
+      const session = Session.create('active-failure-' + String(close))
+      session.append('turn/start', {turn: turn - 1})
+      session.append('turn/end', {turn: turn - 1, reason: {kind: 'completed'}})
+      session.append('turn/start', {turn})
+      session.append('user/message', {id: 'u' + turn, role: 'user', content: [{type: 'text', text: 'x'}], source: {kind: 'user'}}, {surfaceOp: 'append'})
+      if (close === 'error' || close === 'completed') session.append('turn/end', {turn, reason: {kind: close === 'error' ? 'error' : 'completed'}})
+      return {events: session.snapshotEvents()}
+    }
+    assert.equal(latestFailureTarget(base, {turn}, build('none')), null, '生成中（无 end）不得签目标')
+    assert.equal(latestFailureTarget(base, {turn}, build('completed')), null, 'end completed 不得签目标')
+    const signed = latestFailureTarget(base, {turn}, build('error'))
+    assert.equal(signed && signed.turn, turn, '失败结束（reason error）才可签目标')
+    assert.equal(signed && signed.operationId, 'body')
+    const oldFailure = {...base, timeline: {...base.timeline, operations: {...base.timeline.operations,
+      old: {kind: 'body', turn: turn - 1, status: 'failed', businessBefore: {version: 1, fields: {}, messageCount: 0, participants: {}, operationIds: [], operationStates: {}}}}}}
+    assert.equal(latestFailureTarget(oldFailure, {turn}, build('none')), null, '旧失败不得跨新轮（新轮 active 仍不签）')
+    const completedBody = {...base, timeline: {...base.timeline, operations: {body: {...base.timeline.operations.body, status: 'completed'}}}}
+    assert.equal(latestFailureTarget(completedBody, {turn}, build('error')), null, 'body 非 failed（completed）即使 native 失败也不签')
+    // 真实 SQL 窄窗（chat-query-service.queryFailureCleanup 真读 archive_timeline_nodes）：running 不得 cleanable；failed+基准才 cleanable
+    const authorDomain = new URL('../../../tmp/release-034-20261008/author-fixture/src/dsh-tavern-68215e47516637e00c75d2b4bba3192679559425/tavern-plugin/lib/domain/', import.meta.url)
+    const jsonMutation = await import(new URL('json-mutation.js', authorDomain).href)
+    const treeModule = await import(new URL('copy-json-tree.js', authorDomain).href)
+    const helpers = {copyJsonTree: treeModule.copyJsonTree ?? treeModule.default, diffJson: jsonMutation.diffJson, applyJsonChangesShared: jsonMutation.applyJsonChangesShared,
+      projectSceneImageState: v => v, projectChatSessionState: v => v, projectDisplayRuntimeState: v => v, projectChatBackgroundConfig: v => v, projectSettlementCheckpoint: v => v}
+    const store = createChatSqliteStore({dataRoot: root, helpers})
+    const narrowBaseline = {version: 1, fields: {}, messageCount: 0, participants: {}, operationIds: [], operationStates: {}}
+    const chatFor = status => ({id: 'narrow-chat', sessionId: 'narrow-session', _storageRevision: 1, mode: 'story', messages: [], variables: {}, macroState: {},
+      timeline: {schemaVersion: 1, branchId: 'nb', revision: 1, checkpoints: [], participants: {}, operations: {body: {kind: 'body', turn, status, businessBefore: narrowBaseline}}}})
+    const readNarrow = async status => {
+      const now = await store.read('narrow-chat')
+      const next = {...chatFor(status), _storageRevision: (Number.isSafeInteger(now?._storageRevision) ? now._storageRevision : 0) + 1}
+      await store.update('narrow-chat', () => next)
+      const narrowDb = new DatabaseSync(path.join(root, 'chats', 'narrow-chat', 'archive.db'), {readOnly: true})
+      narrowDb.exec('PRAGMA query_only=ON')
+      try { return queryFailureCleanup(narrowDb, {revision: next._storageRevision, timeline: next.timeline}) } finally { narrowDb.close() }
+    }
+    const running = await readNarrow('running')
+    assert.equal(running.cleanable, false, 'SQL 窄窗：running 轮不得 cleanable（旧条件只 skip completed/foreground-completed 会误判）')
+    const failedNarrow = await readNarrow('failed')
+    assert.equal(failedNarrow.cleanable, true, 'SQL 窄窗：failed + 发轮前基准才 cleanable')
+    assert.equal(failedNarrow.turn, turn)
+    assert.equal(failedNarrow.operationId, 'body')
+    store.dispose()
+    // 三反例（本次修复的 affected 正确性）
+    const { latestFailureCleanupReason } = failureHelpers(wired, deps)
+    assert.equal(latestFailureCleanupReason(base, {turn}, build('none')), '', 'failed op 但 native 无 end ⇒ 说明必须为空')
+    const wrongTurnEnd = (() => {
+      const session = Session.create('active-wrong-turn')
+      session.append('turn/start', {turn})
+      session.append('user/message', {id: 'u' + turn, role: 'user', content: [{type: 'text', text: 'x'}], source: {kind: 'user'}}, {surfaceOp: 'append'})
+      session.append('turn/end', {turn: turn - 1, reason: {kind: 'error'}})
+      return {events: session.snapshotEvents()}
+    })()
+    assert.equal(latestFailureTarget(base, {turn}, wrongTurnEnd), null, '异轮 turn/end 不得被当作终止失败')
+    assert.equal(latestFailureTarget({...base, timeline: {...base.timeline, operations: {body: {...base.timeline.operations.body, status: 'running'}}}}, {turn}, build('error')), null, 'native error 但 body 仍 running ⇒ 不签目标')
+    // 真实 actual-044 源迁移：旧 marked helper 整段字面换成新 helper，再 apply 必须幂等
+    const actual44 = readFileSync(new URL('../../../tmp/repair-044-active-20261010/chat-session-state-188.js', import.meta.url), 'utf8')
+    assert.ok(actual44.includes('// [dsh-tavern-latest-failure-view:v1]'), 'actual-044 源必须带 view marker')
+    const migratedOnce = applyLatestFailureViewTransform(actual44)
+    assert.ok(migratedOnce.includes('const failureEnding = (source) => {'), '迁移后必须带新 helper（LEGACY_HELPER 整段替换）')
+    assert.equal(applyLatestFailureViewTransform(migratedOnce), migratedOnce, 'actual-044 迁移必须幂等')
+  } finally { try { rmSync(root, {recursive: true, force: true, maxRetries: 6, retryDelay: 50}) } catch { /* 临时目录清理不影响断言证据 */ } }
+})
+
 test('最新失败接线：新增证据读口施缝源码语法与卸载回原', async () => {
   // 新增依赖（index 的 async 证据读口 + domain 视图 inspect import + owned 垫片 export）必须是**可解析源码**，
   // 且卸载后逐字回到作者原文。只碰这 4 个 exact 文件；不跑全树、不做全树字节哈希。
