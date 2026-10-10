@@ -53,6 +53,12 @@ curl -fsSL https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest/d
 
 非默认位置可从酒馆 home 工作目录执行；systemd 启动参数准备、多实例选择及离线用法放在[详细安装说明](deploy/INSTALL.md)，不混进主命令。
 
+## 读缓存控制
+
+`DSH_TAVERN_SQLITE_CACHE_MAX_MB`（默认64MiB）和`DSH_TAVERN_SQLITE_MAX_CACHED_CHATS`（默认8）控制完整态及timeline行缓存的软预算和档数。任一设为0时关闭这些读缓存与投影缓存；非法值回落默认。单个超大档可以独占一个缓存槽，以保留长历史档的热读收益，因此软预算不是整个进程的RSS硬上限；完整态、投影和行缓存分别记账，连接行缓存不会同时保留多个超预算档。连接关闭、删档或dispose释放对应行缓存。
+
+本store写入仍按实际写集精确失效；另一连接提交后，通过SQLite的`data_version`清理本档旧读取状态，避免新revision配旧timeline。使用多个store或连接读取同档时也遵守此规则。
+
 ## 原档怎么继续使用？
 
 1. 安装后打开旧存档，以只读方式查看。
