@@ -34,9 +34,28 @@ const helpers = {
 import { storagePackage } from './storage-package.js'
 const impl = await storagePackage('chat-store')
 
+// 作者对话迁移契约适配（见 lib/author-migration-adapter.js 的缺陷 C 说明）：
+// 与 chat-store 同样经 storage-package 定位，不能写裸说明符。
+// 它只被 S2(d) 迁移缝用到 ⇒ 加载不到不冒泡到模块顶层，缺包在调用期响亮失败。
+let migrationImpl = null
+try {
+  migrationImpl = await storagePackage('author-migration-adapter')
+} catch (error) {
+  console.error('[chat-sqlite-store] 未能加载 dsh-tavern-sqlite-v2/author-migration-adapter：' + String(error?.message || error))
+}
+
 export function createChatSqliteStore(options = {}) {
   if (impl === null) {
     throw new Error('未安装 dsh-tavern-sqlite-v2：聊天存档(SQLite)不可用。请先安装该插件，或按卸载流程恢复作者原实现。')
   }
   return impl.createChatSqliteStore({ ...options, helpers })
+}
+
+// 给作者 createConversationMigration({ store }) 的作者存储契约包一层适配（缺陷 C）。
+// 不改变我们自己的 version() 值域——那套判据被分叉/守卫/缓存键共同依赖。
+export function wrapAuthorMigrationStore(store) {
+  if (migrationImpl === null) {
+    throw new Error('未安装 dsh-tavern-sqlite-v2/author-migration-adapter：作者对话迁移契约适配不可用。请先安装该插件，或按卸载流程恢复作者原实现。')
+  }
+  return migrationImpl.wrapAuthorMigrationStore(store)
 }
