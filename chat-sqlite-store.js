@@ -100,12 +100,108 @@ export function createChatSqliteStore(options = {}) {
   const now = typeof options.now === 'function' ? options.now : Date.now
   const mutationTails = new Map()
   const limit = (value, fallback) => Number.isSafeInteger(value) && value >= 0 ? value : fallback
-  const cacheMaxBytes = limit(options.cacheMaxBytes, 64 * 1024 * 1024)   // P2-b：256→64MB（单档 ~8-20MB；8 档并发防气球）
-  const maxCachedChats = limit(options.maxCachedChats, 8)
+  // 运维兜底开关（未设置/非法一律保持原默认值）：
+  //   DSH_TAVERN_SQLITE_CACHE_MAX_MB     读缓存总预算（MB）
+  //   DSH_TAVERN_SQLITE_MAX_CACHED_CHATS 读缓存档数
+  const envNumber = name => {
+    const raw = process.env?.[name]
+    if (raw === undefined || String(raw).trim() === '') return undefined
+    const value = Number(raw)
+    return Number.isFinite(value) && value >= 0 ? value : undefined
+  }
+  const envMiB = name => { const value = envNumber(name); return value === undefined ? undefined : Math.floor(value * 1024 * 1024) }
+  const cacheMaxBytes = limit(options.cacheMaxBytes, limit(envMiB('DSH_TAVERN_SQLITE_CACHE_MAX_MB'), 64 * 1024 * 1024))   // P2-b：256→64MB（单档 ~8-20MB；8 档并发防气球）
+  const maxCachedChats = limit(options.maxCachedChats, limit(envNumber('DSH_TAVERN_SQLITE_MAX_CACHED_CHATS'), 8))
   const readCache = new Map()
-  // SQL摘要/投影结果与完整Chat缓存分离，按连接+提交revision失效；仅出借脱离副本。
-  const projectionReads = createChatProjectionReads({helpers, maxEntries: maxCachedChats, maxBytes: Math.min(cacheMaxBytes, 16 * 1024 * 1024)})
   const pendingReads = new Map()
+  // P2-a 读侧（lib/timeline-nodes.js:11 的"读侧契约：行级缓存必须同刀"）：timeline 子行的
+  // 解析结果按**连接**缓存。实测（chat-muzd2bvc，20+ 轮档）：archive_timeline_nodes 会长到
+  // 59MB/91 行（businessBefore 1.6MB/行 × 操作与检查点）；不带缓存时 assemble() 每次冷读都整表
+  // 重解析（readTimelineTree 自耗 520ms + consume 160ms），单次 read() 实测 1009ms，
+  // 且每读一次就产生 59MB 临时垃圾（GC 占 CPU 7%）。
+  // 失效由写口按 writeTimelineNodes 的精确载荷驱动（见 invalidateTimelineRows）；句柄关闭/删除/迁移即丢。
+  const timelineRows = new Map()
+  // PR10 修复①：外部提交检测用 PRAGMA data_version（只在**别的连接**提交后变化；本连接写不变），
+  // 不靠行数/哈希，也不单靠 compRev；命中即清**本档**派生态：行缓存、投影、完整态、变量、代数。
+  const externalStamps = new WeakMap()          // db -> 上次 data_version
+  function observeExternalCommit(chatId, db) {
+    const id = safeChatId(chatId)
+    const version = Number(db.prepare('PRAGMA data_version').get().data_version)
+    const previous = externalStamps.get(db)
+    externalStamps.set(db, version)
+    if (previous === undefined || previous === version) return false
+    const rows = timelineRows.get(db)
+    if (rows !== undefined) rows.clear()
+    projectionReads.forget(id)
+    forgetState(id)
+    variables.forget(id)
+    bumpGeneration(id)
+    return true
+  }
+  // PR10 修复②：连接级行 Map 的**软预算**记账。parsed 行视为不可变 ⇒ 每键只估一次大小（estimateBytes）：
+  // set 加、delete 减该键、clear 减总和；全局 cachedBytesRows（timelineRowBytes）＋连接数参与软预算。
+  const rowBytesByMap = new WeakMap()
+  let timelineRowBytes = 0
+  const rowBudgetDisabled = () => !(cacheMaxBytes > 0) || !(maxCachedChats > 0)
+  class RowMap extends Map {
+    set(key, value) {
+      if (!this.has(key)) { const size = estimateBytes(value); rowBytesByMap.set(this, (rowBytesByMap.get(this) || 0) + size); timelineRowBytes += size }
+      return super.set(key, value)
+    }
+    delete(key) {
+      if (this.has(key)) { const size = estimateBytes(this.get(key)); rowBytesByMap.set(this, (rowBytesByMap.get(this) || 0) - size); timelineRowBytes -= size }
+      return super.delete(key)
+    }
+    clear() {
+      const own = rowBytesByMap.get(this) || 0
+      rowBytesByMap.set(this, 0); timelineRowBytes -= own
+      return super.clear()
+    }
+  }
+  /** 整次组装**之后**才 trim：单个超大档允许独占一槽（soft budget），但不许 8 档 oversized 外挂。 */
+  function trimTimelineRows() {
+    while (timelineRows.size > 1 && (timelineRowBytes > cacheMaxBytes || timelineRows.size > maxCachedChats)) {
+      const oldest = timelineRows.keys().next().value
+      const map = timelineRows.get(oldest)
+      if (map !== undefined) map.clear()          // 先按记账清（减 cachedBytesRows），再取消注册
+      timelineRows.delete(oldest)
+    }
+  }
+  /** 先记账清、再取消注册（close/remove/迁移/失败首写/删除 timeline 同刀）。 */
+  function dropTimelineRowsFor(db) {
+    const map = timelineRows.get(db)
+    if (map !== undefined) map.clear()
+    timelineRows.delete(db)
+  }
+  function timelineRowCacheFor(db) {
+    if (rowBudgetDisabled()) return undefined   // 预算为 0 ⇒ 真禁用（不建 Map、不 fill）
+    let rows = timelineRows.get(db)
+    if (rows === undefined) { rows = new RowMap(); timelineRows.set(db, rows) }
+    timelineRows.delete(db)
+    timelineRows.set(db, rows)   // 只刷新 LRU；组装完成后统一按预算回收
+    return rows
+  }
+  /** 连接级行缓存计数（诊断/测试用；不暴露为产品 API）。 */
+  function timelineRowStats() {
+    let rows = 0, connections = 0
+    for (const [, map] of timelineRows) { connections += 1; rows += map.size }
+    return { connections, rows, bytes: timelineRowBytes, cachedBytesRows: timelineRowBytes }
+  }
+  function invalidateTimelineRows(db, touched) {
+    const rows = timelineRows.get(db)
+    if (rows === undefined || touched === undefined || touched === null || typeof touched !== 'object') return
+    if (touched.full === true) { rows.clear(); return }
+    for (const nodeKey of touched.rows || []) rows.delete(nodeKey)
+  }
+  // SQL摘要/投影结果与完整Chat缓存分离，按连接+提交revision失效；仅出借脱离副本。
+  // timelineRowsFor：把 P2-a 子行行缓存按**连接**交给投影读口共用（store 写口精确失效），
+  // 否则大档 timeline 单条就超过投影缓存的 maxBytes，条目永远记不住、每次快照都整表重解析 59MB。
+  const projectionReads = createChatProjectionReads({helpers, maxEntries: maxCachedChats, maxBytes: Math.min(cacheMaxBytes, 16 * 1024 * 1024),
+    timelineRowsFor: db => timelineRowCacheFor(db),
+    // 宿主探针：在 readSqlSnapshot 的 head 查询**之前**调用，覆盖 handle→BEGIN 之间的外部提交 race
+    beforeRead: (db, id) => observeExternalCommit(id, db),
+    rowStats: () => timelineRowStats(),
+    afterRead: () => trimTimelineRows()})
   const rollbackWorldbooks = createRollbackWorldbookHistory()
   const sizes = new WeakMap()
   const density = new WeakMap()
@@ -166,9 +262,9 @@ export function createChatSqliteStore(options = {}) {
     dispose: variables.dispose,
   })
 
-  function generationStamp(chatId) {
+  function generationStamp(chatId, exists) {
     const id = safeChatId(chatId)
-    return 'sqlite:gen:' + (generations.get(id) || 0) + (existsSync(dbFile(id)) ? '' : ':empty')
+    return 'sqlite:gen:' + (generations.get(id) || 0) + ((exists === undefined ? existsSync(dbFile(id)) : exists) ? '' : ':empty')
   }
 
   function bumpGeneration(chatId) {
@@ -302,6 +398,7 @@ export function createChatSqliteStore(options = {}) {
       if (!want.has('timeline')) {
         if (storedSet.has('timeline')) {                       // timeline 键被删除（防御）：清全部子行
           stmt(db, 'DELETE FROM archive_timeline_nodes').run()
+          dropTimelineRowsFor(db)
           timelineTouched = { rows: [], full: true }
         }
       } else if (changed.has('timeline') || !storedSet.has('timeline')) {
@@ -310,6 +407,7 @@ export function createChatSqliteStore(options = {}) {
         // timeline 标进 changed 而 changes 里没有对应条目——首写/防御路径无既有行可比对，一律全量落。
         if (!storedSet.has('timeline')) plan.full = true
         timelineTouched = writeTimelineNodes(db, chat.timeline, plan)
+        invalidateTimelineRows(db, timelineTouched)          // 行级缓存按本次真写过的 node_key 精确失效
         verifyTimelineNodes(db, chat.timeline)                  // fail-loud：ord 连续＋行数一致
       }
       // ---- 楼层：先定"本次真的写了哪些楼"，再由变量归档在**同一事务**里决定实际落库的形态 ----
@@ -421,18 +519,23 @@ export function createChatSqliteStore(options = {}) {
     if (existing) {
       open.delete(id)
       open.set(id, existing)
+      observeExternalCommit(id, existing)      // PR10 修复①：句柄复用即检测外部提交（同步、只影响本档）
       return existing
     }
     if (create) mkdirSync(path.dirname(file), { recursive: true })
     const db = new DatabaseSync(file)
     db.exec('PRAGMA journal_mode = WAL')
     ensureSchema(db)
+    observeExternalCommit(id, db)
     open.set(id, db)
     while (open.size > 8) {
       const oldest = open.keys().next().value
-      try { open.get(oldest).close() } catch { /* Already closed by remove(). */ }
+      const oldestDb = open.get(oldest)
+      try { oldestDb.close() } catch { /* Already closed by remove(). */ }
       open.delete(oldest)
       projectionReads.forget(oldest)
+      forgetState(oldest)
+      dropTimelineRowsFor(oldestDb)   // 句柄都关了：先记账清再取消注册
     }
     return db
   }
@@ -525,7 +628,7 @@ export function createChatSqliteStore(options = {}) {
       ensureTimelineNodesTable(db)
       const current = db.prepare("SELECT value_json FROM archive_head_fields WHERE key='timeline'").get()
       if (current?.value_json != null) {
-        writeTimelineNodes(db, JSON.parse(current.value_json), { full: true })
+        invalidateTimelineRows(db, writeTimelineNodes(db, JSON.parse(current.value_json), { full: true }))
         db.prepare("UPDATE archive_head_fields SET value_json=NULL WHERE key='timeline'").run()
       }
       db.exec('COMMIT')
@@ -568,8 +671,8 @@ export function createChatSqliteStore(options = {}) {
     for (const field of fields) {
       if (field.kind === 1 || field.key === 'messages') { chat.messages = messages; placed = true; continue }
       if (field.key === 'timeline' && field.value_json === null && usesTimelineNodes(db)) {
-        // P2-a：子行形态（占位 NULL）→ 从子行表组装（冷路径，无行缓存；成本与整键 parse 同级）
-        const timeline = readTimelineTree(db).value
+        // P2-a：子行形态（占位 NULL）→ 从子行表组装（按连接的行级缓存；失效见 invalidateTimelineRows）
+        const timeline = readTimelineTree(db, timelineRowCacheFor(db)).value
         if (timeline !== undefined) chat.timeline = timeline
         continue
       }
@@ -578,6 +681,7 @@ export function createChatSqliteStore(options = {}) {
     }
     if (!placed) chat.messages = messages
     chat[STORAGE_REVISION] = Number(headRow.revision)
+    trimTimelineRows()
     return { chat, revision: Number(headRow.revision) }
   }
 
@@ -638,10 +742,14 @@ export function createChatSqliteStore(options = {}) {
     if (!stamp || !state || !maxCachedChats || !cacheMaxBytes) return
     let bytes
     try { bytes = estimateBytes(state) + estimateBytes(recentChanges) + estimateBytes(stamp) } catch { return }
-    if (bytes > cacheMaxBytes) return
+    // 单档自己就超过总预算（长历史的 timeline 子行 + 大头字段）时：先给其它档让位，再允许它独占一个槽。
+    // 读缓存被整体击穿的代价是"每次读都冷组装整档"（实测 >1s/次，见 timelineRows 注释），
+    // 远比同一时刻多占一份解析后的档贵；time-travel/时间线越长的档越是如此。
+    if (bytes > cacheMaxBytes) while (readCache.size > 0) forgetState(readCache.keys().next().value)
     readCache.set(chatId, { stamp, state, recentChanges, bytes })
     cachedBytes += bytes
-    while (readCache.size > maxCachedChats || cachedBytes > cacheMaxBytes) forgetState(readCache.keys().next().value)
+    // 条数与总预算仍按原语义回收；但绝不把唯一一个档自己挤掉（它已是最后一道防线）。
+    while (readCache.size > 1 && (readCache.size > maxCachedChats || cachedBytes > cacheMaxBytes)) forgetState(readCache.keys().next().value)
   }
   function knownChanges(chatId, state) {
     const entry = readCache.get(chatId)
@@ -653,6 +761,9 @@ export function createChatSqliteStore(options = {}) {
   // 不再另留一份"只看 journals/snapshots"的窄判定。
 
   async function cachedState(chatId) {
+    // PR10 修复①：读缓存命中前用**已开句柄**探一次外部提交（不新开句柄，避免触碰原件/shadow）
+    const probed = open.get(safeChatId(chatId))
+    if (probed !== undefined) observeExternalCommit(chatId, probed)
     const stamp = await version(chatId)
     const entry = readCache.get(chatId)
     if (stamp && entry?.stamp === stamp) {
@@ -702,7 +813,7 @@ export function createChatSqliteStore(options = {}) {
     // 行级存储（彻底清理语义）：仅保留当前态，不保留历史版本——被回退/被修改的旧版本不可重建
     if (targetRevision !== Number.POSITIVE_INFINITY) {
       const db = handle(chatId)
-      const state = assemble(db)
+      const state = readSqlSnapshot(db, () => { observeExternalCommit(id, db); return assemble(db) })
       if (state !== null && state.revision === targetRevision) {
         return { chat: state.chat, revision: state.revision, legacy: false, frameCount: 0, frameBytes: 0 }
       }
@@ -711,7 +822,7 @@ export function createChatSqliteStore(options = {}) {
       throw error
     }
     const db = handle(chatId)
-    const state = assemble(db)
+    const state = readSqlSnapshot(db, () => { observeExternalCommit(id, db); return assemble(db) })
     if (state === null) return null
     const { chat, revision } = state
     if (!chat || typeof chat !== 'object' || Array.isArray(chat) || chat.id !== id) throw new Error('Archive state 不合法: ' + id)
@@ -819,6 +930,7 @@ export function createChatSqliteStore(options = {}) {
         if (!existed) {
           try { db.close() } catch { /* 可能已关 */ }
           open.delete(safeChatId(chatId))
+          dropTimelineRowsFor(db)
           forgetState(chatId)
           for (const suffix of ['', '-wal', '-shm']) {
             try { rmSync(dbFile(chatId) + suffix, { force: true }) } catch { /* 尽力而为 */ }
@@ -1500,6 +1612,7 @@ export function createChatSqliteStore(options = {}) {
             if (keys.length > 0) compRev.header++
             if (messages) compRev.messages++
             projectionReads.invalidate(id, { revision, keys, messages, timeline })
+            invalidateTimelineRows(db, timeline)
             forgetState(id)
           },
         })
@@ -1546,6 +1659,7 @@ export function createChatSqliteStore(options = {}) {
           if (keys.length > 0) compRev.header++
           if (messages) compRev.messages++
           projectionReads.invalidate(id, { revision, keys, messages, timeline })
+          invalidateTimelineRows(db, timeline)
           forgetState(id)
         },
       })
@@ -1672,7 +1786,8 @@ export function createChatSqliteStore(options = {}) {
         return ['legacy', info.size, info.mtimeNs].join(':')
       } catch (error) { if (error?.code !== 'ENOENT') throw error }
     }
-    return existsSync(dbFile(id)) ? generationStamp(id) : ''
+    const file = dbFile(id)
+    return existsSync(file) ? generationStamp(id, true) : ''
   }
 
   async function remove(chatId) {
@@ -1688,6 +1803,7 @@ export function createChatSqliteStore(options = {}) {
       variables.forget(id)          // 变量表随 archive.db 一起删；缓存/代数一并清掉
       const entry = open.get(id)
       if (entry) {
+        dropTimelineRowsFor(entry)
         try { entry.close() } catch { /* Already closed. */ }
         open.delete(id)
       }
@@ -1710,6 +1826,9 @@ export function createChatSqliteStore(options = {}) {
       try { db.close() } catch { /* 可能已关 */ }
     }
     open.clear()
+    for (const map of timelineRows.values()) map.clear()   // 先逐 Map 记账清（减 cachedBytesRows）
+    timelineRows.clear()
+    timelineRowBytes = 0
     projectionReads.dispose()
     readCache.clear()
     pendingReads.clear()

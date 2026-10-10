@@ -218,6 +218,7 @@ export function decodeJsonlSession(path, compressed, expectedId, generationForma
 	return { header: artifact.header, inheritedEventCount: artifact.inheritedEventCount, events }
 }
 
+// noinspection JSUnusedGlobalSymbols
 /** 兼容旧导出名称，但任何调用都零读写并响亮拒绝同 ID 导入。 */
 export function migrateJsonlSession() {
 	const error = new Error('禁止同ID迁移原档：请先创建官方原生分叉，再将新聊天保存到SQLite')
