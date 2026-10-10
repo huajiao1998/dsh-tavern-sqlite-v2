@@ -23,10 +23,10 @@ export function applyRollbackBusinessTimelineTransform(source) {
 function preserveMacroConfiguration(source){
   if(source.includes('// [dsh-tavern-rollback-macro-config:v1]'))return source
   return once(source,'    restore(chat, restoredState)\n    restoreRollbackBusinessState(chat, checkpoint.businessBefore, clone)',`    // [dsh-tavern-rollback-macro-config:v1]
-    const currentMacroState = chat.macroState
-    restore(chat, restoredState)
-    chat.macroState = currentMacroState
-    restoreRollbackBusinessState(chat, checkpoint.businessBefore, clone)`)
+     const currentMacroState = chat.macroState
+     restore(chat, restoredState)
+     chat.macroState = currentMacroState
+     restoreRollbackBusinessState(chat, checkpoint.businessBefore, clone)`)
 }
 function worldbookHistoryReader(source){
  const marker='// [dsh-tavern-worldbook-history-timeline:v1]'
@@ -48,14 +48,34 @@ function captureWorldbookReference(source){
  return marker+'\n'+once(source,'const rollbackBusinessBefore = captureRollbackBusinessState(chat)','const rollbackBusinessBefore = timeline.captureBusiness ? timeline.captureBusiness(chat) : captureRollbackBusinessState(chat)')
 }
 export function applyRollbackBusinessTurnTransform(source) {
-  function failedBodyFence(value) {
-    const guard='// [dsh-tavern-failed-body-prepare-fence:v1]'
-    if(value.includes(guard))return value
-    let next=guard+`\nfunction assertRollbackBodyPreparation(chat) {
+  // 守卫 fence：从本 transform 内联判据（旧版）改为读**同一份失败状态投影**（缺陷 A 的根治）。
+  // 必须能**升级**而非跳过：已装旧版的作者树上 marker 已在，一见 marker 就 return 会把新判据漏掉。
+  const guard='// [dsh-tavern-failed-body-prepare-fence:v1]'
+  const fenceImport="import { ledgerFailureState } from './storage-failure-state.js'\n"
+  const legacyFence=`function assertRollbackBodyPreparation(chat) {
   if(Object.values(chat.timeline?.operations || {}).some(op=>op.kind==='body' && op.status==='failed' && (!op.basedOn?.branchId || op.basedOn.branchId===chat.timeline?.branchId)))throw new Error('失败正文必须先统一物理清理，再准备新回合；禁止直接重试覆盖回退基准')
-}\n`+value
-    next=once(next,'    const rollbackBusinessBefore = captureRollbackBusinessState(chat)','    assertRollbackBodyPreparation(chat)\n    const rollbackBusinessBefore = captureRollbackBusinessState(chat)')
-    return once(next,"    const begun = timeline.apply({ chat, intent: { kind: 'body.begin', turn, userText } })","    assertRollbackBodyPreparation(chat)\n    const begun = timeline.apply({ chat, intent: { kind: 'body.begin', turn, userText } })")
+}`
+  const sharedFence=`function assertRollbackBodyPreparation(chat) {
+  // 与回退编排同读一份失败状态投影（lib/failure-state.js）——两侧判据必须同源，
+  // 否则"守卫要求先清理、回退不认这个失败"会互相等待（缺陷 A）。
+  if(ledgerFailureState(chat).pendingCleanupTurns.length)throw new Error('失败正文必须先统一物理清理，再准备新回合；禁止直接重试覆盖回退基准')
+}`
+  function failedBodyFence(value) {
+    if(value.includes(sharedFence)) {
+      if(!value.includes(fenceImport))throw Error('失败正文守卫缺少 ledgerFailureState 导入')
+      return value
+    }
+    if(value.includes(legacyFence)) {
+      value=value.replace(legacyFence,sharedFence)
+    } else {
+      let next=guard+'\n'+sharedFence+'\n'+value
+      next=once(next,'    const rollbackBusinessBefore = captureRollbackBusinessState(chat)','    assertRollbackBodyPreparation(chat)\n    const rollbackBusinessBefore = captureRollbackBusinessState(chat)')
+      next=once(next,"    const begun = timeline.apply({ chat, intent: { kind: 'body.begin', turn, userText } })","    assertRollbackBodyPreparation(chat)\n    const begun = timeline.apply({ chat, intent: { kind: 'body.begin', turn, userText } })")
+      value=next
+    }
+    if(!value.includes(fenceImport))value=fenceImport+value
+    if(value.split(guard).length!==2)throw Error('失败正文守卫标记不唯一：'+guard)
+    return value
   }
   const marker = '// [dsh-tavern-rollback-business-prepare:v1]'
   if (source.includes(marker)) {

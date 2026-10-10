@@ -22,6 +22,8 @@
     "./rollback-worldbook-bindings": "./lib/rollback-worldbook-bindings.js",
     "./db-save-exchange": "./lib/db-save-exchange.js",
     "./chat-store": "./chat-sqlite-store.js",
+    "./author-migration-adapter": "./lib/author-migration-adapter.js",
+    "./failure-state": "./lib/failure-state.js",
     "./session-window-projector": "./lib/session-window-projector.js",
     "./variable-store": "./variable-sqlite-store.js",
     "./sandbox-policy": "./lib/sandbox-policy.js",
