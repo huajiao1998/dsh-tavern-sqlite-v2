@@ -4,7 +4,7 @@
 # 源码树两入口不是本模板的产物，而是只读当前 manifest/bootstrap 的本地 wrapper；三者不得各写一份实现。
 set -eu
 RELEASE_URL='https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/download/v0.4.13/dsh-tavern-sqlite-v2-0.4.13.tgz'
-RELEASE_SHA256='f0d5f4b0617bd43afb3aac830411eeb913292f0f10aea24a0ee109f28b98add9'
+RELEASE_SHA256='c36adff6ff04bc0276757f2f21a0c436438b4ef73c8ac15c883c45b92e3a98e4'
 VERSION='0.4.13'
 SCRIPT_DIR=''
 case "$0" in
