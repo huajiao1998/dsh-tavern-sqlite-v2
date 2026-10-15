@@ -19,8 +19,7 @@ Linux 安装只需定位目标、命中必需接缝、停止原运行实例后�
 
 ## 支持范围
 
-- **适配酒馆版本以对应 [Release 下载页面](https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases)更新说明为准。** 已发布版本 **0.4.12：适配上游 main `537e878f882dbac8b651fba0f72ecb492a8a2b21`（简称 `537e878`，Tavern2.6.0；运行时 revision `8296b5b1` / sequence599，DSH SDK0.1.5-rc.2；兼容 0.4.9 基线 `91963734` 安装）**。
-- **未发布源码适配**：上游main `65401c0` / 2.6.0 / sequence602新增iframe诊断路径已改接同档SQL并有本地定向证据；输入区常驻撤销条已移到**更多 → 回退**。未公开发包、未部署/真实页面验收，不把本地证据当作当前Release兼容承诺。
+- **适配酒馆版本以对应 [Release 下载页面](https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases)更新说明为准。** 已发布版本 **0.4.13：适配上游 main `d189da122a8651c53ffc55ff465913f2e7f49d75`（简称 `d189da12`，Tavern **2.7.0**）**。
 - **其他未适配版本使用过程中可能出现运行错误。** 安装接入检查通过不代表运行期功能兼容；请更新到对应 Release 标注的适配酒馆版本，或自行适配本插件后使用。版本标注是兼容说明，不新增作者SHA、签名或纯净源码准入。
 
 - 支持 macOS、Linux、WSL2 CLI 与 Windows（桌面版 Electron、原生 Windows CLI）。运行能力和适配范围以 Release 说明为准；Linux 装卸不检查 DSH / boot 版本、Node VM 旗标或 SQLite / zstd 能力。
