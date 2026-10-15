@@ -53,7 +53,7 @@ test('正文编辑事件：真实a2008源码注入体DI执行（顺序/一次/�
       },
     },
     chatForSession: async sessionId => { order.push(['chatForSession', sessionId]); return { id: 'chat-1', sessionId } },
-    tavernScriptHostAdapter: { dispatchServerEvent: async payload => { order.push(['dispatch', payload.event, JSON.stringify(payload.args)]); await dispatchGate.promise } },
+    tavernScriptHostAdapter: { dispatchEvent: async payload => { order.push(['dispatch', payload.name, JSON.stringify(payload.args)]); await dispatchGate.promise } },
   }
   const editText = loadInjectedEditText(fen)
   let settled = false
@@ -81,7 +81,7 @@ test('正文编辑事件：真实a2008源码注入体DI执行（顺序/一次/�
     readSessionMap: async () => ({ 'sess-1': 'chat-1' }),
     chatPersistence: { readWindow: async () => ({ chat: { messages: [{ text: 'same' }] }, to: 42 }) },
     chatForSession: async () => { same.push('chatForSession'); return {} },
-    tavernScriptHostAdapter: { dispatchServerEvent: async () => { same.push('dispatch') } },
+    tavernScriptHostAdapter: { dispatchEvent: async () => { same.push('dispatch') } },
   })
   await unchanged({ sessionId: 'sess-1' }, 'same')
   assert.deepEqual(same, ['replaceText', 'notify'], '正文未变不得派发、不得取 chat：' + JSON.stringify(same))
@@ -94,7 +94,7 @@ test('正文编辑事件：真实a2008源码注入体DI执行（顺序/一次/�
     readSessionMap: async () => ({ 'sess-1': 'chat-1' }),
     chatPersistence: { readWindow: async () => ({ chat: { messages: [{ text: 'old' }] }, to: 42 }) },
     chatForSession: async () => { failed.push('chatForSession'); return {} },
-    tavernScriptHostAdapter: { dispatchServerEvent: async () => { failed.push('dispatch') } },
+    tavernScriptHostAdapter: { dispatchEvent: async () => { failed.push('dispatch') } },
   })
   await assert.rejects(() => failing({ sessionId: 'sess-1' }, 'new'), /save-boom/)
   assert.deepEqual(failed, ['replaceText'], '保存失败不得 notify/dispatch：' + JSON.stringify(failed))
@@ -108,11 +108,11 @@ test('正文编辑事件：真实a2008源码注入体DI执行（顺序/一次/�
     // ④ 事件失败：before/after 必须真有正文差异，否则不会派发（原夹具两窗相同导致本项失败：Missing expected rejection）
     chatPersistence: { readWindow: async () => ({ chat: { messages: [{ text: String(readCount2 += 1) }] }, to: 42 }) },
     chatForSession: async () => ({ id: 'chat-1' }),
-    tavernScriptHostAdapter: { dispatchServerEvent: async () => { throw new Error('event-boom') } },
+    tavernScriptHostAdapter: { dispatchEvent: async () => { throw new Error('event-boom') } },
   })
   await assert.rejects(() => eventFail({ sessionId: 'sess-1' }, 'new'), /event-boom/)
 
   // ⑤ 真实注入体必须走全局 tavernScriptHostAdapter（而非局部同名），且 a2008 真源里 saveBodyEdit 链仍被同一变换处理（不重复派发）
-  assert.ok(editBlock.includes('tavernScriptHostAdapter.dispatchServerEvent'), '注入体必须调用全局适配器')
-  assert.equal(transformed.split("event: 'MESSAGE_EDITED'").length - 1, 2, 'saveBodyEdit 与 editText 各自一次派发（各一处，不得重复注入）')
+  assert.ok(editBlock.includes('tavernScriptHostAdapter.dispatchEvent'), '注入体必须调用全局适配器')
+  assert.equal(transformed.split("name: 'MESSAGE_EDITED'").length - 1, 2, 'saveBodyEdit 与 editText 各自一次派发（各一处，不得重复注入）')
 })

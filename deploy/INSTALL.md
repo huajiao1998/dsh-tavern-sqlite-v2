@@ -19,7 +19,8 @@ Linux 安装只需定位目标、命中必需接缝、停止原运行实例后�
 
 ## 支持范围
 
-- **适配酒馆版本以对应 [Release 下载页面](https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases)更新说明为准。** 当前版本 **0.4.11：适配上游 main `537e878f882dbac8b651fba0f72ecb492a8a2b21`（简称 `537e878`，Tavern2.6.0；运行时 revision `8296b5b1` / sequence599，DSH SDK0.1.5-rc.2；兼容 0.4.9 基线 `91963734` 安装）**。
+- **适配酒馆版本以对应 [Release 下载页面](https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases)更新说明为准。** 已发布版本 **0.4.12：适配上游 main `537e878f882dbac8b651fba0f72ecb492a8a2b21`（简称 `537e878`，Tavern2.6.0；运行时 revision `8296b5b1` / sequence599，DSH SDK0.1.5-rc.2；兼容 0.4.9 基线 `91963734` 安装）**。
+- **未发布源码适配**：上游main `65401c0` / 2.6.0 / sequence602新增iframe诊断路径已改接同档SQL并有本地定向证据；输入区常驻撤销条已移到**更多 → 回退**。未公开发包、未部署/真实页面验收，不把本地证据当作当前Release兼容承诺。
 - **其他未适配版本使用过程中可能出现运行错误。** 安装接入检查通过不代表运行期功能兼容；请更新到对应 Release 标注的适配酒馆版本，或自行适配本插件后使用。版本标注是兼容说明，不新增作者SHA、签名或纯净源码准入。
 
 - 支持 macOS、Linux、WSL2 CLI 与 Windows（桌面版 Electron、原生 Windows CLI）。运行能力和适配范围以 Release 说明为准；Linux 装卸不检查 DSH / boot 版本、Node VM 旗标或 SQLite / zstd 能力。
@@ -142,7 +143,7 @@ Linux 不设 180 / 600 秒成功预算，不以 HTTP、插件 ready 或运行能
 
 装卸完成说明本次源码区块和插件目录操作已完成、原状态恢复命令已执行，**不代表**运行兼容、页面或玩法验收；用户须登录刷新确认。
 
-**安全边界（不是安全沙箱）**：服务端 MVU / 卡脚本在 Node `node:vm` 上下文内执行（Linux / macOS / Windows CLI 走进程内路径；Windows 桌面版因打包宿主缺少进程内 vm ESM 能力改由 Worker 承载，选路见 `lib/mvu/vm-capability.js`）。vm 只提供超时、钩子预算与调用窗口校验等“跑飞防护”（`lib/sandbox-policy.js`），**不构成对不可信代码的安全隔离**：realm 逃逸属已知路径（按已知路径收口，不宣称完全阻断）；脚本可见的宿主能力已收为显式 bridge，不再直接暴露裸宿主对象引用，但仍与宿主同进程、同用户权限。API 侧解析路径不使用宿主 `new Function`（F001）。请只运行你信任的人物卡与脚本。
+**安全边界（不是安全沙箱）**：计算（卡脚本 / MVU / Helper）唯一由上游服务端运行时在其 jsdom 子进程内执行，本包不自带计算实现、不提供旧引擎或浏览器回落；子进程仍与宿主同机同用户权限，**不构成对不可信代码的安全隔离**，请只运行你信任的人物卡与脚本。写入侧由上游 Host 事务草稿、effect 前像校验与 SQLite CAS/事务收口，迟到写按旧写隔离拒绝。
 
 ## 独立发行构建
 

@@ -11,7 +11,7 @@ export function applyRollbackGlobalAdapterTransform(source){
    .replace('options.extensionSettings.save(settings, expectedSettings, rollbackGlobalOwner(extensionChat))','options.extensionSettings.save(settings, expectedSettings)')
  }
  function addJoin(value){
-  let next=value.includes('whenIdle: sessionId => serverExecution.whenIdle(sessionId)')||value.includes('// [dsh-tavern-adapter-runs:v1]')?value:once(value,'    dispatchEvent,\n    settleMvuUpdate,','    dispatchEvent,\n    whenIdle: sessionId => serverExecution.whenIdle(sessionId),\n    settleMvuUpdate,')
+  let next=value.includes('// [dsh-tavern-adapter-runs:v1]')?value:once(value,'    dispatchEvent,\n    settleMvuUpdate,','    dispatchEvent,\n    whenIdle: whenRollbackAdapterIdle,\n    settleMvuUpdate,')
   if(next.includes('// [dsh-tavern-adapter-runs:v1]'))return addClear(next)
   next="import { rollbackBarrier, rollbackSchedulingBarrier } from './storage-rollback-business.js'\n"+next
   next=once(next,'export function createTavernScriptHostAdapter(options = {}) {',`export function createTavernScriptHostAdapter(options = {}) {
@@ -29,11 +29,8 @@ export function applyRollbackGlobalAdapterTransform(source){
     }
   }
   async function whenRollbackAdapterIdle(id) {
-    await serverExecution.whenIdle(id)
     while(rollbackAdapterRuns.get(id)?.size)await Promise.allSettled([...rollbackAdapterRuns.get(id)])
-    await serverExecution.whenIdle(id)
   }`)
-  next=once(next,'    whenIdle: sessionId => serverExecution.whenIdle(sessionId),','    whenIdle: whenRollbackAdapterIdle,')
   for(const name of ['dispatchEvent','settleMvuUpdate','updatePrompts','updateVariables','updateMessages','createMessages','replaceWorldbook','saveFullPromptTemplateState','saveFullPromptTemplateSettings','saveFullPromptTemplateGlobals','saveExtensionSettings','saveChatData','saveWorldInfo'])next=once(next,'    '+name+',','    '+name+': trackRollbackAdapterRun('+name+'),')
   return addClear(next)
  }

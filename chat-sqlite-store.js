@@ -18,8 +18,10 @@ import { readCandidateInput as queryCandidateInput, readSettlementInputNative as
 import { appendMessages as commandAppendMessages, setMessageFloor as commandSetMessageFloor } from './lib/chat-command-service.js'
 import { randomUUID } from 'node:crypto'
 import { captureRollbackBusinessState, recordRollbackBusinessWrites } from './lib/rollback-business-state.js'
+import { ensureDisplayRuntimeTable, readDisplayRuntime, recentDisplayRuntime, mergeDisplayFrame } from './lib/display-runtime-archive.js'
 import { registerSendCapture } from './lib/send-acceptance.js'
 import { assertSendAfterCleanup } from './lib/failure-state.js'
+import { createAssembleProbeTarget, bindAssembleProbe } from './lib/assemble-probe.js'
 
 // 本模块**不再直接 import 作者的三个模块**（copy-json-tree / chat-session-state / json-mutation）：
 // 它们是作者的代码，必须由作者树的「薄垫片」注入（见 deploy/chat-sqlite-store.shim.js）。
@@ -103,6 +105,7 @@ export function createChatSqliteStore(options = {}) {
   const logger = options.logger || console
   const now = typeof options.now === 'function' ? options.now : Date.now
   const mutationTails = new Map()
+  const assembleProbe = createAssembleProbeTarget()
   const limit = (value, fallback) => Number.isSafeInteger(value) && value >= 0 ? value : fallback
   // 运维兜底开关（未设置/非法一律保持原默认值）：
   //   DSH_TAVERN_SQLITE_CACHE_MAX_MB     读缓存总预算（MB）
@@ -117,6 +120,13 @@ export function createChatSqliteStore(options = {}) {
   const cacheMaxBytes = limit(options.cacheMaxBytes, limit(envMiB('DSH_TAVERN_SQLITE_CACHE_MAX_MB'), 64 * 1024 * 1024))   // P2-b：256→64MB（单档 ~8-20MB；8 档并发防气球）
   const maxCachedChats = limit(options.maxCachedChats, limit(envNumber('DSH_TAVERN_SQLITE_MAX_CACHED_CHATS'), 8))
   const readCache = new Map()
+  // 帧证据独立于读缓存的生存周期（2026-10-15 修）：
+  // patchHeadOnly 走纯头部捷径，不 assemble 完整档、无法 rememberState；若帧随读缓存一起丢，
+  // 连续头部写（runtimeInputs / 头字段）之后 changedIndices/readViewDelta 会**永久**失效，
+  // 消费者只能全量读整档，runtimeInputChanges 这类细粒度证据等于作废。
+  // 帧很小（≤32 帧、各字段受 bounded() 4096 上限约束），故让它跨缓存回收存活；
+  // 只在本档数据被外部改写/删除/回退时随 forgetState 一起失效。
+  const changeFrames = new Map()
   const pendingReads = new Map()
   // P2-a 读侧（lib/timeline-nodes.js:11 的"读侧契约：行级缓存必须同刀"）：timeline 子行的
   // 解析结果按**连接**缓存。实测（chat-muzd2bvc，20+ 轮档）：archive_timeline_nodes 会长到
@@ -139,6 +149,7 @@ export function createChatSqliteStore(options = {}) {
     projectionReads.forget(id)
     forgetState(id)
     variables.forget(id)
+    narrowDensity.delete(db)     // 第一刀：外部写不推 revision，稠密判定必须随外部提交一起失效
     bumpGeneration(id)
     return true
   }
@@ -352,6 +363,18 @@ export function createChatSqliteStore(options = {}) {
   function writeChat(db, chatId, chat, revision, at, changes, options = {}) {
     const keys = Object.keys(chat)
     const messages = Array.isArray(chat.messages) ? chat.messages : []
+    // 头部-only 模式（第二刀）：调用方已用窄读口取得真实楼数。本模式不写楼层行、不做截断判定、
+    // 不登记 density——占位数组的 every() 恒真，会把共享占位对象误登记成 dense（陷阱 2-B）。
+    // 楼数与楼层连续性自检仍按真实楼数执行，不用"跳过自检换速度"。
+    const headOnly = options.headOnly === true
+    const messageCount = headOnly ? Number(options.messageCount) : messages.length
+    // headOnly 契约自证（第三刀补强）：本模式不写任何楼层行，调用方（发送前像 / 头部-only patch）
+    // 必须保证写集全部落在头部。窄态下若出现 messages 写集，说明“只承载楼数的占位”被误当作
+    // 可写正文——必须响亮失败，而不是把占位空洞写成 'null' 楼、或连尾部 append 一起静默丢掉
+    // （jsonText(undefined,'null') 与 touchedIndices 为空都会让自检照过）。任何 SQL 写之前先拒。
+    if (headOnly && changes !== null && changes.some(change => Array.isArray(change?.path) && change.path.length > 0 && change.path[0] === 'messages')) {
+      throw new Error('头部-only 写模式不允许楼层写集：窄态不得提交 messages 变更')
+    }
     const useTransaction = options.inTransaction !== true
     if (useTransaction) db.exec('BEGIN IMMEDIATE')
     try {
@@ -422,8 +445,9 @@ export function createChatSqliteStore(options = {}) {
         verifyTimelineNodes(db, chat.timeline)                  // fail-loud：ord 连续＋行数一致
       }
       // ---- 楼层：先定"本次真的写了哪些楼"，再由变量归档在**同一事务**里决定实际落库的形态 ----
-      const prevCount = Number(db.prepare('SELECT COUNT(*) AS n FROM archive_messages').get().n)
-      let rewriteAll = changes === null
+      // 头部-only 模式不下这一条 COUNT：楼数由调用方的窄读口刚量过，且本次不写任何楼层行。
+      const prevCount = headOnly ? messageCount : Number(stmt(db, 'SELECT COUNT(*) AS n FROM archive_messages').get().n)
+      let rewriteAll = changes === null && !headOnly
       let nonTailSplices = 0
       let touchedIndices
       if (changes === null) {
@@ -456,7 +480,7 @@ export function createChatSqliteStore(options = {}) {
           ? messages.map((_row, index) => index)
           : [...touched].filter(index => index < messages.length).sort((left, right) => left - right)
       }
-      const truncated = prevCount > messages.length
+      const truncated = prevCount > messageCount
       // ---- 变量（同一事务）：变化楼落快照 + 当前态 + 尾部清残 + K4 修剪（窗口外老楼先存快照再删）----
       //   header-only 写（touchedIndices 空且无截断）在这里不做任何扫描，直接原样返回。
       //   written = 本次 touched ∪ 被修剪的楼：修剪改了行内容，必须一起落库。
@@ -487,9 +511,11 @@ export function createChatSqliteStore(options = {}) {
       // 尾部残留（回退截断的落点；也自愈历史残留）—— 变量侧的越界快照已由变量归档清掉
       if (truncated) db.prepare('DELETE FROM archive_messages WHERE message_index >= ?').run(messages.length)
       // ---- 自检（fail-loud）：干净回退的安全网，别等用户发现 ----
-      const check = db.prepare('SELECT COUNT(*) AS n, MAX(message_index) AS m FROM archive_messages').get()
-      if (Number(check.n) !== messages.length || (messages.length === 0 ? check.m !== null : Number(check.m) !== messages.length - 1)) {
-        throw new Error('Chat 存储自检失败：楼层行数与 chat 不一致（rows=' + check.n + ' max=' + check.m + ' chat=' + messages.length + '）')
+      // 头部-only 时按窄读口量得的真实楼数核对（本次不写楼，所以库内行数必须与它一致），
+      // 不是"跳过自检换速度"；连续性与行数护栏一字不减。
+      const check = stmt(db, 'SELECT COUNT(*) AS n, MAX(message_index) AS m FROM archive_messages').get()
+      if (Number(check.n) !== messageCount || (messageCount === 0 ? check.m !== null : Number(check.m) !== messageCount - 1)) {
+        throw new Error('Chat 存储自检失败：楼层行数与 chat 不一致（rows=' + check.n + ' max=' + check.m + ' chat=' + messageCount + '）')
       }
       // ---- 头部元数据 ----
       db.prepare(`INSERT INTO archive_head (id, revision, updated_at) VALUES (1, ?, ?)
@@ -498,7 +524,7 @@ export function createChatSqliteStore(options = {}) {
       // D-3：楼数增加且本写口已 COMMIT，才尽力合并 WAL；既有楼修改/头写/截断不额外检查点。
       // 楼追加不是精确的业务轮次；不宣称每轮仅一次，也不保证在线只复制 .db 安全。
       // 外部事务调用不能在 COMMIT 前检查点；其边界由事务所有者负责。
-      if (useTransaction && messages.length > prevCount) checkpointMessageAppend(db)
+      if (useTransaction && messageCount > prevCount) checkpointMessageAppend(db)
       // ---- 修A：按实际改动范围 bump 部件版本（投影缓存据此做选择性失效）----
       // header 变了 = changed 集合非空（头字段有增删改）；messages 变了 = 有楼被写/截断/全量重写。
       // prepared.written 含 K4 修剪改写的楼（可能不在业务 touched 里），必须一起算进 messages。
@@ -509,7 +535,8 @@ export function createChatSqliteStore(options = {}) {
       if (messagesChanged) compRev.messages++
       const beforeMessages = readCache.get(chatId)?.state.chat.messages
       // 只在首读/失去证据时核全量；已知dense的不可变旧数组只校验本次写楼。
-      density.set(storedMessages, !rewriteAll && density.get(beforeMessages) === true
+      // 头部-only 模式整段跳过：touchedIndices 为空 ⇒ every() 恒真，会把共享占位数组登记成 dense（陷阱 2-B）。
+      if (!headOnly) density.set(storedMessages, !rewriteAll && density.get(beforeMessages) === true
         ? touchedIndices.every(index => validMessage(storedMessages[index]))
         : storedMessages.every(validMessage))
       // 写后精确失效载荷：顶层键（含被删键）＋楼层是否变化＋timeline 子行粒度；revision 供投影缓存消费本次推进。
@@ -540,6 +567,7 @@ export function createChatSqliteStore(options = {}) {
     const db = new DatabaseSync(file)
     db.exec('PRAGMA journal_mode = WAL')
     ensureSchema(db)
+    ensureDisplayRuntimeTable(db)
     observeExternalCommit(id, db)
     open.set(id, db)
     while (open.size > 8) {
@@ -548,7 +576,7 @@ export function createChatSqliteStore(options = {}) {
       try { oldestDb.close() } catch { /* Already closed by remove(). */ }
       open.delete(oldest)
       projectionReads.forget(oldest)
-      forgetState(oldest)
+      evictState(oldest)
       dropTimelineRowsFor(oldestDb)   // 句柄都关了：先记账清再取消注册
     }
     return db
@@ -673,11 +701,22 @@ export function createChatSqliteStore(options = {}) {
     variables.ensureTables(db)     // 变量快照/state 与本档同库同连接（不另建 variables.db）
   }
 
-  function assemble(db) {
+  function assemble(db, chatId, reason) {
+    const sample = assembleProbe.begin(chatId, reason)
+    let outcome = 'failed'
+    try {
+      const result = assembleRows(db, sample)
+      outcome = result === null ? 'empty' : 'completed'
+      return result
+    } finally { sample?.finish(outcome) }
+  }
+
+  function assembleRows(db, sample) {
     const headRow = db.prepare('SELECT revision FROM archive_head WHERE id = 1').get()
     if (headRow === undefined) return null
     const fields = db.prepare('SELECT key, kind, value_json FROM archive_head_fields ORDER BY ord').all()
     const rows = db.prepare('SELECT message_index, message_json FROM archive_messages ORDER BY message_index').all()
+    sample?.loaded(fields.length, rows.length)
     const messages = new Array(rows.length)
     for (const row of rows) messages[Number(row.message_index)] = JSON.parse(row.message_json)
     const chat = {}
@@ -750,31 +789,49 @@ export function createChatSqliteStore(options = {}) {
     const entry = readCache.get(chatId)
     if (entry) cachedBytes -= entry.bytes
     readCache.delete(chatId)
+    changeFrames.delete(chatId)
   }
-  function rememberState(chatId, stamp, state, recentChanges = []) {
-    forgetState(chatId)
+  // 仅回收读缓存（内存压力/句柄关闭/缓存 miss 重载）：帧证据保留，跨回收继续可用。
+  function evictState(chatId) {
+    const entry = readCache.get(chatId)
+    if (entry) cachedBytes -= entry.bytes
+    readCache.delete(chatId)
+  }
+  function setChangeFrames(chatId, frames) {
+    changeFrames.set(chatId, frames)
+    // 帧表同样要有上限，否则大量档会无限堆积。读缓存条数的 4 倍：帧要跨回收存活，需比缓存更宽。
+    const cap = Math.max(4, (maxCachedChats > 0 ? maxCachedChats : 8) * 4)
+    while (changeFrames.size > cap) changeFrames.delete(changeFrames.keys().next().value)
+  }
+  function rememberState(chatId, stamp, state, recentChanges) {
+    evictState(chatId)
     if (!stamp || !state || !maxCachedChats || !cacheMaxBytes) return
     let bytes
-    try { bytes = estimateBytes(state) + estimateBytes(recentChanges) + estimateBytes(stamp) } catch { return }
+    try { bytes = estimateBytes(state) + estimateBytes(recentChanges || []) + estimateBytes(stamp) } catch { return }
     // 单档自己就超过总预算（长历史的 timeline 子行 + 大头字段）时：先给其它档让位，再允许它独占一个槽。
     // 读缓存被整体击穿的代价是"每次读都冷组装整档"（实测 >1s/次，见 timelineRows 注释），
     // 远比同一时刻多占一份解析后的档贵；time-travel/时间线越长的档越是如此。
-    if (bytes > cacheMaxBytes) while (readCache.size > 0) forgetState(readCache.keys().next().value)
-    readCache.set(chatId, { stamp, state, recentChanges, bytes })
+    if (bytes > cacheMaxBytes) while (readCache.size > 0) evictState(readCache.keys().next().value)
+    // 只有显式带帧的写入（patch/update 全量路径）才更新帧表；缓存 miss 后的重新 materialize
+    // 不传帧，必须保留既有帧——否则任何一次冷读都会把增量证据清空。
+    if (recentChanges !== undefined) setChangeFrames(chatId, recentChanges)
+    readCache.set(chatId, { stamp, state, recentChanges: changeFrames.get(chatId) || [], bytes })
     cachedBytes += bytes
     // 条数与总预算仍按原语义回收；但绝不把唯一一个档自己挤掉（它已是最后一道防线）。
-    while (readCache.size > 1 && (readCache.size > maxCachedChats || cachedBytes > cacheMaxBytes)) forgetState(readCache.keys().next().value)
+    while (readCache.size > 1 && (readCache.size > maxCachedChats || cachedBytes > cacheMaxBytes)) evictState(readCache.keys().next().value)
   }
   function knownChanges(chatId, state) {
     const entry = readCache.get(chatId)
-    return entry?.state === state ? entry.recentChanges : []
+    // 缓存 miss（刚被回收/冷读重载）时回落到独立帧表；帧链与当前 revision 不衔接时
+    // 由 changedIndices 的连续性校验拒掉，回落全量读，不会给出错证据。
+    return entry?.state === state ? entry.recentChanges : (changeFrames.get(chatId) || [])
   }
 
   // ---------- 惰性迁移：文件版 → SQLite（行级） ----------
   // 原档承载判定统一走 hasLegacyArtifact / legacyLayoutOf（含 head.json、blocks、snapshots、journals），
   // 不再另留一份"只看 journals/snapshots"的窄判定。
 
-  async function cachedState(chatId) {
+  async function cachedState(chatId, reason) {
     // PR10 修复①：读缓存命中前用**已开句柄**探一次外部提交（不新开句柄，避免触碰原件/shadow）
     const probed = open.get(safeChatId(chatId))
     if (probed !== undefined) observeExternalCommit(chatId, probed)
@@ -785,13 +842,13 @@ export function createChatSqliteStore(options = {}) {
       readCache.set(chatId, entry)
       return entry.state
     }
-    forgetState(chatId)
+    evictState(chatId)
     const pending = pendingReads.get(chatId)
     if (pending?.stamp === stamp) return pending.promise
     const load = { stamp }
     load.promise = (async () => {
       try {
-        const state = await materialize(chatId)
+        const state = await materialize(chatId, Number.POSITIVE_INFINITY, reason)
         if (stamp && stamp === await version(chatId) && pendingReads.get(chatId) === load) {
           rememberState(chatId, stamp, state)
         }
@@ -804,7 +861,7 @@ export function createChatSqliteStore(options = {}) {
     return load.promise
   }
 
-  async function materialize(chatId, targetRevision = Number.POSITIVE_INFINITY) {
+  async function materialize(chatId, targetRevision = Number.POSITIVE_INFINITY, reason) {
     const id = safeChatId(chatId)
     const file = dbFile(id)
     // 原件优先，不能为了查看旧 ID 打开 shadow 数据库并触发 WAL/schema 升级。
@@ -827,7 +884,7 @@ export function createChatSqliteStore(options = {}) {
     // 行级存储（彻底清理语义）：仅保留当前态，不保留历史版本——被回退/被修改的旧版本不可重建
     if (targetRevision !== Number.POSITIVE_INFINITY) {
       const db = handle(chatId)
-      const state = readSqlSnapshot(db, () => { observeExternalCommit(id, db); return assemble(db) })
+      const state = readSqlSnapshot(db, () => { observeExternalCommit(id, db); return assemble(db, id, reason) })
       if (state !== null && state.revision === targetRevision) {
         return { chat: state.chat, revision: state.revision, legacy: false, frameCount: 0, frameBytes: 0 }
       }
@@ -836,11 +893,76 @@ export function createChatSqliteStore(options = {}) {
       throw error
     }
     const db = handle(chatId)
-    const state = readSqlSnapshot(db, () => { observeExternalCommit(id, db); return assemble(db) })
+    const state = readSqlSnapshot(db, () => { observeExternalCommit(id, db); return assemble(db, id, reason) })
     if (state === null) return null
     const { chat, revision } = state
     if (!chat || typeof chat !== 'object' || Array.isArray(chat) || chat.id !== id) throw new Error('Archive state 不合法: ' + id)
     return { chat, revision, legacy: false, frameCount: 0, frameBytes: 0 }
+  }
+
+  // patch 的写集归一化：全量路径与头部-only 快路径共用同一份实现，避免"快路径少做一步校验"。
+  // messageCount 由调用方给（全量路径=真实楼层数，快路径=窄读口量得的楼数）：越界判断因此两条路径一致。
+  function normalizePatchChanges(chat, changes, messageCount) {
+    const normalized = []
+    for (const change of changes) {
+      assertPatchMessages(change)
+      if (change.path[0] === 'messages' && change.path.length === 2 && change.op === 'set' && change.path[1] >= messageCount) {
+        throw new Error('消息楼层越界；追加请使用完整splice')
+      }
+      if (change.op === 'set' && change.value === undefined) {
+        if (!change.path.length) throw new Error('Journal root cannot be undefined')
+        const current = applyJsonChangesShared(chat, normalized)
+        let parent = current
+        for (const key of change.path.slice(0, -1)) parent = parent?.[key]
+        if (!parent || typeof parent !== 'object') throw new Error('Missing mutation parent')
+        const key = change.path.at(-1)
+        if (Array.isArray(parent)) normalized.push({ ...change, value: null })
+        else if (Object.hasOwn(parent, key)) normalized.push({ op: 'delete', path: change.path })
+      } else normalized.push(jsonClone(change))
+    }
+    return normalized
+  }
+
+  // 第二刀：头部-only 快路径。写集全部落在头部（每条 path 非空且 path[0] !== 'messages'）时，
+  // 用窄读口代替整档 assemble：不解析任何楼层行、不把整档放回读缓存、不算稠密判定。
+  // 前置由 patch 判定：非 legacy、库已存在、changes 非空。其余情况一律走原路径，一行不改。
+  // 保留项（一个都没动）：assertPatchMessages / assertCompleteMessages / assertCompleteChat、
+  // CAS（assertCurrent + expectedRevision + revision 连续性）、recordRollbackBusinessWrites 调用、
+  // 楼层行数与连续性自检（按窄读口量得的真实楼数核对，不是跳过自检换速度）。
+  async function patchHeadOnly(chatId, expectedRevision, changes, metadata) {
+    const db = handle(chatId, { create: false })
+    if (!db) return undefined
+    const rows = readSqlSnapshot(db, () => narrowHeaderRows(chatId, db))
+    if (rows === null) return undefined
+    const narrow = { chat: rows.chat, revision: rows.revision, legacy: false, frameCount: 0, frameBytes: 0 }
+    assertWritableChat(chatId, narrow)
+    assertRollbackChatWritable(narrow.chat, metadata)
+    if (narrow.revision !== expectedRevision) return undefined
+    let applied = normalizePatchChanges(narrow.chat, changes, rows.messageCount)
+    const next = applyJsonChangesShared(narrow.chat, applied)
+    const undoOperation = recordRollbackBusinessWrites(narrow.chat, next, metadata, copyJsonTree)
+    if (undoOperation) {
+      // 追加的两条写集 path[0] 恒为 'timeline'，仍是头部-only；不需要重新判定。
+      applied = [...applied, { op: 'set', path: ['timeline', 'operations', undoOperation, 'businessBefore'], value: next.timeline.operations[undoOperation].businessBefore }]
+      if (Array.isArray(next.timeline.checkpoints)) next.timeline.checkpoints.forEach((cp, index) => {
+        if (Number(cp.turn) === Number(next.timeline.operations[undoOperation].turn)) applied.push({ op: 'set', path: ['timeline', 'checkpoints', index, 'businessBefore'], value: cp.businessBefore })
+      })
+    }
+    if (next.id !== chatId || revisionOf(next) !== expectedRevision + 1) throw new Error('Invalid journal patch revision')
+    assertWritableChat(chatId, narrow)
+    metadata.assertCurrent?.()
+    if (Number(stmt(db, 'SELECT revision FROM archive_head WHERE id = 1').get()?.revision) !== expectedRevision) return undefined
+    const written = writeChat(db, chatId, next, expectedRevision + 1, now(), applied,
+      { expectedRevision, headOnly: true, messageCount: rows.messageCount })
+    bumpGeneration(chatId)
+    projectionReads.invalidate(chatId, written.touched)
+    // 只回收完整档缓存、不 rememberState：读缓存存的是完整档，存窄对象会让后续 read() 读到空洞（陷阱 1-B）。
+    // 但帧证据必须留下：本路径写的全是头部-only 变更（runtimeInputs / 头字段），若连帧一起丢，
+    // 连续头部写之后 changedIndices/readViewDelta 永久失效，消费者只能全量读，
+    // runtimeInputChanges 这类细粒度证据等于作废（2026-10-15 修，见 changeFrames 注释）。
+    evictState(chatId)
+    setChangeFrames(chatId, rememberChanges(changeFrames.get(chatId), expectedRevision + 1, applied))
+    return copyJsonTree(narrowProjectChat(written.chat))
   }
 
   // ---------- 写路径（行级，无帧） ----------
@@ -848,28 +970,19 @@ export function createChatSqliteStore(options = {}) {
     return serialize(chatId, async () => {
       assertActive()
       assertWritableChat(chatId)
-      const state = await cachedState(chatId)
+      // 第二刀判定必须在取全量状态**之前**——否则就白 assemble 了。
+      // 空 changes 不走此路：保持原 no-op 语义（返回全头部且不推进 revision）。
+      if (Array.isArray(changes) && changes.length > 0
+        && changes.every(change => Array.isArray(change?.path) && change.path.length > 0 && change.path[0] !== 'messages')
+        && !hasLegacyArtifact(chatId)) {
+        return await patchHeadOnly(chatId, expectedRevision, changes, metadata)
+      }
+      const state = await cachedState(chatId, 'patch')
       assertWritableChat(chatId, state)
       assertRollbackChatWritable(state?.chat, metadata)
       if (!state || state.revision !== expectedRevision) return undefined
       if (changes.length === 0) { metadata.assertCurrent?.(); return slice(state.chat, []).chat }
-      const normalized = []
-      for (const change of changes) {
-        assertPatchMessages(change)
-        if (change.path[0] === 'messages' && change.path.length === 2 && change.op === 'set' && change.path[1] >= state.chat.messages.length) {
-          throw new Error('消息楼层越界；追加请使用完整splice')
-        }
-        if (change.op === 'set' && change.value === undefined) {
-          if (!change.path.length) throw new Error('Journal root cannot be undefined')
-          const current = applyJsonChangesShared(state.chat, normalized)
-          let parent = current
-          for (const key of change.path.slice(0, -1)) parent = parent?.[key]
-          if (!parent || typeof parent !== 'object') throw new Error('Missing mutation parent')
-          const key = change.path.at(-1)
-          if (Array.isArray(parent)) normalized.push({ ...change, value: null })
-          else if (Object.hasOwn(parent, key)) normalized.push({ op: 'delete', path: change.path })
-        } else normalized.push(jsonClone(change))
-      }
+      const normalized = normalizePatchChanges(state.chat, changes, state.chat.messages.length)
       changes = normalized
       const next = applyJsonChangesShared(state.chat, changes)
       const undoOperation=recordRollbackBusinessWrites(state.chat,next,metadata,copyJsonTree)
@@ -893,7 +1006,7 @@ export function createChatSqliteStore(options = {}) {
       bumpGeneration(chatId)
       projectionReads.invalidate(chatId, written.touched)
       const recentChanges = knownChanges(chatId, state)
-      forgetState(chatId)
+      evictState(chatId)
       rememberState(chatId, generationStamp(chatId), {
         chat: storedChat, revision: expectedRevision + 1, legacy: false, frameCount: 0, frameBytes: 0
       }, rememberChanges(recentChanges, expectedRevision + 1, changes))
@@ -906,7 +1019,7 @@ export function createChatSqliteStore(options = {}) {
     return await serialize(chatId, async function () {
       assertActive()
       assertWritableChat(chatId)
-      const currentState = await cachedState(chatId)
+      const currentState = await cachedState(chatId, 'update')
       assertWritableChat(chatId, currentState)
       const current = currentState == null ? undefined : currentState.chat
       assertRollbackChatWritable(current, metadata)
@@ -1051,7 +1164,7 @@ export function createChatSqliteStore(options = {}) {
   }
 
   async function read(chatId) {
-    const state = await cachedState(chatId)
+    const state = await cachedState(chatId, 'read')
     if (!state) return undefined
     const chat = copyJsonTree(state.chat)
     // 全量读路径：与瘦身前等价（老楼变量从同库快照表补回），但**补的是脱离副本**，不进 rememberState 热缓存。
@@ -1068,7 +1181,7 @@ export function createChatSqliteStore(options = {}) {
       const result = projectionReads.session(db, chatId, options)
       if (!result?.full) return result?.value
     }
-    const state = await cachedState(chatId)
+    const state = await cachedState(chatId, 'readSessionState')
     if (!state) return undefined
     if (options.scoped === true && !Object.values(state.chat.timeline?.operations || {}).some(op => op?.kind === 'body' && op.status === 'foreground-completed')) {
       const scoped = requireProtocolHelper('readSessionState', 'createScopedMessages')
@@ -1085,31 +1198,32 @@ export function createChatSqliteStore(options = {}) {
   async function readSettlementCheckpoint(chatId, messageId, operationId) {
     const db = projectionDb(chatId)
     if (db) return projectionReads.checkpoint(db, chatId, messageId, operationId)
-    const state = await cachedState(chatId)
+    const state = await cachedState(chatId, 'readSettlementCheckpoint')
     return state ? projectSettlementCheckpoint(state.chat, messageId, operationId) : undefined
   }
   async function readSceneImageState(chatId) {
     const db = projectionDb(chatId)
     if (db) return projectionReads.scene(db, chatId)
-    const state = await cachedState(chatId)
+    const state = await cachedState(chatId, 'readSceneImageState')
     return state ? projectSceneImageState(state.chat) : undefined
   }
   async function readBackgroundConfig(chatId) {
     const db = projectionDb(chatId)
     if (db) return projectionReads.background(db, chatId)
-    const state = await cachedState(chatId)
+    const state = await cachedState(chatId, 'readBackgroundConfig')
     return state ? projectChatBackgroundConfig(state.chat) : undefined
   }
   async function readDisplayRuntimeState(chatId, turn) {
     const db = projectionDb(chatId)
     if (db) return projectionReads.display(db, chatId, turn)
-    const state = await cachedState(chatId)
+    const state = await cachedState(chatId, 'readDisplayRuntimeState')
     return state ? projectDisplayRuntimeState(state.chat, turn) : undefined
   }
-  function slice(chat, indices, fields, hydrate, batch) {
-    const { messages: rawMessages, ...allHead } = chat
-    const messages = Array.isArray(rawMessages) ? rawMessages : []
-    if (indices.some(i => !Number.isSafeInteger(i) || i < 0 || i >= messages.length)) throw new Error('消息楼层不存在')
+  // 头部投影：fields 语义与 slice 完全一致（undefined=全键、数组=点路径白名单且跳过 messages 与毒键、
+  // 'settlement'=清空 timeline.checkpoints、'opening'=不跳过 timeline）。第一刀窄读口与 slice 共用同一份
+  // 实现，避免出现两份字段语义后漂移。
+  function projectHead(chat, fields) {
+    const { messages: _messages, ...allHead } = chat
     let head = allHead
     // 与作者 slice 对齐（b/lib/domain/chat-journal-store.js:563-564）：结算读不复制历史回退检查点。
     if (fields === 'settlement' && head.timeline && typeof head.timeline === 'object' && !Array.isArray(head.timeline)) {
@@ -1131,6 +1245,13 @@ export function createChatSqliteStore(options = {}) {
         target[parts.at(-1)] = source
       }
     }
+    return head
+  }
+  function slice(chat, indices, fields, hydrate, batch) {
+    const { messages: rawMessages } = chat
+    const messages = Array.isArray(rawMessages) ? rawMessages : []
+    if (indices.some(i => !Number.isSafeInteger(i) || i < 0 || i >= messages.length)) throw new Error('消息楼层不存在')
+    const head = projectHead(chat, fields)
     // 补数：优先批量（一次快照 + 一次版本校验）；旧逐楼补数器保留给单点调用者。
     const rows = indices.map(index => messages[index])
     if (typeof batch === 'function' && rows.length) batch(indices, rows)
@@ -1139,13 +1260,98 @@ export function createChatSqliteStore(options = {}) {
     // 实测 4MB 头部＋48 楼：2.98ms → 0.06ms（50×）。作者 records 层也用同一份实现。
     return { chat: copyJsonTree({ ...head, messages: rows }), messageCount: messages.length, denseMessages: dense(rawMessages) }
   }
+  // ---------- 第一刀：窄头部读口（indices 为空时替代整档 assemble） ----------
+  // 按 archive_head_fields ORDER BY ord 全键读，messages 占位键保留在其原有 ord 位置；timeline 走子行表；
+  // 其余键 JSON.parse(value_json)，NULL 值键跳过（与 assembleRows 同一分支）。_storageRevision 取
+  // archive_head.revision；楼数来自 COUNT(*)。返回 {chat, messageCount, denseMessages}，与
+  // slice(chat, [], fields) 逐条对齐（fields 语义同 projectHead、空 indices 不构成越界）。
+  // 三条硬约束（正确性，不是偏好）：
+  //   · 绝不 rememberState —— 读缓存存的是完整档，read() 直接 copyJsonTree 出借；存窄对象会毒化出空洞。
+  //   · 绝不用占位数组作 density 的键 —— [].every() 恒真，会把共享占位对象登记成 dense。
+  //   · 第二刀写路径只取 rows，不算 dense —— 那是一条全表 JSON 扫描，正是要省掉的开销。
+  //   · 占位数组长度诚实但零正文（见 lengthOnlyPlaceholder）—— 回退前像的楼数边界不能塌成 0。
+  /** 只承载“楼数”这一事实的占位数组：length 诚实、不含任何楼层正文（holes）。
+   *  为什么必须长度诚实：captureRollbackBusinessState 的 messageCount 读 chat.messages.length
+   *  （lib/rollback-business-state.js:59），回退前像的楼数边界必须与整档路径逐字段一致；
+   *  没有诚实长度，发送前像会把 messageCount 记成 0，restore 的行前像边界随之失效。
+   *  为什么可以不含正文：作者 copyJsonTree 的 Array.map 保留 holes、diffJson 对同长度 holey
+   *  数组逐索引 Object.is(undefined,undefined) 零差异、isDeepStrictEqual 恒真，
+   *  writeChat 的 headOnly 模式用 options.messageCount 覆盖且永不把楼层送进 jsonText
+   *  （messages 键在 archive_head_fields 里恒为 kind=1 占位行）。均实测验证。
+   *  对外形状不受影响：narrowProjectChat 一律把 messages 投影成 []，readSlice/patch 返回值不变。
+   *  额外收益：长度诚实让“补偿期间楼数不得变化”可被显式拒绝，而不是靠隐含假设。 */
+  function lengthOnlyPlaceholder(count) {
+    const placeholder = []
+    placeholder.length = count
+    return placeholder
+  }
+  const narrowDensity = new WeakMap()          // db -> {revision, dense}
+  function narrowDense(db, revision) {
+    const known = narrowDensity.get(db)
+    if (known && known.revision === revision) return known.dense
+    // 语义等于 validMessage（非 null、非数组的对象）：数组/标量/null 都算不 dense。
+    // json_valid 前置是必需的：坏 JSON 会让 json_type 直接抛错（实测），不能把头部读口绑死在楼层解析上。
+    const dense = !stmt(db, "SELECT EXISTS(SELECT 1 FROM archive_messages WHERE json_valid(message_json) = 0 OR json_type(message_json) IS NOT 'object') AS bad").get()?.bad
+    narrowDensity.set(db, { revision, dense })
+    return dense
+  }
+  /** 窄头部原始行：不含 fields 投影、不算 dense。chat.messages 恒为长度诚实的占位数组（内容永不被读取）。 */
+  function narrowHeaderRows(chatId, db) {
+    const headRow = stmt(db, 'SELECT revision FROM archive_head WHERE id = 1').get()
+    if (headRow === undefined) return null
+    const messageCount = Number(stmt(db, 'SELECT COUNT(*) AS n FROM archive_messages').get()?.n || 0)
+    const chat = {}
+    let placed = false
+    for (const field of stmt(db, 'SELECT key, kind, value_json FROM archive_head_fields ORDER BY ord').all()) {
+      if (field.kind === 1 || field.key === 'messages') { chat.messages = lengthOnlyPlaceholder(messageCount); placed = true; continue }
+      if (field.key === 'timeline' && field.value_json === null && usesTimelineNodes(db)) {
+        // P2-a：子行形态（占位 NULL）→ 从子行表组装（按连接的行级缓存；失效见 invalidateTimelineRows）
+        const timeline = readTimelineTree(db, timelineRowCacheFor(db)).value
+        if (timeline !== undefined) chat.timeline = timeline
+        continue
+      }
+      if (field.value_json === null) continue        // 与 v2 一致：值 undefined 的键在重建时被略过
+      chat[field.key] = JSON.parse(field.value_json)
+    }
+    if (!placed) chat.messages = lengthOnlyPlaceholder(messageCount)
+    chat[STORAGE_REVISION] = Number(headRow.revision)
+    trimTimelineRows()
+    return { chat, revision: Number(headRow.revision), messageCount }
+  }
+  /** 按 fields 投影窄头部，并把 messages 占位键放回原有 ord 位置（writeChat 按 Object.keys 定 ord）。 */
+  function narrowProjectChat(chat, fields) {
+    const head = projectHead(chat, fields)
+    const projected = {}
+    for (const key of Object.keys(chat)) {
+      if (key === 'messages') projected.messages = []
+      else if (Object.hasOwn(head, key)) projected[key] = head[key]
+    }
+    return projected
+  }
+  function narrowHeader(chatId, db, fields) {
+    const rows = narrowHeaderRows(chatId, db)
+    return rows === null ? null
+      : { chat: copyJsonTree(narrowProjectChat(rows.chat, fields)), messageCount: rows.messageCount, denseMessages: narrowDense(db, rows.revision) }
+  }
   async function readSlice(chatId, indices = [], fields) {
-    const state = await cachedState(chatId)
+    // 第一刀：indices 为空、非 legacy 且库已存在时走窄头部读口，不整档 assemble、不进读缓存。
+    // 其余情况（非空 indices、legacy 原档、缺库/dispose）一行不改，仍走 cachedState 全量路径。
+    if (indices.length === 0 && !hasLegacyArtifact(chatId)) {
+      const db = handle(chatId, { create: false })
+      if (db) {
+        const narrow = readSqlSnapshot(db, () => narrowHeader(chatId, db, fields))
+        if (narrow !== null) return narrow
+      }
+    }
+    const state = await cachedState(chatId, 'readSlice')
     return state && !indices.some(i => i >= (state.chat.messages?.length || 0))
       ? slice(state.chat, indices, fields, null, batchHydratorFor(chatId, state))
       : undefined
   }
   function rememberChanges(previous, revision, changes) {
+    // 帧链必须与本次写的 baseRevision 首尾相接；不相接（冷读重载/外部提交/跳 revision）
+    // 说明内存里没有可衔接的证据，从头记，避免把断裂的旧帧一直 concat 造成永久断裂。
+    const chain = Array.isArray(previous) && previous.length && previous[previous.length - 1].revision === revision - 1 ? previous : []
     const indices = new Set()
     let tail = Infinity, layoutChanged = false, layoutFrom = Infinity
     let headerFields = new Set(), runtimeInputKeys = new Set()
@@ -1168,7 +1374,7 @@ export function createChatSqliteStore(options = {}) {
       else tail = Math.min(tail, change.op === 'splice' ? change.index : 0)
     }
     const bounded = set => set && set.size <= 4096 ? [...set] : null
-    const frames = previous.concat({ baseRevision: revision - 1, revision, indices: [...indices], tail, layoutChanged, layoutFrom,
+    const frames = chain.concat({ baseRevision: revision - 1, revision, indices: [...indices], tail, layoutChanged, layoutFrom,
       headerFields: bounded(headerFields), runtimeInputKeys: bounded(runtimeInputKeys) })
     if (frames.length <= 32) return frames
     const [first, second, ...rest] = frames
@@ -1205,20 +1411,20 @@ export function createChatSqliteStore(options = {}) {
   async function readChangedIndices(chatId, revision, options = {}) {
     const limit = options?.limit
     if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 0)) throw new Error('Invalid change coverage limit')
-    const state = await cachedState(chatId)
+    const state = await cachedState(chatId, 'readChangedIndices')
     // limit是追溯revision跨度，不截断索引；内存证据不足仍由changedIndices明确返回undefined。
     if (limit !== undefined && state && state.revision - revision > limit) return undefined
     return changedIndices(chatId, state, revision)
   }
   async function readChangedSlice(chatId, revision, fields) {
-    const state = await cachedState(chatId)
+    const state = await cachedState(chatId, 'readChangedSlice')
     if (revision === state?.revision) return undefined
     const changed = changedIndices(chatId, state, revision)
     return changed ? { ...slice(state.chat, changed.indices, fields, null, batchHydratorFor(chatId, state)), ...changed,
       ...changeEvidence(chatId, state, revision) } : undefined
   }
   async function readViewDelta(chatId, revision) {
-    const state = await cachedState(chatId)
+    const state = await cachedState(chatId, 'readViewDelta')
     const changed = changedIndices(chatId, state, revision)
     if (!changed || revision === state.revision
       || Object.values(state.chat.timeline?.operations || {}).some(op => op?.kind === 'body' && op.status === 'foreground-completed')
@@ -1447,9 +1653,44 @@ export function createChatSqliteStore(options = {}) {
       const source = dbReadSource(id)
       if (source !== null) return source
     }
-    const state = await cachedState(id)
+    const state = await cachedState(id, 'openReadSource')
     return state === null ? null : memoryReadSource(state)
   }
+
+  // 最新酒馆诊断接口：原档保持行内只读；DB档外置诊断复用当前连接，不另开JSON/SQLite。
+  const displayRuntime = Object.freeze({
+    read(chatId, turn) {
+      assertActive()
+      const id = safeChatId(chatId)
+      if (hasLegacyArtifact(id) || !existsSync(dbFile(id))) return undefined
+      return readDisplayRuntime(handle(id), turn)
+    },
+    recent(chatId) {
+      assertActive()
+      const id = safeChatId(chatId)
+      if (hasLegacyArtifact(id) || !existsSync(dbFile(id))) return {}
+      return recentDisplayRuntime(handle(id))
+    },
+    mergeFrame(chatId, turn, frame, options) {
+      assertActive()
+      const id = safeChatId(chatId)
+      return serialize(id, () => {
+        assertWritableChat(id)
+        if (hasLegacyArtifact(id) || !existsSync(dbFile(id))) throw Error('iframe诊断只接当前DB档，不写原件或创建影子')
+        return mergeDisplayFrame(handle(id), id, turn, frame, options, assertWritableChat)
+      })
+    },
+    remove(chatId) {
+      assertActive()
+      const id = safeChatId(chatId)
+      return serialize(id, () => {
+        // 删档时本库通常已经移除，不得为了清诊断重新建库。
+        if (hasLegacyArtifact(id) || !existsSync(dbFile(id))) return
+        assertWritableChat(id)
+        handle(id).prepare('DELETE FROM archive_display_frames').run()
+      })
+    },
+  })
 
   /** S1：复用本 store 的连接；原件不触碰同 ID SQL 影子，不物化完整 Chat。 */
   function readActivitySummary({ chatId, sessionId, revision } = {}) {
@@ -1788,7 +2029,7 @@ export function createChatSqliteStore(options = {}) {
     if (!Number.isSafeInteger(target) || target < 0) throw new Error('Chat storage revision 不合法: ' + String(revision))
     // 行级存储（彻底清理语义）：仅保留当前态，不保留历史版本——被回退/被修改的旧版本不可重建。
     // 当前态请求（revision == 现行 revision）照常返回。
-    const state = await materialize(chatId, target)
+    const state = await materialize(chatId, target, 'readRevision')
     if (state === null) return undefined
     const chat = copyJsonTree(state.chat)
     if (state.legacy !== true) variables.hydrateChat(handle(chatId), chatId, chat)
@@ -1819,7 +2060,7 @@ export function createChatSqliteStore(options = {}) {
     await serialize(chatId, async function () {
       assertActive()
       assertWritableChat(chatId)
-      const state = await cachedState(chatId)
+      const state = await cachedState(chatId, 'remove')
       assertWritableChat(chatId, state)
       const id = safeChatId(chatId)
       forgetState(chatId)
@@ -1840,6 +2081,15 @@ export function createChatSqliteStore(options = {}) {
 
   // 发送接受的同步前像：与普通写口共享连接/行协议/失效路径；不等请求组装。
   // 同步事务没有await，旧异步updater提交前还必须核SQL revision，防止覆盖新前像。
+  // 第三刀：本函数不整档 assemble。已核实它需要的 messages 只有“楼数”这一事实——
+  //   · captureRollbackBusinessState 只读 chat.messages.length（rollback-business-state.js:59）；
+  //   · assertRollbackChatWritable / assertSendAfterCleanup 零 messages 依赖；
+  //   · 遍历 timeline.operations、beforeParticipants 属于头部，窄读口按 ORDER BY ord 全键带出。
+  // 因此改走窄头部读口（含 timeline 子行 + 楼数）+ writeChat 头部-only 模式；messages 占位
+  // 长度诚实但零正文（见 lengthOnlyPlaceholder）。保留项一个都没动：身份/timeline 护栏、
+  // 回退静止屏障、发送后清理断言、回退前像逐字段（尤其 messageCount）、写后楼数自检、
+  // 补偿闭包的 revision CAS；另加“补偿期间楼数不得变化”的显式拒绝（长度诚实才可判）。
+  // rememberState 按第一刀硬约束去掉：读缓存存完整档，存窄对象会让后续 read() 读到空洞。
   function captureSend(chatId, input) {
     assertActive(); assertWritableChat(chatId)
     const db=handle(chatId)
@@ -1848,7 +2098,8 @@ export function createChatSqliteStore(options = {}) {
     let committed=false, written, captureBefore
     try {
       observeExternalCommit(chatId,db)
-      const state=assemble(db),chat=state?.chat
+      // 已在 BEGIN IMMEDIATE 内：readSqlSnapshot 直接执行，不开嵌套读事务。
+      const state=readSqlSnapshot(db,()=>narrowHeaderRows(chatId,db)),chat=state?.chat
       if(!chat || chat.id!==chatId || chat.sessionId!==input.sessionId)throw new Error('发送前像档/会话身份不一致')
       assertRollbackChatWritable(chat,{source:'foreground.send-accepted'})
       if(rollbackSchedulingBarrier.has(input.sessionId))throw new Error('物理回退静止期间禁止接受新发送')
@@ -1875,26 +2126,31 @@ export function createChatSqliteStore(options = {}) {
         delete op.inputPending
       }
       next._storageRevision=state.revision+1
-      written=writeChat(db,chatId,next,next._storageRevision,now(),diffJson(chat,next),{inTransaction:true})
+      // 头部-only 模式：不写任何楼层行、不下写前 COUNT、不登记 density；楼数自检按窄读口量得的
+      // 真实楼数核对（不是跳过自检换速度）。messageCount 必须显式给，headOnly 下不接受 undefined。
+      written=writeChat(db,chatId,next,next._storageRevision,now(),diffJson(chat,next),
+        {inTransaction:true,headOnly:true,messageCount:state.messageCount})
       db.exec('COMMIT');committed=true
     } finally { if(!committed)db.exec('ROLLBACK') }
     if(written) {
       bumpGeneration(chatId); projectionReads.invalidate(chatId,written.touched);forgetState(chatId)
-      rememberState(chatId,generationStamp(chatId),{chat:written.chat,revision:written.touched.revision,legacy:false,frameCount:0,frameBytes:0})
       const capturedRevision=written.touched.revision
       return ()=>{
         // 仅补偿同一同步append被拒；revision CAS确保不覆盖任何后续写入。
         db.exec('BEGIN IMMEDIATE')
         let done=false,reverted
         try {
-          const current=assemble(db)
-          if(current?.revision!==capturedRevision)throw new Error('发送前像补偿版本已变化，拒绝覆盖后续提交')
+          // 第三刀：补偿与主路径同源窄化（不许只窄化一个）。revision CAS 一字不减；
+          // 楼数诚实占位额外提供显式护栏：前像期间的楼数与补偿时不一致 ⇒ 拒绝覆盖。
+          const current=readSqlSnapshot(db,()=>narrowHeaderRows(chatId,db))
+          if(current===null || current.revision!==capturedRevision)throw new Error('发送前像补偿版本已变化，拒绝覆盖后续提交')
+          if(current.messageCount!==captureBefore.messages.length)throw new Error('发送前像补偿楼层数已变化，拒绝覆盖后续提交')
           const restored={...captureBefore,_storageRevision:capturedRevision+1}
-          reverted=writeChat(db,chatId,restored,restored._storageRevision,now(),diffJson(current.chat,restored),{inTransaction:true})
+          reverted=writeChat(db,chatId,restored,restored._storageRevision,now(),diffJson(current.chat,restored),
+            {inTransaction:true,headOnly:true,messageCount:current.messageCount})
           db.exec('COMMIT');done=true
         } finally {if(!done)db.exec('ROLLBACK')}
         bumpGeneration(chatId);projectionReads.invalidate(chatId,reverted.touched);forgetState(chatId)
-        rememberState(chatId,generationStamp(chatId),{chat:reverted.chat,revision:reverted.touched.revision,legacy:false,frameCount:0,frameBytes:0})
       }
     }
   }
@@ -1909,6 +2165,7 @@ export function createChatSqliteStore(options = {}) {
   function dispose() {
     if (disposed) return
     disposed = true
+    assembleProbe.dispose()
     unregisterSendCapture()
     for (const db of open.values()) {
       try { db.close() } catch { /* 可能已关 */ }
@@ -1919,6 +2176,7 @@ export function createChatSqliteStore(options = {}) {
     timelineRowBytes = 0
     projectionReads.dispose()
     readCache.clear()
+    changeFrames.clear()
     pendingReads.clear()
     generations.clear()
     mutationTails.clear()
@@ -1926,5 +2184,7 @@ export function createChatSqliteStore(options = {}) {
     variables.dispose()
   }
 
-  return Object.freeze({ dbSaveArchivePath, dbSaveNewArchivePath, rollbackArchivePath: dbFile, detachedUpdate: true, readCurrentRollbackWorldbookRef, readRollbackWorldbook, readRollbackOperationSnapshot, readCurrentVariableSnapshot, read, readWindow, readOpeningWindow, readActivitySummary, readStoryInput, readCandidateInput, readSettlementInput, readTemplateWindowReader, setStatusBarPlacement, appendMessages, setMessageFloor, readHelperContext, readSessionState, readSceneImageState, readSettlementCheckpoint, readBackgroundConfig, readDisplayRuntimeState, readSlice, readSettlementBase, readChangedSlice, readChangedIndices, readViewDelta, patch, readRevision, update, version, remove, variables: variablesApi, dispose })
+  const api = Object.freeze({ displayRuntime, dbSaveArchivePath, dbSaveNewArchivePath, rollbackArchivePath: dbFile, detachedUpdate: true, readCurrentRollbackWorldbookRef, readRollbackWorldbook, readRollbackOperationSnapshot, readCurrentVariableSnapshot, read, readWindow, readOpeningWindow, readActivitySummary, readStoryInput, readCandidateInput, readSettlementInput, readTemplateWindowReader, setStatusBarPlacement, appendMessages, setMessageFloor, readHelperContext, readSessionState, readSceneImageState, readSettlementCheckpoint, readBackgroundConfig, readDisplayRuntimeState, readSlice, readSettlementBase, readChangedSlice, readChangedIndices, readViewDelta, patch, readRevision, update, version, remove, variables: variablesApi, dispose })
+  bindAssembleProbe(api, assembleProbe)
+  return api
 }

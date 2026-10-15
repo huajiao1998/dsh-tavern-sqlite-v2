@@ -37,8 +37,7 @@ test('标准目录核心：同一解析器保数据库读写回退结算实现�
     ['clean-rollback', 'lib/clean-rollback.js', 'cleanRollback'],
     ['rollback-cleanup', 'lib/rollback-cleanup.js', 'cleanupAfterRollback'],
     ['rollback-barrier', 'lib/rollback-barrier.js', 'rollbackBarrier'],
-    ['server-execution', 'lib/server-execution.js', 'createServerExecution'],
-    ['server-dependencies', 'lib/server-dependencies.js', 'serverLodash'],
+    ['upstream-compute', 'lib/upstream-compute.js', 'authorizeUpstreamCall'],
     ['current-variables', 'lib/current-variables.js', 'createCurrentVariableReader'],
   ]) {
     const via = await resolver.storagePackage(subpath), direct = await import(pathToFileURL(path.join(f.packageDir, rel)).href)
@@ -157,7 +156,7 @@ test('标准持久区块：正常启动退出只验不写，缺缝拒绝启动',
   assert.equal(created, 1); assert.equal(writes, 0, '缺缝不能在启动时重新安装')
 })
 
-test('标准目录结算：迁后解析直达真实MVU核心且事务草稿写回', async t => {
+test('标准目录计算策略：迁后解析直达上游身份策略且浏览器不获计算视图', async t => {
   const f = fixture(t)
   const assembly = createStandardInstallation({ op: f, adapter: { packageName: name }, packageRoot: product, evidence: f.evidence })
   await assembly.preflight('install'); await assembly.manage('install')
@@ -167,43 +166,21 @@ test('标准目录结算：迁后解析直达真实MVU核心且事务草稿写�
   write(path.join(domain, 'storage-package.js'), STORAGE_PACKAGE_RESOLVER)
   const resolver = await import(pathToFileURL(path.join(domain, 'storage-package.js')).href)
 
-  // 迁后解析拿真结算实现；**不传 executeCommand** ⇒ 必须落到本包真核心 ./mvu/mvu-update-core.js
-  const { createServerExecution } = await resolver.storagePackage('server-execution')
-  assert.equal(typeof createServerExecution, 'function')
-  const hostCalls = []
-  const execution = createServerExecution({
-    project: scripts => ({ scripts: Array.isArray(scripts) ? scripts : [] }),
-    readCardExtensions: async () => ({ helperScripts: [] }),
-    hasScripts: async () => false,
-    createRuntime: () => ({ events: [], errors: [], dispatchEvent: () => ({ ok: true, results: [] }), dispose() {} }),
-    host: {
-      updateVariables: async (...args) => { hostCalls.push(args); return { updated: true, target: { type: 'message' } } },
-      updateMessages: async () => ({ updated: true }), createMessages: async () => ({ updated: true }),
-    },
+  // 上游身份策略是唯一计算入口：伪 server 前缀不得 claim，计算写必须处于当前父进程记录内。
+  const { authorizeUpstreamCall, pageView, upstreamRequest, runUpstreamRequest } = await resolver.storagePackage('upstream-compute')
+  const id = 'standard-fixture-session'
+  assert.deepEqual(authorizeUpstreamCall('claimTavernScriptWork', { sessionId: id, runtimeId: 'server-forged', ready: true }, () => {}), { active: false, ready: false, event: null, serverOwned: true })
+  assert.throws(() => authorizeUpstreamCall('updateTavernHelperVariables', { sessionId: id }, () => {}), /只允许/)
+  const view = pageView({ view: { tavernHelperScripts: [{ id: 'card' }], tavernMvuRuntime: { owner: 'official' } } }, id).view
+  assert.deepEqual(view.tavernHelperScripts, [])
+  assert.equal(view.tavernMvuRuntime, null)
+  let current = true
+  const record = { sessionId: id, isCurrent: () => current }
+  await runUpstreamRequest(record, async () => {
+    assert.equal(upstreamRequest(id), record)
+    assert.equal(authorizeUpstreamCall('updateTavernHelperVariables', { sessionId: id }, () => {}), null)
+    current = false
+    assert.throws(() => authorizeUpstreamCall('completeTavernHelperEvent', { sessionId: id }, () => {}), /只允许/)
   })
-
-  const baseline = { stat_data: { hp: 1 } }
-  const draft = {
-    id: 'iso-chat', sessionId: 'iso-session', cardPath: 'fixture', mvu: { enabled: true },
-    messages: [
-      { role: 'user', content: 'story' },
-      { role: 'assistant', content: 'reply', variables: [{ stat_data: { hp: 1 } }] },
-    ],
-  }
-  const result = await execution.executeMvuUpdate({
-    sessionId: 'iso-session', draft, transaction: { eventId: 'mvu-work:isolated', draft },
-    messageId: 1, swipeId: 0,
-    commandText: 'story\n\n<json_patch>[{"op":"replace","path":"/hp","value":2}]</json_patch>',
-    baselineVariables: baseline,
-  })
-  assert.equal(result.handled, true, '结算必须被服务端接住：' + JSON.stringify(result))
-  assert.equal(result.mode, 'server-compute', '必须走 server-compute 半边')
-  assert.equal(draft.messages[1].variables[0].stat_data.hp, 2, '真核心必须把 /hp 写成 2（不是 stub 假成功）')
-  // 事务草稿写回是**核心直接写 draft 的变量引用**，不经 Host 外层写、也不提交数据库（host.updateVariables 只服务卡脚本 host API）
-  assert.equal(result.variables?.stat_data?.hp, 2, 'return 的变量树必须已写入 hp=2：' + JSON.stringify(result.variables))
-  assert.equal(hostCalls.length, 0, '不得越事务另调 Host 外层写（避免二次结算）')
-  assert.equal(baseline.stat_data.hp, 1, '原 before 树必须脱离且保持 hp=1')
-  assert.notEqual(result.variables, baseline, '写回必须是脱离的新树，不是原 before 引用')
-  assert.notEqual(draft.messages[1].variables[0], baseline, '草稿变量同样不得是原 before 引用')
-  execution.disposeAll()
+  assert.equal(upstreamRequest(id), null)
 })

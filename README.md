@@ -31,7 +31,9 @@
 
 ## 一键安装
 
-**当前版本 0.4.11：适配酒馆上游 main `537e878`（Tavern 2.6.0，运行时 revision `8296b5b1` / sequence599；兼容 0.4.9 基线 `91963734` 安装）。** 本版新增**最新一次发送的统一撤销**：不论该次发送成功、报错、被中断或只留下部分产物，都由你主动回退到发送前状态。 目标适配版本以对应 [Releases 更新说明](https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases)为准；其他未适配版本可能运行报错，请更新到标注的酒馆版本或自行适配插件。安装检查通过不代表运行期功能兼容。
+**已发布版本 0.4.12：适配酒馆上游 main `537e878`（Tavern 2.6.0，运行时 revision `8296b5b1` / sequence599；兼容 0.4.9 基线 `91963734` 安装）。** 支持**最新一次发送的统一撤销**：不论该次发送成功、报错、被中断或只留下部分产物，都由你主动回退到发送前状态。 目标适配版本以对应 [Releases 更新说明](https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases)为准；其他未适配版本可能运行报错，请更新到标注的酒馆版本或自行适配插件。安装检查通过不代表运行期功能兼容。
+
+**未发布源码改动**：已同步PR17跨档缓存隔离，并对上游main `65401c0`（2.6.0 / sequence602）完成新增诊断SQL路径与接缝定向验证。完整iframe采集不再进入存档历史，诊断按面板落在本档SQL，回退/换正文清残；回退入口统一在**更多 → 回退第N轮**，输入区不再显示最新发送/撤销条。未发布、未部署，未做该代真实页面验收，不代表当前Release附件已有这些改动。
 
 已有兼容酒馆即可使用，**主命令无需填写版本或目录**。
 
@@ -91,8 +93,8 @@ Windows 使用新包菜单的卸载/更新功能。**卸载保留原档与 SQLit
 - UI 脚本仍保留浏览器职责；不承诺所有 DOM 脚本、所有卡或所有 SillyTavern API 都兼容。
 - 这是对作者存储与执行链的修改版，升级作者程序需要核适配；未知布局不无条件覆盖。
 - 自动化、源码检查与基础健康不替代现场页面、连续回退或 Linux 实机全链验收。
-- **卡脚本执行不是安全沙箱**：服务端 MVU / 卡脚本在 Node `node:vm` 上下文内执行（Linux / macOS / Windows CLI 走本进程内路径；Windows 桌面版因打包宿主缺少进程内 vm ESM 能力而改由 Worker 承载，见 `lib/mvu/vm-capability.js`）。vm 只提供超时、钩子预算与调用窗口校验等“跑飞防护”（`lib/sandbox-policy.js`），**不构成对不可信代码的安全隔离**：realm 逃逸属已知路径（按已知路径收口，不宣称完全阻断）；脚本可见的宿主能力已收为显式 bridge，不再直接暴露裸宿主对象引用，但仍与宿主同进程、同用户权限。请只运行你信任的人物卡与脚本。
-- 公开导出（`package.json` 的 `exports`，56 项）的兼容与退役策略见 [PUBLIC-API-COMPATIBILITY.md](PUBLIC-API-COMPATIBILITY.md)：默认保留、标注 deprecated 只做注记不改运行时行为、移除需大版本与外部证据；**例外**是为安全或宿主兼容保留的垫片（仅针对已确认缺陷保留合同面，不删除导出）。旧保留 API 已有本地定向验证，但**无跨仓消费者证据**，因此不据此删除任何导出。
+- **计算唯一由上游服务端运行时执行，客户端不参与**：本包不再自带 MVU / 卡脚本 / Helper / VM 实现，也不保留旧引擎或浏览器回落分支。卡脚本在上游 `server-script-worker` 的 jsdom 子进程内运行，其结果经上游 Host 事务草稿与 effect/CAS 落我方 SQLite；服务端不可用时任务保留并明确失败/等待，不转交页面、不切旧引擎。因此本包**不宣称也不提供**对不可信代码的安全隔离——jsdom 与 Node 子进程仍与宿主同机同用户权限，请只运行你信任的人物卡与脚本。
+- 公开导出（`package.json` 的 `exports`，46 项）的兼容与退役策略见 [PUBLIC-API-COMPATIBILITY.md](PUBLIC-API-COMPATIBILITY.md)：默认保留、标注 deprecated 只做注记不改运行时行为；**例外**是计算重构按用户明确授权彻底删除的自有计算导出（`./sandbox-policy`、`./mvu-card-runtime`、`./mvu-script-sandbox`、`./mvu-update-core`、`./card-script-dispatch-store`、`./server-execution`、`./server-dependencies`、`./opening-server-init`、`./esm-module-loader`、`./tavern-helper-api`、`./tavern-regex-api`），不留垫片、不留兼容分支。
 
 ## 源码与构建
 

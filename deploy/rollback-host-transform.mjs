@@ -18,6 +18,11 @@ export function applyRollbackHostTransform(source){
     cleanupRollbackSides: (chat, turn) => worldbookRecallLog.pruneRollback(chat, turn, chat.timeline.branchId),
     isFailureCleanupIdle: chat => !chat.regenInProgress && agentRegistry.get(chat.sessionId)?.phase?.kind !== 'running' && !foregroundHandoff.isBusy(chat.sessionId) && !settlementJobs.isBusy(chat.id) && !Object.values(chat.timeline?.participants || {}).some(p => agentRegistry.get(p.sessionId)?.phase?.kind === 'running'),
     quiesceRollback: async chat => {
+      // 先撤销上游worker身份/派发租约，再join父进程已受理请求。
+      serverScripts?.stop(chat.sessionId)
+      helperGenerationTasks?.stopAll(chat.sessionId)
+      await serverScripts?.whenIdle(chat.sessionId)
+      await helperGenerationTasks.whenIdle(chat.sessionId)
       await foregroundHandoff.whenIdle(chat.sessionId)
       await cancelSettlement(chat.id, { wait: true })
       const timer = compactionTimers.get(chat.sessionId)

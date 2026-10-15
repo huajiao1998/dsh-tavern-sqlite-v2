@@ -341,13 +341,11 @@ test('自有UI：页头入口按固定 order 注册且只在用户点击后走 p
   const header = h.found('conversation.session.header.utilities')
   const dock = h.found('conversation.input.dock')
   assert.ok(header, '必须注册页头 utility')
-  assert.ok(dock, '必须注册输入区 dock')
+  assert.equal(dock, undefined, '撤销入口不得再注册输入区dock')
   assert.equal(header.definition.id, 'dsh-tavern-sqlite-v2:save')
   assert.equal(header.definition.order, 70)
   assert.equal(header.definition.label, '数据库存档')
-  assert.equal(dock.definition.id, 'dsh-tavern-sqlite-v2:failure-clean')
-  assert.equal(dock.definition.order, 20, 'dock 入口必须排在作者 toolbars 之后')
-  assert.match(source, /name: 'conversation\.input\.dock'/)
+  assert.doesNotMatch(source, /name: 'conversation\.input\.dock'/)
 
   // 页头按钮：始终可见，未点击前不得发生任何存档/fork 行为。
   const mounted = mountHeader(h, header, { sessionId: 'session-child' })
@@ -398,33 +396,10 @@ test('自有UI：页头入口按固定 order 注册且只在用户点击后走 p
   assert.deepEqual(h2.trace.filter(item => item.kind === 'fork'), [], '数据库态不得自动 fork')
 })
 
-test('自有UI：dock 失败条只随 canonical failureTarget 显隐，清理走共享服务且守卫完整', async () => {
+test('自有UI：退役dock后共享清理服务保留目标及回执守卫', async () => {
   const h = harness()
-  const dock = h.found('conversation.input.dock')
-  const props = { sessionId: 'session-child', useSession: () => false }
-
-  // 正常态：无 failureTarget ⇒ 返回 null（不占位），但仍订阅作者同一 select handle。
-  assert.equal(renderInto(h, dock, props), null, '正常态不得占位')
-  assert.equal(h.live.listeners > 0, true, '组件必须订阅作者同一 select handle')
-  assert.deepEqual(h.bridgeCalls.filter(call => call.kind === 'request'), [], '拿 handle 不得发起任何清理请求（select 只读合法）')
-
-  // 失败态：显示轮号与原因 + 清理按钮。
-  h.live.setView({ failureTarget: failureTarget(42), failureCleanupReason: 'provider 失败', activity: null })
-  const tree = renderInto(h, dock, props)
-  assert.ok(tree, '失败态必须出现提示条')
-  assert.match(textOf(tree), /最新发送：第 42 轮/)
-  assert.match(textOf(tree), /provider 失败/)
-  assert.ok(buttons(tree).some(button => textOf(button).includes('撤销最新发送')), '必须有撤销按钮')
-
-  // 统一目标（kind:'rollback'，非失败）：完成/在途同样走中性标签与撤销按钮，不得被标成失败。
-  h.live.setView({ rollbackTarget: { kind: 'rollback', turn: 42, chatId: 'chat-child', sessionId: 'session-child', branchId: 'branch-child', revision: 7 }, failureTarget: null, failureCleanupReason: '', activity: { busy: true, phase: 'running' } })
-  const unified = renderInto(h, dock, props)
-  assert.ok(unified, '统一目标在途（activity.busy）也必须出现提示条（不再隐藏运行态）')
-  assert.match(textOf(unified), /最新发送：第 42 轮/)
-  assert.ok(buttons(unified).some(button => textOf(button).includes('撤销最新发送')), '在途统一目标必须可点撤销')
-  assert.equal(buttons(unified).some(button => textOf(button).includes('撤销最新发送') && button.props.disabled === true), false, '在途统一目标不得禁用撤销按钮（执行端负责 cancel/quiesce）')
-  assert.doesNotMatch(textOf(unified), /失败轮/, '统一目标不得被标成失败轮')
-  // 复位视图：后续小节（过期目标 / 双击 / alreadyClean / 回执身份 / 缺桥 / 卸载）依赖原"失败态"视图。
+  assert.equal(h.found('conversation.input.dock'), undefined, '正常/失败/活动状态均不应注册常驻条')
+  assert.deepEqual(h.bridgeCalls.filter(call => call.kind === 'request'), [], '注册服务不能发清理请求')
   h.live.setView({ failureTarget: failureTarget(42), failureCleanupReason: 'provider 失败', activity: null })
 
   // 过期目标（与当前视图不一致）⇒ 拒绝，且不得发 RPC。
@@ -434,15 +409,12 @@ test('自有UI：dock 失败条只随 canonical failureTarget 显隐，清理走
   await assert.rejects(() => ui.cleanFailure('session-child', 42, { ...failureTarget(42), revision: 8 }), /清理目标已过期/)
   assert.deepEqual(h.bridgeCalls.filter(call => call.kind === 'request'), [], '过期目标不得发起清理请求（先 select 只读是合法的）')
 
-  // 双击：第二次点击必须被 inFlight 挡住（只清一次）。
+  // 菜单互斥另由真实菜单叶覆盖；共享服务仍只按本次明确目标调用，不自动清下一轮。
   let requests = 0
   const baseRequest = h.bridge.request
   h.bridge.request = async (method, args, sessionId) => { requests += 1; return baseRequest.call(h.bridge, method, args, sessionId) }
-  const cleanButton = buttons(renderInto(h, dock, props)).find(button => textOf(button).includes('撤销最新发送'))
-  const first = cleanButton.props.onClick()
-  const second = cleanButton.props.onClick()
-  await Promise.all([first, second])
-  assert.equal(requests, 1, '双击只允许一次清理请求')
+  await ui.cleanFailure('session-child', 42, failureTarget(42))
+  assert.equal(requests, 1, '共享服务只发本次清理请求')
   assert.deepEqual(h.trace.filter(item => item.kind === 'wait').map(item => item.receipt), ['sync-1'], 'normal 清理必须等同连接 sync')
   assert.equal(h.bridgeCalls.filter(call => call.kind === 'refresh').length, 1, 'normal 清理只 refresh 一次')
 
@@ -468,14 +440,13 @@ test('自有UI：dock 失败条只随 canonical failureTarget 显隐，清理走
 
   // 卸载：slots 注册被撤销，且新 cleanup 被拒。
   h.close()
-  assert.deepEqual(h.registrations.filter(entry => entry.kind === 'register').map(entry => entry.disposed), [true, true])
+  assert.deepEqual(h.registrations.filter(entry => entry.kind === 'register').map(entry => entry.disposed), [true])
   await assert.rejects(() => ui.cleanFailure('session-child', 42, failureTarget(42)), /已经卸载/)
 })
 
 test('自有UI：连续失败目标与严格回执拒绝', async () => {
   const h = harness()
-  const dock = h.found('conversation.input.dock')
-  const props = { sessionId: 'session-child', useSession: () => false }
+  assert.equal(h.found('conversation.input.dock'), undefined)
   const ui = h.provided.get('tavernStorageUi')
   const native43 = nativeFailureTarget(43, 43, 44)
   const body42 = failureTarget(42)
@@ -495,9 +466,7 @@ test('自有UI：连续失败目标与严格回执拒绝', async () => {
 
   // ① native-only 43 成功：请求带 native 目标、回执同身份、wait 后 refresh；随后目标切到 body 42。
   h.live.setView({ failureTarget: native43, failureCleanupReason: null, activity: null })
-  let strip = renderInto(h, dock, props)
-  assert.match(textOf(strip), /最新发送：第 43 轮/)
-  assert.equal(strip === null, false, 'native 目标必须显示 strip')
+  assert.equal(ui.readFailureTarget(ui.selectFailure('session-child')).turn, 43, 'native目标仍供菜单共享服务消费')
   receipts.push({ receipt: native43, sync: 'sync-43', viewAfter: { failureTarget: body42, failureCleanupReason: 'provider 失败', activity: null } })
   const refreshesBeforeNative = refreshes.length
   await ui.cleanFailure('session-child', 43, native43)
@@ -507,15 +476,14 @@ test('自有UI：连续失败目标与严格回执拒绝', async () => {
   assert.deepEqual(h.trace.filter(item => item.kind === 'wait').map(item => item.receipt), ['sync-43'])
   assert.equal(refreshes.length, refreshesBeforeNative + 1, 'native 成功必须定向 refresh 一次')
 
-  // ② 下一目标 body 42 **不得自动清理**；strip 显示 42，再手动清一次。
-  strip = renderInto(h, dock, props)
-  assert.match(textOf(strip), /最新发送：第 42 轮/, '连续失败必须切到 42 且不自动清理')
+  // ② 下一目标body42不得自动清理；实时服务目标切到42，再由用户发起。
+  assert.equal(ui.readFailureTarget(ui.selectFailure('session-child')).turn, 42, '连续失败必须切到42且不自动清理')
   assert.equal(reqs.length, 1, '42 只能由用户点击触发，不自动')
   receipts.push({ receipt: body42, sync: 'sync-42', viewAfter: null })
   await ui.cleanFailure('session-child', 42, body42)
 
-  // ③ 目标清空 ⇒ strip 消失（不再占位）。
-  assert.equal(renderInto(h, dock, props), null, '无失败目标时 strip 必须消失')
+  // ③ 目标清空后共享服务不得虚构更早轮。
+  assert.equal(ui.readFailureTarget(ui.selectFailure('session-child')), null)
 
   // ④ 严格回执拒绝（逐项）：零新请求、零 refresh。
   const live = { failureTarget: body42, failureCleanupReason: 'x', activity: null }

@@ -114,7 +114,7 @@ test('不完整清理接线：标准装卸真实作者树导出运行器与实�
    for(const rel of ['tavern-plugin/lib/index.js','tavern-plugin/lib/domain/round-history.js','tavern-plugin/lib/domain/foreground-handoff.js','tavern-plugin/lib/domain/settlement-jobs.js','tavern-plugin/lib/domain/chat-session-state.js'])assert.equal(readFileSync(path.join(f.appDir,rel),'utf8'),f.original.get(rel))
  } finally {f.cleanup()}
 })
-test('不完整清理接线：共享UI真实控件活动时隐藏，目标坐标漂移零RPC',async()=>{
+test('不完整清理接线：菜单共享服务活动可清，目标坐标漂移零RPC',async()=>{
  const source=readFileSync(new URL('../client.js',import.meta.url),'utf8')
  let plugin,ui,snapshot={view:{failureTarget:inspect().target,activity:{phase:'idle',busy:false}}},requests=0,waited=0
  const handle={getSnapshot:()=>snapshot,subscribe:()=>()=>{}}
@@ -123,9 +123,8 @@ test('不完整清理接线：共享UI真实控件活动时隐藏，目标坐标
  vm.runInContext(source,context)
  const bridge={apiVersion:2,selectFailure:()=>handle,refresh:async()=>{},request:async(_method,args)=>{requests++;return {view:{rolledBack:{alreadyClean:true,cleanedFailureTarget:args.failureTarget}}}}}
  plugin.apply({sessions:{subagentAddress:()=>null,waitForTavernRollbackSync:async()=>{waited++}},get:name=>name==='tavernStorageView'?bridge:undefined,provide:(_key,value)=>{ui=value},effect:fn=>fn(),emit:()=>{},slots:{inject:(_name,fn)=>fn(),register:(meta,render)=>{regs.push({meta,render});return ()=>{}}}})
- const render=()=>{const wrapper=regs.find(reg=>reg.meta.id.endsWith(':failure-clean')).render({sessionId:'session-incomplete',useSession:fn=>fn({running:false})});return wrapper.type(wrapper.props)}
- assert.ok(render())
- for(const activity of [{phase:'pending',busy:false},{phase:'running',busy:true},{phase:'failed',busy:true}]){snapshot={view:{...snapshot.view,activity}};assert.ok(render());await ui.cleanFailure('session-incomplete',7,inspect().target)}
+ assert.equal(regs.some(reg=>reg.meta.id.endsWith(':failure-clean')),false,'不完整发送不能恢复输入区常驻条')
+ for(const activity of [{phase:'pending',busy:false},{phase:'running',busy:true},{phase:'failed',busy:true}]){snapshot={view:{...snapshot.view,activity}};assert.equal(ui.readFailureTarget(handle).turn,7);await ui.cleanFailure('session-incomplete',7,inspect().target)}
  requests=0;waited=0
  snapshot={view:{failureTarget:inspect().target,activity:{phase:'idle',busy:false}}}
  await assert.rejects(ui.cleanFailure('session-incomplete',7,{...inspect().target,incomplete:undefined}),/不一致/)
@@ -154,7 +153,7 @@ test('不完整清理接线：实际宿主闭包读取前台和后台运行器�
  assert.equal(applyLatestFailureHostTransform(source),source)
  const begin=source.indexOf('async function readFailureEvidence('),end=source.indexOf('\n  function sessionDebugEvidence(',begin)
  const agents=new Map(),front=new Set(),back=new Set()
- const context=vm.createContext({readFailureEvidenceFromQuery:async()=>evidenceOf(),sessionDebugEvidence:()=>({}),ctx:{get:()=>({})},sessionPatch:null,foldSurfaceForEvidence:()=>({nodes:[]}),agentRegistry:agents,foregroundHandoff:{isBusy:id=>front.has(id)},settlementJobs:{isBusy:id=>back.has(id)}})
+ const context=vm.createContext({readFailureEvidenceFromQuery:async()=>evidenceOf(),sessionDebugEvidence:()=>({}),ctx:{get:()=>({})},sessionPatch:null,foldSurfaceForEvidence:()=>({nodes:[]}),agentRegistry:agents,foregroundHandoff:{isBusy:id=>front.has(id)},settlementJobs:{isBusy:id=>back.has(id)},pluginTaskJobs:new Map()})
  vm.runInContext(source.slice(begin,end)+'\n globalThis.readEvidence=readFailureEvidence;',context)
  assert.equal((await context.readEvidence('s','c')).cleanupIdle,true)
  agents.set('s',{phase:{kind:'running'}});assert.equal((await context.readEvidence('s','c')).cleanupIdle,false);agents.clear()

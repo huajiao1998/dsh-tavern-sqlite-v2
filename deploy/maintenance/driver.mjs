@@ -15,13 +15,15 @@ import { AUTHOR_VERSION } from '../../lib/standard-host.js'
 import { createStandardInstallation } from './standard-installation.mjs'
 import { createLinuxDriver } from './linux-driver.mjs'
 const family = ['dsh-tavern-storage-sqlite', 'dsh-tavern-storage-sqlite-v1', 'dsh-tavern-storage-sqlite-v2', 'dsh-tavern-sqlite-v1', 'dsh-tavern-sqlite-v2']
-// 运行时依赖**必须为零**：四个解析器依赖（lodash/yaml/json5/jsonrepair）与注释块 lexer（acorn）已 vendor 进包内
+// 运行时依赖**必须为零**：安装器仍用 yaml（parseDocument/YAMLSeq）、注释接缝用 acorn lexer，已 vendor 进包内
 // （见 lib/vendor/VENDOR.md + manifest.json）。零依赖是"任何宿主都能离线安装"的前提：
-// 桌面版宿主的 pnpm 离线元数据缓存里没有 lodash/json5/jsonrepair，声明依赖会 ERR_PNPM_NO_OFFLINE_META。
-const VENDOR_ENTRIES = { lodash: 'lib/vendor/lodash/lodash.min.js', json5: 'lib/vendor/json5/index.mjs', jsonrepair: 'lib/vendor/jsonrepair/esm/index.js', yaml: 'lib/vendor/yaml/dist/index.js', acorn: 'lib/vendor/acorn/acorn.mjs' }
+// 桌面版宿主的 pnpm 离线元数据缓存里没有这些包，声明依赖会 ERR_PNPM_NO_OFFLINE_META。
+// 计算专用解析器（lodash/json5/jsonrepair）随自有 MVU 实现退役，不再作为安装门槛。
+const VENDOR_ENTRIES = { yaml: 'lib/vendor/yaml/dist/index.js', acorn: 'lib/vendor/acorn/acorn.mjs' }
 /**
  * 供应链护栏（安装前必过）：包只能有零运行时依赖，且 vendor 账本与全部入口文件必须齐全。
  * 任一不符即拒绝安装——不放宽依赖政策。acorn 为阶段③块机制 lexer，身份元数据见 manifest（本阶段不补 SHA）。
+ * 计算不再由本包执行（唯一上游服务端运行时），故 lodash/json5/jsonrepair 不再列入。
  */
 export function assertPackageDependencies(pkg, root) {
   const declared = Object.keys(pkg.dependencies || {})
@@ -324,8 +326,8 @@ function createStoppedDriver(op, adapter, packageRoot, evidence, budget, { mode,
     async prepareEnvironment() {
       if (windowsCli) throw Error('Windows CLI 不自动修改启动配置；请自行 dsh-tavern stop 后维护')
       // 桌面版没有 systemd 单元可改，也**不需要** --experimental-vm-modules：
-      // 缺 vm 时插件自己走 Worker 路径（execArgv 带旗标），故此处不做事、不假装成功。
-      return { changed: false, host, reason: '桌面版经 Worker 取得 vm 能力，无需环境预修' }
+      // 计算由上游 server-script-worker 自行 fork 带旗标的子进程，宿主启动命令不变。
+      return { changed: false, host, reason: '上游计算子进程自带 vm 能力，无需环境预修' }
     },
     async preflight(action, { residual: cleanResidual = false } = {}) {
       if (windowsCli && !op.check) await assertStopped()
@@ -363,10 +365,11 @@ function createStoppedDriver(op, adapter, packageRoot, evidence, budget, { mode,
       // `--check` 是只读预检，允许酒馆开着；真正写前的停止态断言在 assertIdentity/manage 里
       //（runner 在装包前还会再调一次 assertStopped）。这里只记录当前是否在跑，便于如实报告。
       const runningNow = running().length > 0
-      // 能力探针①：维护进程的 Node 必须能开 node:sqlite(STRICT) 与 zstd（不要求 vm，桌面版由 Worker 提供）。
+      // 能力探针①：维护进程的 Node 必须能开 node:sqlite(STRICT) 与 zstd（计算 vm 由上游子进程自带，不要求本进程）。
       const probe = "import {DatabaseSync} from 'node:sqlite';import {zstdDecompressSync} from 'node:zlib';const db=new DatabaseSync(':memory:');db.exec('CREATE TABLE probe(k INTEGER PRIMARY KEY) STRICT');db.close();if(typeof zstdDecompressSync!=='function')throw Error('缺少zstd')"
       await runPackage(process.execPath, ['--input-type=module', '-e', probe], { cwd: op.app, env, timeout: activeBudget.remaining(2500) })
-      // 能力探针②：**Worker 内**必须有 vm.SourceTextModule（这是桌面版跑服务端 ESM 卡脚本的唯一通路）。
+      // 能力探针②：宿主 Node 必须能在 **Worker 内**提供 vm.SourceTextModule —— 上游 server-script-worker
+      // 由 executor fork 时带 `--experimental-vm-modules`，这是服务端卡脚本运行的前提（不要求宿主启动命令带旗标）。
       // 注意 clearTimeout：不清理的话定时器会把探针进程多吊住 8 秒（每次安装白等）。
       const desktopWorkerProbe = "import {Worker} from 'node:worker_threads';const code=\"const vm=require('node:vm');const {parentPort}=require('node:worker_threads');parentPort.postMessage(typeof vm.SourceTextModule)\";const worker=new Worker(code,{eval:true,execArgv:['--experimental-vm-modules']});const seen=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Worker 探针超时')),8000);worker.once('message',message=>{clearTimeout(timer);resolve(message);worker.terminate()});worker.once('error',error=>{clearTimeout(timer);reject(error)})});if(seen!=='function')throw Error('Worker 内缺少 vm.SourceTextModule')"
       const workerProbe = windowsCli ? "import {Worker} from 'node:worker_threads';const code=\"const vm=require('node:vm');const {parentPort}=require('node:worker_threads');(async()=>{const m=new vm.SourceTextModule('export default 42');await m.link(()=>{});await m.evaluate();if(typeof vm.SyntheticModule!=='function')throw Error('缺少SyntheticModule');parentPort.postMessage(m.namespace.default)})().catch(e=>{throw e})\";const worker=new Worker(code,{eval:true,execArgv:['--experimental-vm-modules']});let timer;try{const seen=await new Promise((resolve,reject)=>{timer=setTimeout(()=>reject(Error('Worker探针超时')),4000);worker.once('message',resolve);worker.once('error',reject)});if(seen!==42)throw Error('Worker ESM核验失败')}finally{clearTimeout(timer);await worker.terminate()}" : desktopWorkerProbe

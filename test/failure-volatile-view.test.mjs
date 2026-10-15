@@ -72,12 +72,18 @@ test('易变清理链：真实SQL状态经缓存和脏投影保持7目标，静�
   // 首次正常可签；其后的实际caller必须补证据，不能被裸evidence默认值覆盖。
   const opening=stateView.rollback(full,{...evidence(),activity:idle})
   assert.ok(opening.failureTarget,JSON.stringify({reason:opening.failureCleanupReason,inspect:inspectNativeFailureTail(full,{...evidence(),activity:idle},full._storageRevision)}));assert.equal(opening.failureTarget.turn,7)
-  const hostContext=vm.createContext({sessionStateView:stateView,readFailureEvidence:async(sid,cid)=>{assert.equal(sid,full.sessionId);assert.equal(cid,full.id);proofs++;return evidence()},forkTurnsForChat:()=>({}),readChatCard:async()=>({}),requestPerformance:{stage:async(_name,fn)=>fn()},projectTavernHelperContext:async()=>({messages:[]}),inputFieldsProjection:{project:()=>({})},readLedger:()=>({}),manualLedger:{project:()=>({})},projectCharacterDesignDocument:()=>({}),manualCharacterDesign:{project:()=>({})}})
+  // latestTurnFields 是 2.7.0 作者树 index.js 自有的头部轮次助手（index.js:2042），projectDirtySessionView 会调它。
+  // 它另依赖 str/sessionStore/agentRegistry/assistantResultForTurn 一整条宿主链，而本叶不断言它的返回值
+  //（只断言 failureTarget/canRollback/proofs），故在闭包里给同形状 stub，不拖无关宿主链（换源 2.7.0 后修）。
+  const hostContext=vm.createContext({sessionStateView:stateView,readFailureEvidence:async(sid,cid)=>{assert.equal(sid,full.sessionId);assert.equal(cid,full.id);proofs++;return evidence()},forkTurnsForChat:()=>({}),readChatCard:async()=>({}),requestPerformance:{stage:async(_name,fn)=>fn()},projectTavernHelperContext:async()=>({messages:[]}),inputFieldsProjection:{project:()=>({})},readLedger:()=>({}),manualLedger:{project:()=>({})},projectCharacterDesignDocument:()=>({}),manualCharacterDesign:{project:()=>({})},latestTurnFields:()=>({debugTurns:[],latestAssistantTurn:0,latestAssistantMessageId:''})})
   // 抽真实caller，只stub剧情显示依赖；mode/card避开无关regex/脚本渲染，但正文/轮号完全同一份SQLstate。
   vm.runInContext(functions(host,['volatileSessionViewFields','projectCachedSessionView','projectDirtySessionView'])+'\nglobalThis.api={projectCachedSessionView,projectDirtySessionView};',hostContext)
   const reused=await hostContext.api.projectCachedSessionView(state,opening,idle)
   assert.equal(reused.failureTarget.turn,7);assert.equal(reused.canClearIncompleteReply,true);assert.equal(reused.rollbackTargetTurn,7)
-  const button=renderRealMenu(reused);assert.equal(button.props.disabled,false);assert.equal(button.children.join(''),'清除未完成回复');assert.equal(typeof button.props.onClick,'function')
+  // 文案跟随统一撤销接线（rollback-menu-transform）：clearIncomplete 时不再是独立的
+  // "清除未完成回复"，而是并入 targetLabel + "（未完成发送）"；该接缝的幂等校验自身
+  // 就要求产物含"（未完成发送）"，故此处按现行产品文案断言（2026-10-15 更新）。
+  const button=renderRealMenu(reused);assert.equal(button.props.disabled,false);assert.equal(button.children.join(''),'回退第 7 轮（未完成发送）');assert.equal(typeof button.props.onClick,'function')
   const dirty=await hostContext.api.projectDirtySessionView({...state,mode:'card'}, {...opening,tavernHelper:{messages:[]}},new Set([1]),idle,{layoutChanged:false})
   assert.equal(dirty.failureTarget.turn,7);assert.equal(dirty.canRollback,true);assert.equal(proofs,2)
   busy=true;assert.equal((await hostContext.api.projectCachedSessionView(state,opening,idle)).failureTarget.turn,7,'前台忙不再取消签出')

@@ -1,9 +1,9 @@
 // V2 浏览器界面脚本（browser-ui）的窗口寿命门禁转换。
 //
-// 为什么 V2 仍需要这一组：V2 是**服务端执行**线，但 server-execution 的分类器把 DOM/浏览器
-// façade 脚本判为 'browser-ui' —— 这类脚本**不在服务端执行**，命中即落 card-script-dispatch
-// 标记并在下次分派时交回浏览器（见 lib/server-execution.js L45/L121-143）。因此 V2 **确实**
-// 保留 browser-ui 的 iframe 脚本窗口；官方 MVU 计算核心不在该窗口运行。
+// 为什么 V2 仍需要这一组：计算唯一由上游服务端运行时执行，**不在浏览器运行**；
+// 但 DOM/浏览器 façade 脚本（browser-ui）仍由页面 iframe 承载，其生命周期与本组守卫
+// 属于显示层，不是计算兼容层。因此 V2 **确实**保留 browser-ui 的 iframe 脚本窗口；
+// 官方计算核心不在该窗口运行，本组也不承担任何计算回落。
 // 只要该窗口存在，「窗口已销毁后旧微任务仍回写 UI/flush」就是真实缺陷 → 本组转换对 V2 同样成立。
 //
 // client-seams 同时装入 built 和确切 source include 的 bootstrap/runtime。

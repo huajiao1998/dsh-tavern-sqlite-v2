@@ -4,7 +4,8 @@ import { transformStorageIndex } from './apply-seams.mjs'
 import { transformLegacyIndex, transformLegacyRegistry, transformLegacyInitialization, transformLegacyViewReader, LEGACY_VIEW_SHIM } from './apply-legacy-view-seams.mjs'
 const DOMAIN='tavern-plugin/lib/domain/'
 import { applyHostTransform, applyBudgetTransform, applyHelperCurrentTransform } from './core-host-transform.mjs'
-import { applyRuntimeTransform } from './core-runtime-transform.mjs'
+import { applyDisplayRuntimeTransform } from './display-runtime-transform.mjs'
+import { applyUpstreamExecutor, applyUpstreamWorker, applyUpstreamGenerationTasks } from './upstream-compute-transform.mjs'
 import { applyOpeningRuntimeTransform } from './opening-runtime-transform.mjs'
 import { applyRollbackTransform } from './core-rollback-transform.mjs'
 import { applyModelErrorTransform } from './model-error-transform.mjs'
@@ -12,7 +13,6 @@ import { applyCompactionWarningTransform } from './compaction-warning-transform.
 import { applyUpstreamFailureInputTransform, applyTemplateRollbackInputOrderTransform } from './upstream-failure-input-transform.mjs'
 import { applyDbSaveHostTransform, applyDbSaveFootprintTransform, applyDbSaveFootprintHostTransform } from './db-save-transform.mjs'
 import { applyRowHistoryTransform, applyRowTimelineTransform } from './row-rollback-transform.mjs'
-import { applySettlementRoundTransform } from './settlement-round-transform.mjs'
 import { applyRollbackBusinessTimelineTransform, applyRollbackBusinessTurnTransform } from './rollback-business-transform.mjs'
 import { applyRollbackWorldbookHistoryHostTransform } from './rollback-worldbook-history-transform.mjs'
 import { applyCleanRollbackTransform } from './clean-rollback-transform.mjs'
@@ -45,7 +45,6 @@ import { applyNativeMessageTransform, isNativeMessageApplied, applyNativeMessage
 import { applyForkRequestTransform } from './fork-request-transform.mjs'
 import { applyLatestFailureHostTransform, applyLatestFailureViewTransform } from './latest-failure-transform.mjs'
 import { applyActivityStateTransform } from './activity-state-transform.mjs'
-import { helperReadonlySource } from './helper-readonly-source.mjs'
 import { viewAssemblerSource } from './view-assembler-source.mjs'
 import { needsPluginTaskSeams, applyPluginTaskHostTransform, applyPluginTaskApiTransform } from './plugin-task-quiescence-transform.mjs'
 
@@ -73,6 +72,14 @@ function nativeDataCapable(source) {
   return Object.values(NATIVE_DATA_ANCHORS).every(anchor => typeof anchor === 'string' && source.split(anchor).length === 2)
 }
 const NATIVE_DATA_OPTIONS = { projectorImportPath: './domain/storage-native-data.js' }
+// 上游服务端计算的能力门控（与 core-host-transform.applyHostTransform 同一判据）：
+// createServerScriptExecutor 自作者树 2.7.0 引入，连同 priority/pageInFront/serverScripts
+// 这套分发机制。旧代没有它，upstream-compute 的 host 接缝与三个 executor/worker/tasks
+// 转换都无从施起（源文件本身也不存在），因此整组按能力跳过——这是向下适配，不是放宽准入。
+// 反向护栏不变：作者代有 executor 而锚点缺失/重复时，由各 transform 内部的 once() 响亮失败。
+function upstreamComputeCapable(indexSource) {
+  return indexSource.includes('createServerScriptExecutor')
+}
 
 export function buildCore(appDir, sourceFiles) {
   const text = (_root, rel) => { if (!sourceFiles.has(rel)) throw Error('缺少接入源码：'+rel); return sourceFiles.get(rel) }
@@ -88,7 +95,7 @@ export function buildCore(appDir, sourceFiles) {
     write.set('tavern-plugin/lib/index.js',applyPluginTaskHostTransform(write.get('tavern-plugin/lib/index.js')))
     write.set('tavern-plugin/lib/plugin-api.js',applyPluginTaskApiTransform(text(appDir,'tavern-plugin/lib/plugin-api.js')))
   }
-  write.set('tavern-plugin/lib/index.js', applyUpstreamFailureInputTransform(write.get('tavern-plugin/lib/index.js')))
+  write.set('tavern-plugin/lib/index.js', applyDisplayRuntimeTransform(applyUpstreamFailureInputTransform(write.get('tavern-plugin/lib/index.js'))))
   const saveHost = write.get('tavern-plugin/lib/index.js')
   if (saveHost.includes('  async function exportGameSave(') || saveHost.includes('// [dsh-tavern-db-save:v1]')) {
     write.set('tavern-plugin/lib/index.js', applyDbSaveFootprintHostTransform(applyDbSaveHostTransform(saveHost, { sceneSlots: sourceFiles.has('tavern-plugin/lib/domain/scene-slots.js') })))
@@ -108,12 +115,12 @@ export function buildCore(appDir, sourceFiles) {
   if(present('tavern-plugin/lib/hooks/request.js')&&indexSource.includes('registerRequestHooks'))write.set('tavern-plugin/lib/hooks/request.js',applyForkRequestTransform(text(appDir,'tavern-plugin/lib/hooks/request.js')))
   write.set('tavern-plugin/lib/background-agent-sessions.js', applyRollbackBackgroundLifetimeTransform(text(appDir, 'tavern-plugin/lib/background-agent-sessions.js')))
   write.set('tavern-plugin/lib/background-agent-task.js', applyBackgroundTaskRollbackTransform(text(appDir, 'tavern-plugin/lib/background-agent-task.js')))
-  write.set(DOMAIN + 'tavern-script-host-adapter.js', applyRollbackWorldbookAdapterTransform(applyRollbackCharacterAdapterTransform(applyRollbackGlobalAdapterTransform(applyHelperCurrentTransform(applyRuntimeTransform(text(appDir, DOMAIN + 'tavern-script-host-adapter.js')))))))
+  write.set(DOMAIN + 'tavern-script-host-adapter.js', applyRollbackWorldbookAdapterTransform(applyRollbackCharacterAdapterTransform(applyRollbackGlobalAdapterTransform(applyHelperCurrentTransform(text(appDir, DOMAIN + 'tavern-script-host-adapter.js'))))))
   write.set(DOMAIN + 'file-resources.js',applyRollbackWorldbookBindingsFileTransform(text(appDir,DOMAIN+'file-resources.js')))
   write.set(DOMAIN + 'worldbook-library.js',applyRollbackWorldbookLibraryTransform(text(appDir,DOMAIN+'worldbook-library.js')))
   if(present(DOMAIN+'card-summary-cache.js'))write.set(DOMAIN+'card-summary-cache.js',applyWorldbookSummaryCacheTransform(text(appDir,DOMAIN+'card-summary-cache.js')))
   write.set(DOMAIN + 'round-history.js', applyRegenerationAdoptionTransform(applyCleanRollbackTransform(applyRowHistoryTransform(applyRollbackTransform(text(appDir, DOMAIN + 'round-history.js')).text))))
-  write.set(DOMAIN + 'story-timeline.js', applySendAnchorTimelineTransform(applySettlementRoundTransform(applyRollbackBusinessTimelineTransform(applyRowTimelineTransform(text(appDir, DOMAIN + 'story-timeline.js'))))))
+  write.set(DOMAIN + 'story-timeline.js', applySendAnchorTimelineTransform(applyRollbackBusinessTimelineTransform(applyRowTimelineTransform(text(appDir, DOMAIN + 'story-timeline.js')))))
   if (present(DOMAIN + 'round-anchor.js')) write.set(DOMAIN + 'round-anchor.js', applyInputOnlyAnchorResolverTransform(text(appDir, DOMAIN + 'round-anchor.js')))
   write.set(DOMAIN + 'turn-orchestration.js', applyRollbackBodyCommitTurnTransform(applyRollbackBodySignalTurnTransform(applyRollbackSharedBranchTurnTransform(applyTemplateRollbackInputOrderTransform(applySendAnchorTurnTransform(applyRollbackBusinessTurnTransform(text(appDir, DOMAIN + 'turn-orchestration.js')), { hasInputModule: present(DOMAIN + 'session-turn-input.js') }))))))
   write.set(DOMAIN + 'settlement-jobs.js', applyRollbackBodyCommitJobsTransform(applySettlementQuiescenceTransform(text(appDir, DOMAIN + 'settlement-jobs.js'))))
@@ -136,21 +143,13 @@ export function buildCore(appDir, sourceFiles) {
   write.set(DOMAIN + 'storage-compaction-warning.js', shim("import { storagePackage } from './storage-package.js'\nexport const { projectCompactionWarning } = await storagePackage('compaction-warning')\n"))
   write.set(DOMAIN + 'storage-current-variables.js', shim("import { storagePackage } from './storage-package.js'\nexport const { createCurrentVariableReader } = await storagePackage('current-variables')\n"))
   write.set(DOMAIN + 'read-variables.js', shim("import { storagePackage } from './storage-package.js'\nexport const { readVariables, registerVariableReadTool } = await storagePackage('read-variables')\n"))
-  const macroRel = 'tavern-plugin/src/client/runtime/helper-macro-api.js'
-  const slashRel = 'tavern-plugin/src/client/features/assistant-renderer.js'
-  // 两模块包含纯内核，也包含浏览器接入；只提取本次实际函数，绝不加载DOM或冻结整份算法副本。
-  const readonlyKernel = helperReadonlySource(present(macroRel) ? text(appDir, macroRel) : text(appDir, 'tavern-plugin/lib/client.js'), present(slashRel) ? text(appDir, slashRel) : text(appDir, 'tavern-plugin/lib/client.js'))
-  write.set(DOMAIN + 'storage-helper-readonly.js', shim(readonlyKernel))
-  write.set(DOMAIN + 'storage-server-execution.js', shim("import { storagePackage } from './storage-package.js'\nconst impl = await storagePackage('server-execution')\nconst deps = await storagePackage('server-dependencies')\nimport path from 'node:path'\nimport os from 'node:os'\nimport * as authorScripts from './tavern-helper-scripts.js'\nimport { projectTavernHelperMessage } from './tavern-helper-context.js'\nimport { installTavernHelperMacroApi, createSlashReader } from './storage-helper-readonly.js'\nimport { createHelperGenerationTasks } from './helper-generation-tasks.js'\nimport { installTavernHelperRegexApi } from './tavern-helper-regex-api.js'\nimport { createTavernRegexEngine } from './tavern-regex-engine.js'\nexport const createServerDispatchStore = deps.createServerDispatchStore\n// 卡schema使用作者随包发布的zod，与浏览器同源；不下载或伪造替代实现。\nlet zod, zodLoadError\ntry { zod = await import('../vendor/runtime-assets/zod/index.mjs') } catch (error) { zodLoadError = error }\nexport function createServerExecution(options) { return impl.createServerExecution({ ...options, projectHelperMessage: projectTavernHelperMessage, installMacroApi: installTavernHelperMacroApi, createSlashReader, createGenerationTasks: createHelperGenerationTasks, installRegexApi: installTavernHelperRegexApi, createRegexEngine: createTavernRegexEngine, esm: { cacheDir: path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh-tavern'), 'runtime-cache', 'tavern-esm'), ...options.esm }, lodash: deps.serverLodash(), YAML: deps.serverYaml(), zod, zodLoadError, project: authorScripts.projectTavernHelperScripts, isHostOwnedMvu: authorScripts.isHostOwnedMvu }) }\nexport function storageBrowserScripts(scripts, dispatchDeps = {}) { return impl.storageBrowserScripts(scripts, { isHostOwnedMvu: authorScripts.isHostOwnedMvu, ...dispatchDeps }) }\n"))
-  const openingHostAnchor = 'createOpeningPreparation({ readCard, worldBooks, extensionSettings:'
-  const openingHostNext = 'createOpeningPreparation({ readCard, worldBooks, dispatchMarksProvider: () => storageDispatchMarks, extensionSettings:'
-  const openingHost = write.get('tavern-plugin/lib/index.js')
-  if (!openingHost.includes(openingHostNext)) {
-    if (openingHost.split(openingHostAnchor).length !== 2) throw new Error('开局动态分类宿主锚点缺失/重复')
-    write.set('tavern-plugin/lib/index.js', openingHost.replace(openingHostAnchor, openingHostNext))
-  }
   write.set(DOMAIN + 'opening-preparation.js', applyOpeningRuntimeTransform(text(appDir, DOMAIN + 'opening-preparation.js')))
-  write.set(DOMAIN + 'storage-opening-runtime.js', shim("import { storagePackage } from './storage-package.js'\nimport { renderTavernMacros } from './tavern-macro-engine.js'\nconst impl = await storagePackage('opening-server-init')\nexport function initializeOpeningRuntime(options) {\n  return impl.initializeOpeningRuntime({ ...options, substituteMacros: (text, draft) => { const result = renderTavernMacros(text, { userName: draft.userName, charName: draft.card.name, localVariables: draft.chat.variables, globalVariables: draft.globalVariables || {} }); draft.chat.variables = result.localVariables; draft.globalVariables = result.globalVariables; return result.text } })\n}\n"))
+  if (upstreamComputeCapable(indexSource)) {
+    write.set(DOMAIN + 'server-script-executor.js', applyUpstreamExecutor(text(appDir, DOMAIN + 'server-script-executor.js')))
+    write.set(DOMAIN + 'server-script-worker.js', applyUpstreamWorker(text(appDir, DOMAIN + 'server-script-worker.js')))
+    write.set(DOMAIN + 'helper-generation-tasks.js', applyUpstreamGenerationTasks(text(appDir, DOMAIN + 'helper-generation-tasks.js')))
+    write.set(DOMAIN + 'storage-upstream-compute.js', shim("import { storagePackage } from './storage-package.js'\nexport const { runUpstreamRequest, assertUpstreamRequest, authorizeUpstreamCall, pageView, computationBlocked, upstreamRequest } = await storagePackage('upstream-compute')\n"))
+  }
   write.set(DOMAIN + 'storage-budgets.js', shim("import { storagePackage } from './storage-package.js'\nexport const { BUDGETS } = await storagePackage('budgets')\n"))
   write.set(DOMAIN + 'storage-rollback.js', shim("import { storagePackage } from './storage-package.js'\nimport { sessionEvents } from './session-events.js'\nconst impl = await storagePackage('rollback-cleanup')\nimpl.configureRollbackCleanup({ sessionEvents })\nexport const { cleanupAfterRollback, cleanupRollbackHeadIndex, preflightRollback, preflightRollbackAtSeq, cleanupAfterRollbackAtSeq } = impl\nexport const { cleanRollback, inspectNativeFailureTail, readFailureEvidence, latestSendTarget } = await storagePackage('clean-rollback')\nexport const { createRegenerationAdoption } = await storagePackage('regeneration-adoption')\n"))
   write.set(DOMAIN + 'conversation-fork-point.js', shim("import { storagePackage } from './storage-package.js'\nimport { isRescuedHistoryMessage } from './chat-history-rescue.js'\nimport { assistantResultForTurn } from './session-turn-result.js'\nimport { sessionEvents } from './session-events.js'\nimport { assertConversationForkable } from './conversation-fork.js'\nconst impl = await storagePackage('conversation-fork-point')\nimpl.configureConversationForkPoint({ isRescuedHistoryMessage, assistantResultForTurn, sessionEvents, assertConversationForkable })\nexport const { conversationStateAtTurn, conversationForkBoundary } = impl\n"))

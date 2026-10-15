@@ -3,9 +3,9 @@
 # 包内二入口（install.sh、deploy/install.sh，URL/SHA 保持占位，避免内嵌本次 tgz 摘要自引用）与外部发行件（地址与摘要只填一次）。
 # 源码树两入口不是本模板的产物，而是只读当前 manifest/bootstrap 的本地 wrapper；三者不得各写一份实现。
 set -eu
-RELEASE_URL='https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/download/v0.4.12/dsh-tavern-sqlite-v2-0.4.12.tgz'
-RELEASE_SHA256='30741c696358105b803827157c5e79471cf3323afdd1b2d67119d8093384b9d5'
-VERSION='0.4.12'
+RELEASE_URL='https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/download/v0.4.13/dsh-tavern-sqlite-v2-0.4.13.tgz'
+RELEASE_SHA256='01d07daf9448a33658c89cf9008ef0d98d7b05ac346b3905a22a3e85cbd08150'
+VERSION='0.4.13'
 SCRIPT_DIR=''
 case "$0" in
   *install.sh) SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) ;;
@@ -26,8 +26,8 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 const NAME = 'dsh-tavern-sqlite-v2'
 const MAX = 16 * 1024 * 1024
-// 供应链口径与维护入口 driver.mjs 同表：零运行时依赖 + vendor 台账 + 五个入口文件。
-const VENDOR_ENTRIES = { lodash: 'lib/vendor/lodash/lodash.min.js', json5: 'lib/vendor/json5/index.mjs', jsonrepair: 'lib/vendor/jsonrepair/esm/index.js', yaml: 'lib/vendor/yaml/dist/index.js', acorn: 'lib/vendor/acorn/acorn.mjs' }
+// 供应链口径与维护入口 driver.mjs 同表：零运行时依赖 + vendor 台账 + 剩余入口文件。
+const VENDOR_ENTRIES = { yaml: 'lib/vendor/yaml/dist/index.js', acorn: 'lib/vendor/acorn/acorn.mjs' }
 // 别的版本线一律不碰：既不自动迁移/共装，也不替它们卸载。
 const OTHER_LINES = ['dsh-tavern-storage-sqlite', 'dsh-tavern-storage-sqlite-v1', 'dsh-tavern-storage-sqlite-v2', 'dsh-tavern-sqlite-v1']
 export function bootstrapOptions(args) {

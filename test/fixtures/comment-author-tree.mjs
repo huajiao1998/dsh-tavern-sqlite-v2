@@ -9,8 +9,14 @@ import { maintenanceTargets } from '../../deploy/standard-seams.mjs'
 import { parseSeamSource } from '../../deploy/comment-seam-blocks.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-// 已核验的真实作者 source fixture：dsh-tavern-plugin 2.5.0，lib/index.js 无任何插件接缝标记（2026-10-09 实读）。
-const LOCAL_FIXTURE = path.resolve(HERE, '../../../../tmp/release-034-20261008/author-fixture/src/dsh-tavern-68215e47516637e00c75d2b4bba3192679559425')
+// 已核验的真实作者 source fixture：dsh-tavern-plugin 2.7.0（仓库 flizzywine/dsh-tavern，commit d189da12，
+// 即 188 现场实际运行的同一发布提交），lib/index.js 无任何插件接缝标记（2026-10-15 实读）。
+// 2026-10-15 从 2.5.0（68215e47）换源：旧 fixture 缺上游计算接入锚点（pageInFront 段），
+// 导致「上游计算接入锚点缺失/重复」误报——该锚点是 upstream-compute-transform 的生产接缝点，
+// fixture 停在旧版本等于这道闸失效。新 fixture 只复制 maintenanceTargets 覆盖的 53 个文件
+// （16 个 storage-*/owned-new 目标作者树本就没有，按既有纪律跳过），SHA256 已对
+// dsh-tavern-runtime.json 抽查比对。
+const LOCAL_FIXTURE = path.resolve(HERE, '../../../../tmp/release-050-20261015/author-fixture/src/dsh-tavern-d189da122a8651c53ffc55ff465913f2e7f49d75')
 const AUTHOR_PACKAGE = 'tavern-plugin/package.json'
 
 /** 显式来源：env DSH_TAVERN_TEST_APP（绝对 app 树）优先，其次本地 author-fixture；都不可用返回 null（让调用方 skip，不假 pass）。 */

@@ -2,6 +2,7 @@
 import { applyClientHistoryAuthorityTransform } from './client-history-authority-transform.mjs'
 import { applyAuthorRollbackSyncTransform } from './rollback-sync-author-transform.mjs'
 import { parse } from '../lib/vendor/acorn/acorn.mjs'
+import { applyUpstreamComputeHost } from './upstream-compute-transform.mjs'
 export const CORE_HOST_MARKER = '// [dsh-tavern-core-host:v1]'
 function once(text, before, after, label) {
   const count = text.split(before).length - 1
@@ -10,50 +11,20 @@ function once(text, before, after, label) {
 }
 export function applyHostTransform(source) {
   if (source.includes(CORE_HOST_MARKER)) {
-    for (const required of ['variableSqliteStore = chatJournalStore.variables', 'persistenceProvider: () =>', 'readCardExtensions,', 'storageBrowserScripts(helperRuntime.scripts, { store: storageDispatchMarks, cardPath: chat.cardPath })']) {
+    for (const required of ['variableSqliteStore = chatJournalStore.variables', 'persistenceProvider: () =>']) {
       if (!source.includes(required)) throw new Error('核心Host标记存在但消费者缺失：' + required)
     }
-    if (!source.includes('signal: descriptor.signal') || !source.includes('generate: async (config, descriptor)')) throw new Error('核心Host生成消费者不完整；须按所属代卸缝后适配')
+    // 上游计算接管带能力门控（见下方 applyUpstreamComputeHost 调用处）：只有作者代具备服务端
+    // 计算分发（createServerScriptExecutor，2.7.0 引入）时才会注入 authorizeUpstreamCall。
+    // 旧代二次安装/幂等时不该被这条误拒，故同样按能力判。
+    if (source.includes('createServerScriptExecutor') && !source.includes('authorizeUpstreamCall(method, args,')) {
+      throw new Error('核心Host标记存在但消费者缺失：authorizeUpstreamCall(method, args,')
+    }
     return applyVariableConsumerTransform(source)
   }
-  let next = "import { storageBrowserScripts, createServerDispatchStore } from './domain/storage-server-execution.js'\n" + CORE_HOST_MARKER + '\n' + source
+  let next = CORE_HOST_MARKER + '\n' + source
   next = once(next, '  const chatPersistence = createChatPersistence(',
     "  const variableSqliteStore = chatJournalStore.variables\n  if (!variableSqliteStore) throw new Error('核心接入缺少变量SQLite消费者')\n  ctx.effect(() => () => chatJournalStore.dispose(), 'dsh-tavern: SQLite资源释放')\n  const chatPersistence = createChatPersistence(", '变量消费者')
-  next = once(next, '  const tavernScriptHostAdapter = createTavernScriptHostAdapter({',
-    "  const storageDispatchMarks = createServerDispatchStore({ dataRoot })\n  ctx.effect(() => () => storageDispatchMarks.dispose(), 'dsh-tavern: 服务端脚本标记资源释放')\n  const tavernScriptHostAdapter = createTavernScriptHostAdapter({", '服务端脚本标记实例')
-  next = once(next, '    scriptDispatch: tavernScriptDispatch,',
-    `    scriptDispatch: tavernScriptDispatch,
-    cardScriptDispatchStore: storageDispatchMarks,
-    ownExecution: dispose => ctx.effect(() => dispose, 'dsh-tavern: 服务端执行释放'),
-    readCardExtensions,
-    // 作者2.5 Helper生成消费面：**复用作者任务工厂与编译器**，本包只提供宿主侧
-    // callModel / 当前草稿上下文 / 预设与世界书资源。raw 也必须拿到 signal（作者语义：
-    // background:true + 同一次请求的取消信号），**不能丢 signal**。
-    createGenerationTasks: () => createHelperGenerationTasks(),
-    generateRaw: async (config, descriptor) => {
-      const helperContext = descriptor.context?.helperContext
-      if (!helperContext) throw new Error('generateRaw缺少当前上下文')
-      return generateHelperRaw(config, { callModel: opts => callModel({ ...opts, background: true, signal: descriptor.signal }),
-        sessionId: descriptor.sessionId,
-        history: helperContext.messages.map(row => ({ role: row.role, text: row.message })) })
-    },
-    generate: async (config, descriptor) => {
-      validateHelperGenerateConfig(config)
-      const chat = descriptor.context?.chat
-      if (!chat) throw new Error('generate缺少绑定的当前草稿')
-      // 预设/世界书/扩展/正则全部取**当前草稿**（不是持久化最新），与作者 RPC 路径同序。
-      const presetSnapshot = await helperGenerationPreset(config.preset_name, chat.runtimePresetSnapshot || null)
-      const activeSnapshot = config.preset_name && config.preset_name !== 'in_use'
-        ? await helperGenerationPreset('in_use', chat.runtimePresetSnapshot || null) : presetSnapshot
-      const card = await readChatCard(chat)
-      const worldBook = await worldBooks.bound(chat.cardPath, card, chat)
-      const extensions = await readCardExtensions(chat.cardPath, chat)
-      descriptor.signal?.throwIfAborted()
-      return generateHelper(config, { callModel: opts => callModel({ ...opts, background: true, signal: descriptor.signal }),
-        sessionId: descriptor.sessionId, history: helperGenerationHistory(chat), chat, card, worldBook, presetSnapshot,
-        presetRegexScripts: activeSnapshot?.regexScripts || [], extensions,
-        characterVariables: extensions?.variables || {} })
-    },`, '服务端卡脚本与模型生成')
   const readSlotVariants = [
     ['readRevision: readChatRevision, write: writeChat, update: updateChat },\n    sessions:', 'readRevision: readChatRevision, write: writeChat, update: updateChat, readSlice: chatPersistence.readSlice },\n    sessions:'],
     ['return selected && { ...selected, chat: normalizeChat(selected.chat) }\n      } },\n    sessions:', 'return selected && { ...selected, chat: normalizeChat(selected.chat) }\n      }, readSlice: chatPersistence.readSlice },\n    sessions:'],
@@ -63,12 +34,25 @@ export function applyHostTransform(source) {
   next = once(next, readSlot[0], readSlot[1], '回退head行键读接口')
   next = once(next, '    sessionPatch,\n  })\n\n  const bodyEditor',
     "    sessionPatch,\n    variableStore: variableSqliteStore,\n    persistenceProvider: () => ctx.get('sessionPersistence'),\n    projectionsProvider: () => ctx.get('sessionProjections'),\n    projectionCacheProvider: () => ctx.get('sessionProjectionCache'),\n    tokenMeterProvider: () => ctx.get('tokenMeter'),\n    webServerProvider: () => ctx.get('webServer'),\n  })\n\n  const bodyEditor", '完整回退实时服务')
-  next = once(next, '    helperRuntime.diagnostics.push(...(Array.isArray(cardExtensions.remoteAssetDiagnostics)',
-    '    helperRuntime.scripts = storageBrowserScripts(helperRuntime.scripts, { store: storageDispatchMarks, cardPath: chat.cardPath })\n    helperRuntime.diagnostics.push(...(Array.isArray(cardExtensions.remoteAssetDiagnostics)', '浏览器计算退役')
-  next = once(next, "owner: chat.mvu.owner === 'official' ? 'official' : 'legacy',",
-    "owner: 'server', serverOwned: true,", '浏览器MVU核心退役')
-  next = once(next, "    requiresBrowser: async chat => hasTavernScriptRuntime(chat, (await readCardExtensions(chat.cardPath, chat))?.helperScripts)",
-    "    requiresBrowser: async chat => storageBrowserScripts(projectTavernHelperScripts((await readCardExtensions(chat.cardPath, chat))?.helperScripts).scripts, { store: storageDispatchMarks, cardPath: chat.cardPath }).length > 0", '无计算脚本浏览器依赖')
+  // 上游计算接管只对具备服务端计算分发机制的作者代生效：createServerScriptExecutor 自 2.7.0
+  // 引入（连同 priority/pageInFront/serverScripts 这套分发）。旧代没有这套机制，硬造接缝只会
+  // 得到跑不起来的代码，故按能力跳过——这是"向下适配"，不是放宽准入。
+  // 反向护栏不放松：有 executor 而锚点缺失/重复，说明新版上游改坏了接缝点，由
+  // applyUpstreamComputeHost 内部的 once() 响亮失败，不静默跳过（否则计算权会悄悄落回页面，
+  // 违反"唯一上游服务端计算"与"服务端不可用须失败/等待，不允许假成功或页面回落"）。
+  //
+  // 但"作者入口的开局分类锚点"与上游计算注入是两件事：它是 opening 链路的必需锚点，旧代虽不接
+  // 上游计算，这个锚点仍必须存在且唯一。故跳过注入时用 replaceOnce 做一次自校验（原文换原文），
+  // 缺失/重复照样响亮失败——否则破坏它就等于绕过准入（曾因漏此校验让"未知作者契约"负例失效）。
+  if (next.includes('createServerScriptExecutor')) {
+    next = applyUpstreamComputeHost(next)
+  } else {
+    // 旧代不施上游计算接缝，但作者入口的开局分类锚点仍是 opening 链路的必需锚点：
+    // 存在且唯一。这里显式校验并抛出**语义自描述**的错误（不复用 replaceOnce 的
+    // "上游计算接入锚点"前缀——旧代本就与上游计算无关，错误信息不能误导排障）。
+    const openingAnchor = 'createOpeningPreparation({ readCard, worldBooks, extensionSettings:'
+    if (next.split(openingAnchor).length !== 2) throw new Error('开局动态分类宿主锚点缺失/重复')
+  }
   next = applyBodyEditEventTransform(next)
   return applyVariableConsumerTransform(next)
 }
@@ -110,7 +94,7 @@ function bodyEditEventBody(keepAuthorNotify, adoptUncommitted = false, reconcile
         const newText = after?.chat?.messages?.[0]?.sourceText ?? after?.chat?.messages?.[0]?.text
         if (before && after && oldText !== newText) {
           const current = await chatForSession(sessionId)
-          await tavernScriptHostAdapter.dispatchServerEvent({ sessionId, chat: current, event: 'MESSAGE_EDITED', args: [after.to] })
+          await tavernScriptHostAdapter.dispatchEvent({ sessionId, chat: current, name: 'MESSAGE_EDITED', args: [after.to] })
           const latest = await chatForSession(sessionId)
           return { view: await view(latest, await readChatCard(latest)) }
         }
@@ -138,7 +122,7 @@ function bodyEditTextBody() {
       const newText = after?.chat?.messages?.[0]?.sourceText ?? after?.chat?.messages?.[0]?.text
       if (before && after && oldText !== newText) {
         const current = await chatForSession(sessionId)
-        await tavernScriptHostAdapter.dispatchServerEvent({ sessionId, chat: current, event: 'MESSAGE_EDITED', args: [after.to] })
+        await tavernScriptHostAdapter.dispatchEvent({ sessionId, chat: current, name: 'MESSAGE_EDITED', args: [after.to] })
       }
     },`
 }

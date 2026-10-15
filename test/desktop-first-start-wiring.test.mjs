@@ -97,10 +97,10 @@ test('桌面首启真实容器：安装快照无需scanner即注册普通host、
   await browser.loader.await()
   assert.equal(browser.loader.resolve('storage-ui').fiber.state, 2)
   assert.equal(typeof browser.get('tavernStorageUi')?.cleanFailure, 'function', '共享服务由真实激活提供')
-  assert.deepEqual([...occupants.keys()].sort(), ['dsh-tavern-sqlite-v2:failure-clean', 'dsh-tavern-sqlite-v2:save'])
+  assert.deepEqual([...occupants.keys()].sort(), ['dsh-tavern-sqlite-v2:save'])
   await browser.loader.remove('storage-ui')
   assert.equal(browser.get('tavernStorageUi'), undefined, '卸载释放共享服务')
-  assert.equal(occupants.size, 0, '卸载释放两处UI注册')
+  assert.equal(occupants.size, 0, '卸载释放唯一页头UI注册')
   // 真实 Group API：子树 full id 只用于 resolve；remove 要传该子树本地键（entry.options.id）
   const ordinaryEntry = host.loader.resolve('include:' + ORDINARY_ROW_ID)
   await ordinaryEntry.parent.remove(ordinaryEntry.options.id)

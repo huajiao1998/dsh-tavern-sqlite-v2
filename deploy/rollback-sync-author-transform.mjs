@@ -83,7 +83,8 @@ function scopedRetryMode(source){
 // 已带 RETRY_MARKER 的产物只核结构完整，不重复施缝（与 error-purge 的标记产物兼容）。
 export function applyRollbackRetryState(source){
  if(source.includes(RETRY_MARKER)){
-  for(const needle of [RETRY_STATE,ROLLING_STATE_NEW,CAN_NEW,RETRY_LABEL_NEW,CLEAR_MODE_NEW,RETRY_CATCH_NEXT,'return current && current.sessionId === props.sessionId ? null : current;'])
+  const retryLabel = source.includes('// [dsh-tavern-rollback-menu:v1]') ? 'rollbackRetryTarget ? "重试完成回退" : clearIncomplete ? targetLabel + "（未完成发送）" : targetLabel);' : RETRY_LABEL_NEW
+   for(const needle of [RETRY_STATE,ROLLING_STATE_NEW,CAN_NEW,retryLabel,CLEAR_MODE_NEW,RETRY_CATCH_NEXT,'return current && current.sessionId === props.sessionId ? null : current;'])
    if(!source.includes(needle))throw Error('回退重试闭环标记不完整：'+needle.slice(0,60))
   if(!source.includes(RETRY_RPC_NEW) && source.includes(RETRY_RPC_OLD)) throw Error('回退重试闭环标记不完整：普通RPC未接重试目标')
   return source

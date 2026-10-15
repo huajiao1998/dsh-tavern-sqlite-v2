@@ -9,6 +9,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createChatSqliteStore } from '../chat-sqlite-store.js'
 import { createRollbackGlobalVariables } from '../lib/rollback-global-variables.js'
+import { readTimelineTree } from '../lib/timeline-nodes.js'
 const A = '../../../tmp/upstream25-author-fixture/src/dsh-tavern-5d2ffacf4231c9f45dc641b9db9e0286c4fa5f60/tavern-plugin/lib/domain/'
 const { copyJsonTree } = await import(new URL(A + 'copy-json-tree.js', import.meta.url))
 const { diffJson, applyJsonChangesShared } = await import(new URL(A + 'json-mutation.js', import.meta.url))
@@ -136,6 +137,37 @@ try {
     const db = sideDb(id)
     db.prepare("UPDATE archive_timeline_nodes SET ord=3 WHERE node_key='checkpoints#' || (SELECT COUNT(*)-1 FROM archive_timeline_nodes WHERE node_key LIKE 'checkpoints#%')").run()
     await assert.rejects(bump(store, id, chat => { chat.timeline.revision += 1; return chat }), /timeline 子行自检失败/, 'ord 不连续必须响亮失败')
+    db.close()
+  })
+
+  test('10 第四刀：ord 重复 [0,0,2] 旧判据放行、新证据拦截且读路径确实受损', async () => {
+    const store = openStore(), id = 'chat-p2-10'
+    await seed(store, id)
+    // 3 个 checkpoint：为 [0,0,2] 形态准备足量行（fixture 默认 2 个）
+    await bump(store, id, chat => { chat.timeline.checkpoints.push({ turn: 3, snapshot: 'D'.repeat(64) }); return chat })
+    const db = sideDb(id)
+    // ① 正例：正常数据下新判据放行（证明没有把正常数据误判为坏）
+    const ok = db.prepare("SELECT COUNT(*) AS n, COUNT(DISTINCT ord) AS d, MIN(ord) AS lo, MAX(ord) AS hi FROM archive_timeline_nodes WHERE node_key LIKE 'checkpoints#%'").get()
+    assert.deepEqual([ok.n, ok.d, ok.lo, ok.hi], [3, 3, 0, 2], '正常路径 ord 必须互异且铺满 0..2')
+    // ② 造坏形态：node_key 仍是 #0/#1/#2，ord 变成 [0,0,2]
+    db.prepare("UPDATE archive_timeline_nodes SET ord=0 WHERE node_key='checkpoints#1'").run()
+    // ③ 旧判据在这条坏数据上判定"通过"——这就是它不成立的证据
+    const legacy = db.prepare("SELECT COUNT(*) AS n, MIN(ord) AS lo, MAX(ord) AS hi FROM archive_timeline_nodes WHERE node_key LIKE 'checkpoints#%'").get()
+    assert.equal(legacy.n, 3)
+    assert.equal(legacy.lo, 0)
+    assert.equal(legacy.hi, 2)
+    assert.equal(legacy.n === 3 && legacy.lo === 0 && legacy.hi === legacy.n - 1, true,
+      '旧 COUNT+MIN+MAX 判据对 [0,0,2] 放行（n=3、lo=0、hi=2=n-1 三项全中）')
+    // ④ 读路径确实受损：ord 作数组下标 ⇒ 1 号位空洞、0 号位被覆盖
+    const damaged = readTimelineTree(db, null).value
+    assert.equal(damaged.checkpoints.length, 3)
+    assert.equal(damaged.checkpoints[1], undefined, 'ord 重复使 1 号位成空洞（静默损坏的实貌）')
+    assert.equal(damaged.checkpoints[0].turn, 2, '0 号位被 checkpoints#1 的内容覆盖')
+    // ⑤ 新证据必须拦住：真实写路径 fail-loud 且同事务零写
+    const revisionBefore = one(db, 'SELECT revision FROM archive_head WHERE id=1').revision
+    await assert.rejects(bump(store, id, chat => { chat.timeline.revision += 1; return chat }),
+      /timeline 子行自检失败/, 'ord 重复必须被新证据拦下')
+    assert.equal(one(db, 'SELECT revision FROM archive_head WHERE id=1').revision, revisionBefore, '自检失败必须零写（同事务回滚）')
     db.close()
   })
 

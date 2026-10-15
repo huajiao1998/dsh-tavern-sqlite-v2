@@ -1,9 +1,9 @@
 {
   "name": "dsh-tavern-sqlite-v2",
-  "version": "0.4.12",
+  "version": "0.4.13",
   "private": true,
   "type": "module",
-  "description": "V2 完整功能版本线：SQLite权威存储与干净回退，保留当前服务端MVU、卡脚本执行和分类能力；原档只读、用户手动新ID分叉",
+  "description": "V2 SQLite权威存储与物理纯尾撤销；计算唯一调用上游服务端运行时，禁止客户端回落；原档只读、用户手动新ID分叉",
   "exports": {
     ".": "./plugin.js",
     "./session-persistence": "./index.js",
@@ -29,7 +29,6 @@
     "./session-window-projector": "./lib/session-window-projector.js",
     "./activity-state": "./lib/activity-state.js",
     "./variable-store": "./variable-sqlite-store.js",
-    "./sandbox-policy": "./lib/sandbox-policy.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json",
     "./client": "./client.js",
@@ -47,20 +46,11 @@
     "./conversation-fork-point": "./lib/conversation-fork-point.js",
     "./fork-history-markers": "./lib/fork-history-markers.js",
     "./chat-history-rescue": "./lib/chat-history-rescue.js",
-    "./mvu-card-runtime": "./lib/mvu/mvu-card-runtime.js",
-    "./mvu-script-sandbox": "./lib/mvu/mvu-script-sandbox.js",
-    "./card-script-dispatch-store": "./lib/card-script-dispatch-store.js",
-    "./mvu-update-core": "./lib/mvu/mvu-update-core.js",
     "./standard-host": "./lib/standard-host.js",
-    "./server-execution": "./lib/server-execution.js",
-    "./server-dependencies": "./lib/server-dependencies.js",
-    "./opening-server-init": "./lib/opening-server-init.js",
     "./variable-archive": "./lib/variable-archive.js",
     "./current-variables": "./lib/current-variables.js",
     "./compaction-warning": "./lib/compaction-warning.js",
-    "./esm-module-loader": "./lib/mvu/esm-module-loader.js",
-    "./tavern-helper-api": "./lib/tavern-helper-api.js",
-    "./tavern-regex-api": "./lib/tavern-regex-api.js"
+    "./upstream-compute": "./lib/upstream-compute.js"
   },
   "dsh": {
     "client": {

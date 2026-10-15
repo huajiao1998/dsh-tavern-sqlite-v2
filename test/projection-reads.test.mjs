@@ -99,22 +99,26 @@ try {
     assert.equal((await writer.readViewDelta(CHAT.id,1)).revision,3)
   })
   test('布局/输入删除/压缩帧证据与物理删尾：不伪造覆盖、旧scoped仍是旧版本',async()=>{
+    // 本叶需要精确 revision 序列（3→4→5→…→39）。共享 writer 在全量跑时已被前序叶推到很高
+    // revision，patch(…,3,…) 会 CAS 失败、帧链断裂，readViewDelta 只能返回 undefined。故自带
+    // 独立 store 与独立 chatId，起点恒为 1，单跑/全跑行为一致（2026-10-15 修）。
+    const w=create(),id='projection-tail-fixture';await w.update(id,()=>({...CHAT,id}))
     // 本叶自带初始 revision 夹具：官方 --name 单选时前一叶不跑，起点可能仍是 1；只把 revision 补到 3（已到 3 则空转）。
-    const entry=await writer.read(CHAT.id)
-    for(let revision=entry._storageRevision;revision<3;revision++)await writer.patch(CHAT.id,revision,[{op:'set',path:['_storageRevision'],value:revision+1}])
-    const old=await writer.readSessionState(CHAT.id,{scoped:true})
-    await writer.patch(CHAT.id,3,[{op:'set',path:['_storageRevision'],value:4},{op:'set',path:['messages',6,'role'],value:'user'},{op:'delete',path:['runtimeInputs','2']}])
-    const changed=await writer.readViewDelta(CHAT.id,3);assert.equal(changed.layoutChanged,true);assert.equal(changed.layoutFrom,6)
+    const entry=await w.read(id)
+    for(let revision=entry._storageRevision;revision<3;revision++)await w.patch(id,revision,[{op:'set',path:['_storageRevision'],value:revision+1}])
+    const old=await w.readSessionState(id,{scoped:true})
+    await w.patch(id,3,[{op:'set',path:['_storageRevision'],value:4},{op:'set',path:['messages',6,'role'],value:'user'},{op:'delete',path:['runtimeInputs','2']}])
+    const changed=await w.readViewDelta(id,3);assert.equal(changed.layoutChanged,true);assert.equal(changed.layoutFrom,6)
     assert.deepEqual(changed.runtimeInputChanges,[{key:'2',present:false,value:undefined}])
-    assert.equal(old.messages[6].role,'assistant');assert.equal((await writer.readSessionState(CHAT.id,{scoped:true})).messages[6].role,'user')
-    await writer.patch(CHAT.id,4,[{op:'set',path:['_storageRevision'],value:5},{op:'splice',path:['messages'],index:60,deleteCount:4,items:[]}])
-    assert.equal((await writer.readSessionState(CHAT.id,{scoped:true})).messages.length,60);assert.equal(old.messages.length,64)
-    const tail=await writer.readViewDelta(CHAT.id,4);assert.equal(tail.layoutFrom,60);assert.deepEqual(tail.indices,[])
-    assert.equal(await writer.readViewDelta(CHAT.id,5),undefined)
-    for(let revision=5;revision<40;revision++)await writer.patch(CHAT.id,revision,[{op:'set',path:['_storageRevision'],value:revision+1},{op:'set',path:['runtimeInputs','k'+revision],value:{source:'值'}}])
-    const merged=await writer.readViewDelta(CHAT.id,5);assert.equal(merged.layoutChanged,true,'压缩帧可能涵盖更早布局变动，只能保守多算不能假阴性');assert.ok(merged.runtimeInputChanges.length>=35)
+    assert.equal(old.messages[6].role,'assistant');assert.equal((await w.readSessionState(id,{scoped:true})).messages[6].role,'user')
+    await w.patch(id,4,[{op:'set',path:['_storageRevision'],value:5},{op:'splice',path:['messages'],index:60,deleteCount:4,items:[]}])
+    assert.equal((await w.readSessionState(id,{scoped:true})).messages.length,60);assert.equal(old.messages.length,64)
+    const tail=await w.readViewDelta(id,4);assert.equal(tail.layoutFrom,60);assert.deepEqual(tail.indices,[])
+    assert.equal(await w.readViewDelta(id,5),undefined)
+    for(let revision=5;revision<40;revision++)await w.patch(id,revision,[{op:'set',path:['_storageRevision'],value:revision+1},{op:'set',path:['runtimeInputs','k'+revision],value:{source:'值'}}])
+    const merged=await w.readViewDelta(id,5);assert.equal(merged.layoutChanged,true,'压缩帧可能涵盖更早布局变动，只能保守多算不能假阴性');assert.ok(merged.runtimeInputChanges.length>=35)
     const cold=create();assert.equal(await cold.readViewDelta(CHAT.id,5),undefined,'丢失帧覆盖时消费者必须全读')
-    const db=new DatabaseSync(path.join(root,'chats',CHAT.id,'archive.db'));try{assert.equal(db.prepare('SELECT COUNT(*) AS n FROM archive_messages WHERE message_index>=60').get().n,0)}finally{db.close()}
+    const db=new DatabaseSync(path.join(root,'chats',id,'archive.db'));try{assert.equal(db.prepare('SELECT COUNT(*) AS n FROM archive_messages WHERE message_index>=60').get().n,0)}finally{db.close()}
   })
   test('作者实际view reader＋Helper增量消费者：使用scoped不触发整档克隆，脏楼一处投影',async()=>{
     const id='projection-consumer';await writer.update(id,()=>({...CHAT,id}))

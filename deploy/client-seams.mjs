@@ -11,6 +11,8 @@ import {applyClipboardTransform} from './clipboard-transform.mjs'
 import {applyBrowserUiLifetimeBootstrapTransform as uiBootstrap,applyBrowserUiLifetimeRuntimeTransform as uiRuntime} from './browser-ui-lifetime-transform.mjs'
 import {applyCurrentResourceClientTransform as resourceClient} from './session-current-resource-transform.mjs'
 import {applyErrorPurgeTurnControlsTransform,applyErrorPurgePlayControlsTransform} from './error-purge-transform.mjs'
+import {applyRollbackMenuTransform} from './rollback-menu-transform.mjs'
+import {applyUpstreamClient} from './upstream-compute-transform.mjs'
 // 存档区 UI 缝已退役（apply-save-ui-seam.mjs 不再是本链消费者）：改由自有页头 slots 入口＋完整面板承载。
 // current 资源客户端语义（放宽revision/不落cache）与当前书守卫不依赖浏览器符号，故在两条通道上都施加：
 // 整份bundle与拆分后的确切include目标。后台截断同连接同步（session-cut-sync）**不在此处**——
@@ -25,27 +27,27 @@ export function clientCoreWrites(appDir,{browserWrite,sourceReader}={}){
  // 链首先做运行时缝（存档区 UI 缝已退役，不再对作者树插入桥）。
  let bundle=read(built)
  bundle=applyRollbackSyncInstallTransform(applyClipboardTransform(applyClientRollbackTransform(bundle)),{runtimeOnly:true})
- bundle=applyErrorPurgePlayControlsTransform(applyErrorPurgeTurnControlsTransform(bundle))
- bundle=resourceClient(uiRuntime(uiBootstrap(bundle)))
+ bundle=applyRollbackMenuTransform(applyErrorPurgePlayControlsTransform(applyErrorPurgeTurnControlsTransform(bundle)))
+ bundle=applyUpstreamClient(resourceClient(uiRuntime(uiBootstrap(bundle))))
  if(browserWrite)bundle=browserWrite(bundle)
  writes.set(built,bundle)
  if(split){
   for(const rel of ['turn-error-controls.js','features/play-controls.js','features/turn-history.js','ui/error-center.js','helper-resources.js','runtime/helper-bootstrap.js','runtime/helper-script-runtime.js','modules/tavern-coordination.js'])if(!existsSync(path.join(appDir,source+rel)))throw Error('拆分客户端缺确切include目标：'+rel)
   writes.set(source+'main.js',applyRollbackSyncInstallTransform(applyAuthorRollbackRuntimeTransform(main),{runtimeOnly:true}))
   writes.set(source+'modules/tavern-coordination.js',applyAuthorCoordinationTransform(read(source+'modules/tavern-coordination.js')))
-  writes.set(feature,applyErrorPurgePlayControlsTransform(applyRollbackSyncActionGuardTransform(applyAuthorRollbackActionTransform(read(feature)))))
+  writes.set(feature,applyRollbackMenuTransform(applyErrorPurgePlayControlsTransform(applyRollbackSyncActionGuardTransform(applyAuthorRollbackActionTransform(read(feature))))))
   writes.set(source+'turn-error-controls.js',applyErrorPurgeTurnControlsTransform(read(source+'turn-error-controls.js')))
   writes.set(source+'features/turn-history.js',applyClientHistoryAuthorityTransform(read(source+'features/turn-history.js')))
   writes.set(source+'ui/error-center.js',applyClipboardTransform(read(source+'ui/error-center.js')))
   writes.set(source+'helper-resources.js',resourceClient(read(source+'helper-resources.js')))
   writes.set(source+'runtime/helper-bootstrap.js',uiBootstrap(read(source+'runtime/helper-bootstrap.js')))
-  let ui=uiRuntime(read(source+'runtime/helper-script-runtime.js'))
+  let ui=applyUpstreamClient(uiRuntime(read(source+'runtime/helper-script-runtime.js')))
   if(browserWrite)ui=browserWrite(ui)
   writes.set(source+'runtime/helper-script-runtime.js',ui)
  }else{
   let inline=applyRollbackSyncInstallTransform(applyClipboardTransform(applyClientRollbackTransform(main)),{runtimeOnly:true})
-  inline=applyErrorPurgePlayControlsTransform(applyErrorPurgeTurnControlsTransform(inline))
-  inline=resourceClient(uiRuntime(uiBootstrap(inline)))
+  inline=applyRollbackMenuTransform(applyErrorPurgePlayControlsTransform(applyErrorPurgeTurnControlsTransform(inline)))
+  inline=applyUpstreamClient(resourceClient(uiRuntime(uiBootstrap(inline))))
   if(browserWrite)inline=browserWrite(inline)
   writes.set(source+'main.js',inline)
  }

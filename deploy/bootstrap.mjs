@@ -8,8 +8,8 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 const NAME = 'dsh-tavern-sqlite-v2'
 const MAX = 16 * 1024 * 1024
-// 供应链口径与维护入口 driver.mjs 同表：零运行时依赖 + vendor 台账 + 五个入口文件。
-const VENDOR_ENTRIES = { lodash: 'lib/vendor/lodash/lodash.min.js', json5: 'lib/vendor/json5/index.mjs', jsonrepair: 'lib/vendor/jsonrepair/esm/index.js', yaml: 'lib/vendor/yaml/dist/index.js', acorn: 'lib/vendor/acorn/acorn.mjs' }
+// 供应链口径与维护入口 driver.mjs 同表：零运行时依赖 + vendor 台账 + 剩余入口文件。
+const VENDOR_ENTRIES = { yaml: 'lib/vendor/yaml/dist/index.js', acorn: 'lib/vendor/acorn/acorn.mjs' }
 // 别的版本线一律不碰：既不自动迁移/共装，也不替它们卸载。
 const OTHER_LINES = ['dsh-tavern-storage-sqlite', 'dsh-tavern-storage-sqlite-v1', 'dsh-tavern-storage-sqlite-v2', 'dsh-tavern-sqlite-v1']
 export function bootstrapOptions(args) {

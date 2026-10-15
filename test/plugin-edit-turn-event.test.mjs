@@ -16,9 +16,9 @@ test('正文编辑事件：新增editText入口同步派发且幂等兼容新旧
   const newSource = SAVE_LEGACY + EDIT_TEXT + '\n'
   const once = applyBodyEditEventTransform(newSource)
   const block = once.slice(once.indexOf('editText: async'), once.indexOf('editText: async') + 1400)
-  assert.ok(block.includes('dispatchServerEvent'), 'editText 入口必须派发服务端事件')
-  assert.ok(block.includes("event: 'MESSAGE_EDITED'"), '事件名必须是 MESSAGE_EDITED')
-  assert.ok(block.indexOf('bodyEditor.replaceText') < block.indexOf('dispatchServerEvent'), '事件必须在正文替换之后')
+  assert.ok(block.includes('dispatchEvent'), 'editText 入口必须派发服务端事件')
+  assert.ok(block.includes("name: 'MESSAGE_EDITED'"), '事件名必须是 MESSAGE_EDITED')
+  assert.ok(block.indexOf('bodyEditor.replaceText') < block.indexOf('dispatchEvent'), '事件必须在正文替换之后')
   assert.equal(block.split('notifyPluginTimeline(').length - 1, 1, '作者 notify 必须恰好保留一次')
   assert.equal(block.split('readWindow(').length - 1, 2, '只观察最后一楼窗口（前后各一次），不扫描历史')
   assert.ok(block.includes('{ limit: 1 }'), '窗口必须 limit: 1')
@@ -37,7 +37,7 @@ test('正文编辑事件：新增editText入口同步派发且幂等兼容新旧
   // ⑤ 旧版（无 editText 入口）：原样兼容，不假造派发
   const legacy = applyBodyEditEventTransform(SAVE_LEGACY)
   assert.ok(!legacy.includes('editText: async'), '旧版不得被凭空加上 editText 入口')
-  assert.ok(legacy.includes('dispatchServerEvent'), 'saveBodyEdit 路径的既有派发保持')
+  assert.ok(legacy.includes('dispatchEvent'), 'saveBodyEdit 路径的既有派发保持')
 })
 
 test('正文编辑事件：旧标记不能掩盖新入口半缺或未知签名', () => {
@@ -47,7 +47,7 @@ test('正文编辑事件：旧标记不能掩盖新入口半缺或未知签名',
   const restoreOriginal = installed.slice(0, begin) + EDIT_TEXT + installed.slice(end)
   assert.throws(() => applyBodyEditEventTransform(restoreOriginal), /editText.*未注入或内容不符/)
   // 只损坏新入口，旧UI完整块仍存在，旧标记不能代新入口验收。
-  const brokenNew = installed.slice(0, begin) + installed.slice(begin).replace('await tavernScriptHostAdapter.dispatchServerEvent(', 'await removedDispatcher(')
+  const brokenNew = installed.slice(0, begin) + installed.slice(begin).replace('await tavernScriptHostAdapter.dispatchEvent(', 'await removedDispatcher(')
   assert.notEqual(brokenNew, installed)
   assert.throws(() => applyBodyEditEventTransform(brokenNew), /editText.*未注入或内容不符/)
   const unknownSignature = EDIT_TEXT.replace('(material, text)', '(input, text)')

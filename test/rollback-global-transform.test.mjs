@@ -3,6 +3,9 @@ import assert from 'node:assert/strict'
 import {readFileSync} from 'node:fs'
 import {applyRollbackGlobalAdapterTransform,applyRollbackGlobalHostTransform} from '../deploy/rollback-global-transform.mjs'
 import {applyRollbackHostTransform} from '../deploy/rollback-host-transform.mjs'
+// 本代 adapter-runs 增量块的收尾：whenRollbackAdapterIdle 用自己的 rollbackAdapterRuns 账本
+// 等待（不再是旧形态转调 serverExecution.whenIdle）。定位/剥离都以这一行为准。
+const RUNS_BLOCK_END='    while(rollbackAdapterRuns.get(id)?.size)await Promise.allSettled([...rollbackAdapterRuns.get(id)])\n  }'
 test('实际adapter清理回调解除旧53正文基线和模板环境缓存，保留他档活动reader',async()=>{
  const adapter=readFileSync(new URL('../../../tmp/plg-standard-1001-code/b/lib/domain/tavern-script-host-adapter.js',import.meta.url),'utf8'),next=applyRollbackGlobalAdapterTransform(adapter)
  const start=next.indexOf('    clearRollbackState: async'),end=next.indexOf('    settleMvuUpdate:',start)
@@ -12,7 +15,7 @@ test('实际adapter清理回调解除旧53正文基线和模板环境缓存，�
 })
 test('实际adapter手动写入口整个Promise可join且静止期间新请求拒绝',async()=>{
  const adapter=readFileSync(new URL('../../../tmp/plg-standard-1001-code/b/lib/domain/tavern-script-host-adapter.js',import.meta.url),'utf8'),next=applyRollbackGlobalAdapterTransform(adapter)
- const start=next.indexOf('  // [dsh-tavern-adapter-runs:v1]'),end=next.indexOf('    await serverExecution.whenIdle(id)\n  }',start)+'    await serverExecution.whenIdle(id)\n  }'.length
+ const start=next.indexOf('  // [dsh-tavern-adapter-runs:v1]'),end=next.indexOf(RUNS_BLOCK_END,start)+RUNS_BLOCK_END.length
  const barrier=new Set(),runState=new Function('serverExecution','rollbackBarrier','rollbackSchedulingBarrier',next.slice(start,end)+';return {trackRollbackAdapterRun,whenRollbackAdapterIdle}')({whenIdle:async()=>{}},new Set(),barrier)
  let release;const gate=new Promise(r=>release=r);const manual=runState.trackRollbackAdapterRun(async()=>{await gate;return 53})
  const task=manual('fixture');let done=false;const idle=runState.whenRollbackAdapterIdle('fixture').then(()=>done=true);await Promise.resolve();assert.equal(done,false)
@@ -21,16 +24,19 @@ test('实际adapter手动写入口整个Promise可join且静止期间新请求�
 test('旧施缝marker源码升级补完整脚本run等待且第二次幂等',()=>{
  const adapter=readFileSync(new URL('../../../tmp/plg-standard-1001-code/b/lib/domain/tavern-script-host-adapter.js',import.meta.url),'utf8')
  const expected=applyRollbackGlobalAdapterTransform(adapter)
- const start=expected.indexOf('  // [dsh-tavern-adapter-runs:v1]'),end=expected.indexOf('\n',expected.indexOf('    await serverExecution.whenIdle(id)\n  }',start))+1
+ const start=expected.indexOf('  // [dsh-tavern-adapter-runs:v1]'),end=expected.indexOf(RUNS_BLOCK_END,start)+RUNS_BLOCK_END.length
  // 从本代移除增量块，构造旧global标记+旧whenIdle门面，验证升级。
  let old=expected
  const clearStart=old.indexOf('    // [dsh-tavern-adapter-clear:v1]'),clearEnd=old.indexOf('    settleMvuUpdate:',clearStart)
  old=old.slice(0,clearStart)+old.slice(clearEnd)
  for(const name of ['syncTemplateState','templateCharacters','settlementReaders','settlementSizes'])old=old.replace('  let '+name+' =','  const '+name+' =')
  old=old.replace("import { rollbackBarrier, rollbackSchedulingBarrier } from './storage-rollback-business.js'\n",'')
- const blockEnd=old.indexOf('    await serverExecution.whenIdle(id)\n  }',old.indexOf('  // [dsh-tavern-adapter-runs:v1]'))+'    await serverExecution.whenIdle(id)\n  }'.length
+ const blockEnd=old.indexOf(RUNS_BLOCK_END,old.indexOf('  // [dsh-tavern-adapter-runs:v1]'))+RUNS_BLOCK_END.length
  old=old.slice(0,old.indexOf('  // [dsh-tavern-adapter-runs:v1]'))+old.slice(blockEnd+1)
- old=old.replace('    whenIdle: whenRollbackAdapterIdle,','    whenIdle: sessionId => serverExecution.whenIdle(sessionId),').replace(/    (\w+): trackRollbackAdapterRun\(\1\),/g,'    $1,')
+   // 旧形态必须是“作者原生、没有 whenIdle 那一行”：addJoin 的锚点是
+  // '    dispatchEvent,\n    settleMvuUpdate,'，两者必须紧邻。若把 whenIdle 替换成别的门面而不是删掉，
+  // 这一行仍夹在中间，锚点必然失配（曾因写成 serverExecution.whenIdle 门面而失败）。
+  old=old.replace('    whenIdle: whenRollbackAdapterIdle,\n','').replace(/    (\w+): trackRollbackAdapterRun\(\1\),/g,'    $1,')
  assert.ok(start>=0&&end>start);assert.notEqual(old,expected);assert.equal(applyRollbackGlobalAdapterTransform(old),expected);assert.equal(applyRollbackGlobalAdapterTransform(expected),expected)
  const host=readFileSync(new URL('../../../tmp/rollback-compare-1001/current-index.js',import.meta.url),'utf8')
  const expectedHost=applyRollbackHostTransform(host),oldHost=expectedHost.replace('      await tavernScriptHostAdapter.whenIdle(chat.sessionId)\n','')

@@ -455,12 +455,15 @@ test('S5宿主DI：真实作者index两factory补窄出口且写后通知等价�
   const afterStale = await real.store.read(real.chatId)
   assert.equal(afterStale.messages.length, after.messages.length, 'CAS 不符必须零写')
   // B：setMessageFloorNarrow 走同一 store 与同一通知链；candidate.mailbox. 源按作者契约跳过 summary
+  // 目标楼取 1（assistant 楼，本来就有 mvu）：PR #18 起 command 层 changes 入口对"缺失父路径"
+  // 一律拒绝（见 audit-store-regressions 的 B14 direct-changes 用例），store 层不再替宿主
+  // 静默创建中间对象；这里要验的是窄出口的写入与通知链，不是"能否无父写入"。
   notes.calls.length = 0
-  const floor = await closures.setMessageFloorNarrow(real.chatId, afterStale._storageRevision, 0, { changes: [{ op: 'set', path: ['messages', 0, 'mvu', 'pending'], value: false }] }, { source: 'background.settlement.checkpoint', sessionId: SESSION_ID })
+  const floor = await closures.setMessageFloorNarrow(real.chatId, afterStale._storageRevision, 1, { changes: [{ op: 'set', path: ['messages', 1, 'mvu', 'pending'], value: false }] }, { source: 'background.settlement.checkpoint', sessionId: SESSION_ID })
   assert.equal(floor?.changed, true, '单楼窄出口必须真写真库')
   assert.deepEqual(notes.names(), ['candidate.changed', 'syncChatSummary', 'coordination.publish', 'scheduleTemplateSync', 'queueAutoCompaction'], '单楼写后通知链一致')
   notes.calls.length = 0
-  await closures.setMessageFloorNarrow(real.chatId, floor.revision, 0, { changes: [{ op: 'set', path: ['messages', 0, 'mvu', 'pending'], value: true }] }, { source: 'candidate.mailbox.commit', sessionId: SESSION_ID })
+  await closures.setMessageFloorNarrow(real.chatId, floor.revision, 1, { changes: [{ op: 'set', path: ['messages', 1, 'mvu', 'pending'], value: true }] }, { source: 'candidate.mailbox.commit', sessionId: SESSION_ID })
   assert.deepEqual(notes.names(), ['candidate.changed', 'coordination.publish', 'scheduleTemplateSync', 'queueAutoCompaction'], 'candidate.mailbox. 源按作者契约跳过 syncChatSummary')
 })
 

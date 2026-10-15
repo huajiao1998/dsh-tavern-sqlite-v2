@@ -46,9 +46,6 @@ window.__ModuleLoader__.load({
 .dsh-sqlite-save__dialog-head .dsh-sqlite-save__title{margin:0;flex:1 1 auto}
 .dsh-sqlite-save__close{appearance:none;font:inherit;line-height:1;min-height:24px;min-width:24px;padding:2px 6px;border:1px solid var(--dsw-alias-border-l2);border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer}
 .dsh-sqlite-save__close:hover{color:var(--dsw-alias-label-primary)}
-.dsh-sqlite-save__failure-strip{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--dsw-tavern-accent-error,var(--dsw-alias-state-error-primary,var(--dsw-alias-border-l2)));border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-state-error-primary,var(--dsw-alias-border-l2)) 10%,transparent)}
-.dsh-sqlite-save__failure-text{flex:1 1 auto;min-width:0;color:var(--dsw-alias-label-primary)}
-.dsh-sqlite-save__failure-clean{flex:0 0 auto;display:inline-flex;align-items:center;gap:6px}
 `
     let sessionsRef = null
     let active = false
@@ -405,76 +402,7 @@ window.__ModuleLoader__.load({
         h(HeaderSaveDialog, { sessionId: dialogOwner || owner, open: Boolean(dialogOwner) && !disabled, onClose: close }))
     }
 
-    // 失败提示条用宿主原生 trash 图标（不手工 SVG）；缺失则退为纯文字。
-    let TrashIcon = null
-    try {
-      const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
-      TrashIcon = primitives?.IconTrashOutline16 || null
-    } catch (_) { TrashIcon = null }
-
-    /**
-     * 输入区 dock 的失败提示条：**只在当前存在 canonical failureTarget 时**渲染（正常态返回 null，不占位）。
-     * handle 由 ui.selectFailure(owner) 在 useMemo 里取一次（stable），订阅走作者同一 live view select；
-     * 不轮询、不另发 getSession、不造 DOM 行、不做软隐藏。
-     */
-    function FailureCleanupStrip(props) {
-      const raw = props && (props.sessionId || (props.scope && props.scope.sessionId))
-      const owner = raw ? (sessionsRef?.subagentAddress?.(raw)?.parentSessionId || raw) : ''
-      const ui = typeof props.tavernStorageUi === 'object' && props.tavernStorageUi ? props.tavernStorageUi : null
-      const handle = React.useMemo(() => (ui && owner ? ui.selectFailure(owner) : null), [ui, owner])
-      const snapshot = React.useSyncExternalStore(
-        handle && typeof handle.subscribe === 'function' ? handle.subscribe : () => () => {},
-        handle && typeof handle.getSnapshot === 'function' ? handle.getSnapshot : () => null,
-        handle && typeof handle.getSnapshot === 'function' ? handle.getSnapshot : () => null)
-      const current = React.useMemo(
-        () => (ui && typeof ui.readFailureTarget === 'function' ? ui.readFailureTarget(handle) : null),
-        [ui, handle, snapshot])
-      const running = props.useSession ? Boolean(props.useSession(snap => snap && snap.running)) : false
-      // 活动信息仍订阅作者同一选择，但不把前后台状态当撤销资格。
-      const activity = snapshot && snapshot.view && snapshot.view.activity ? snapshot.view.activity : null
-      const settlementActive = Boolean(activity) && activity.role === 'settlement'
-        && (activity.phase === 'pending' || activity.phase === 'running')
-      // 用户决定是否撤销；取消与持久任务收口由后端编排处理。
-      const activityActive = Boolean(activity)
-        && (activity.busy === true || activity.phase === 'pending' || activity.phase === 'running')
-      // 活动状态不决定撤销资格；统一执行端先取消并收口，按钮只防自身重复操作。
-      const blocked = false
-      // 同组件内互斥用 ref（不触发额外 render，也不因 React strict 双挂载而漏防重入）。
-      const inFlight = React.useRef(false)
-      const [busy, setBusy] = React.useState(false)
-      const [error, setError] = React.useState('')
-      const mounted = React.useRef(false)
-      React.useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
-      if (!ui || !handle || !current) return null
-      // 活动轮同样显示撤销；互斥仅针对同一按钮在途调用。
-      if (blocked) return null
-      const onClick = async () => {
-        if (inFlight.current || blocked || !ui.active) return
-        inFlight.current = true
-        setBusy(true)
-        setError('')
-        try {
-          await ui.cleanFailure(owner, current.turn, current.target)
-        } catch (failure) {
-          if (mounted.current) setError(String(failure?.message || failure))
-        } finally {
-          inFlight.current = false
-          if (mounted.current) setBusy(false)
-        }
-      }
-      return h('div', { className: 'dsh-sqlite-save__failure-strip', role: 'status' },
-        h('span', { className: 'dsh-sqlite-save__failure-text' },
-          '最新发送：第 ' + current.turn + ' 轮' + (current.reason ? '（' + current.reason + '）' : '')),
-        h('button', {
-          className: 'dsh-tavern-btn dsh-sqlite-save__button dsh-sqlite-save__failure-clean',
-          type: 'button', disabled: busy || blocked,
-          title: '撤销最新一次发送；如仍在运行，将先停止并等待写入收口',
-          onClick,
-        },
-        TrashIcon ? h('span', { className: 'dsh-sqlite-save__icon', 'aria-hidden': 'true' }, h(TrashIcon, { size: 16 })) : null,
-        busy ? '撤销中…' : '撤销最新发送'),
-        error ? h('span', { className: 'dsh-sqlite-save__error', role: 'alert' }, error) : null)
-    }
+    // 回退与未完成发送清理只由作者「更多 → 回退」承载；保留共享服务，不注册输入区提示条。
 
     return {
       inject: ['sessions', 'slots', 'tavernStorageView', 'tavernUi'],
@@ -606,21 +534,6 @@ window.__ModuleLoader__.load({
             label: translate('title'),
           }, HeaderSaveButton))
         }, 'dsh-tavern-sqlite-v2: 页头数据库存档入口')
-        // 输入区 dock：作者真用的 slot 名就是 "conversation.input.dock"（冻结 42852b0 源 play-controls.js 中四处注册，
-        // order -130/-120/-115/-110）。本入口 order 20 立在其后 ⇒ 位置=现工具栏之下、输入框之上；
-        // 正常态无 failureTarget 时组件返回 null（不占位、不永久空位、不造 DOM 行）。
-        ctx.effect(() => {
-          const slots = ctx.slots
-          if (!slots || typeof slots.inject !== 'function' || typeof slots.register !== 'function') {
-            throw new Error('缺少 slots 服务，无法注册输入区失败清理条')
-          }
-          return slots.inject('conversation.input.dock', () => slots.register({
-            name: 'conversation.input.dock',
-            id: 'dsh-tavern-sqlite-v2:failure-clean',
-            order: 20,
-            label: '失败清理',
-          }, props => h(FailureCleanupStrip, { ...props, tavernStorageUi: ui, key: props && props.sessionId ? String(props.sessionId) : '' })))
-        }, 'dsh-tavern-sqlite-v2: 输入区失败清理条')
         ctx.effect(() => {
           ctx.emit(UI_EVENT)
           return () => { active = false; tavernUiRef = null; ui.active = false; attempts.clear(); ctx.emit(UI_EVENT) }

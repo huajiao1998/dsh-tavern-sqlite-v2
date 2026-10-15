@@ -1,7 +1,6 @@
 // 独立合成回归：不依赖作者工作区、网络或玩家数据。
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import vm from 'node:vm'
 import { DatabaseSync } from 'node:sqlite'
 import { mkdtempSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -9,7 +8,6 @@ import path from 'node:path'
 import { readVariables } from '../lib/read-variables.js'
 import { rewriteSaveTables } from '../lib/db-save-identities.js'
 import { createVariableArchive } from '../lib/variable-archive.js'
-import { createEsmModuleLoader } from '../lib/mvu/esm-module-loader.js'
 import { createDbSaveExchange } from '../lib/db-save-exchange.js'
 import { encodeDbSave, decodeDbSave, DB_SAVE_FORMAT, DB_SAVE_VERSION } from '../lib/db-save-zip.js'
 import { createChatSqliteStore } from '../chat-sqlite-store.js'
@@ -70,21 +68,6 @@ test('B06: opaque plugin fields survive while real session references are remapp
     assert.deepEqual(JSON.parse(out.archive_messages[0].message_json).tavernPluginData,plugin)
     assert.equal(JSON.parse(out.archive_head_fields[0].value_json),'session-new')
   }
-})
-
-for (const firstStatic of [false,true]) test('B09: concurrent import waits for shared top-level await (first static='+firstStatic+')', async () => {
-  let release,signal;const gate=new Promise(r=>release=r),entered=new Promise(r=>signal=r)
-  const context=vm.createContext({gate,signal})
-  const loader=createEsmModuleLoader({context,loadTimeoutMs:3000,lookupImpl:async()=>[{address:'93.184.216.34',family:4}],fetchImpl:async()=>new Response('signal(); await gate; export const ready=42;',{headers:{'content-type':'text/javascript'}})})
-  try {
-    const code="const m=await import('https://audit.example.test/tla.js'); export const value=m.ready;"
-    const first=loader.load({name:'first',code:firstStatic?"import {ready} from 'https://audit.example.test/tla.js'; export const value=ready;":code});first.catch(()=>{})
-    await entered
-    let finished=false
-    const second=loader.load({name:'second',code});second.then(()=>finished=true,()=>finished=true)
-    await new Promise(r=>setImmediate(r));assert.equal(finished,false)
-    release();const both=await Promise.all([first,second]);assert.deepEqual(both.map(m=>m.namespace.value),[42,42])
-  }finally{release();loader.dispose()}
 })
 
 test('B10: mismatched IDs are rejected before first write and before updating an existing archive', async () => {

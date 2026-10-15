@@ -26,8 +26,8 @@ test('最新施工：三处宿主锚点', () => {
   // ① saveBodyEdit：本次注入体必须在，且**作者的 notifyPluginTimeline('edit') 保留**；二次应用幂等。
   const bodyOnce = applyBodyEditEventTransform(source)
   assert.ok(bodyOnce.includes('// [dsh-tavern-body-edit-event:v1]'), '必须注入正文编辑事件标记')
-  assert.ok(bodyOnce.includes("dispatchServerEvent({ sessionId, chat: current, event: 'MESSAGE_EDITED'"), '必须保留 MESSAGE_EDITED 服务端派发')
-  assert.ok(bodyOnce.includes('await tavernScriptHostAdapter.dispatchServerEvent'), 'MESSAGE_EDITED 必须 await 在请求内完成')
+  assert.ok(bodyOnce.includes("dispatchEvent({ sessionId, chat: current, name: 'MESSAGE_EDITED'"), '必须保留 MESSAGE_EDITED 服务端派发')
+  assert.ok(bodyOnce.includes('await tavernScriptHostAdapter.dispatchEvent'), 'MESSAGE_EDITED 必须 await 在请求内完成')
   assert.ok(bodyOnce.includes("notifyPluginTimeline(sessionId, 'edit', { settled: true })"), '作者 saveBodyEdit 的 notifyPluginTimeline 必须保留')
   assert.equal(applyBodyEditEventTransform(bodyOnce), bodyOnce, '正文编辑接缝二次应用必须幂等')
 
@@ -103,7 +103,11 @@ test('最新施工：完整接入及现场卸载', t => {
     assert.ok(installed.includes('chats: chatPersistence, runtimeGeneration,'))
     for (const method of Object.keys(SAVE_HANDLERS)) assert.equal(installed.includes("case '" + method + "':"), false, method)
     assert.ok(installed.includes('lastNativeTurn'))
-    assert.equal(maintenanceTargets.length, 63)
+    // 维护目标总数快照：HOST 8 + SOURCE 12 + DOMAINS 44 + RETIRED_OWNED 3 = 67。
+    // 其中 4 项（server-script-executor/server-script-worker/helper-generation-tasks/
+    // storage-upstream-compute）是计算改唯一上游服务端时新增的；该组在 buildCore 里带能力
+    // 门控（作者树无 createServerScriptExecutor 时不生成），但仍是受管目标，故计入总数。
+    assert.equal(maintenanceTargets.length, 67)
 
     // 块外用户说明必须保留，卸载恢复现场原文而非旧官方整文件。
     const userComment = '\n// 用户现场说明，卸载必须保留\n'
@@ -143,8 +147,8 @@ test('最新施工：a2008bf完整接缝安装就绪并卸载保留现场修改'
     assert.ok(editStart >= 0, '必须保留新编辑入口')
     const editBody = installed.slice(editStart, installed.indexOf('runTask: runPluginTask', editStart))
     assert.ok(editBody.includes('await bodyEditor.replaceText(sessionId, text)'), '必须执行真实正文保存')
-    assert.ok(editBody.includes("await tavernScriptHostAdapter.dispatchServerEvent({ sessionId, chat: current, event: 'MESSAGE_EDITED', args: [after.to] })"), '必须实际施新编辑入口事件')
-    assert.equal(installed.split("event: 'MESSAGE_EDITED'").length - 1, 2, '旧UI与新插件编辑各一条事件派发')
+    assert.ok(editBody.includes("await tavernScriptHostAdapter.dispatchEvent({ sessionId, chat: current, name: 'MESSAGE_EDITED', args: [after.to] })"), '必须实际施新编辑入口事件')
+    assert.equal(installed.split("name: 'MESSAGE_EDITED'").length - 1, 2, '旧UI与新插件编辑各一条事件派发')
     assert.ok(installed.includes('playWorldBook(chat, card)'), '保留作者新世界书调用链')
     assert.ok(installed.includes("source: 'plugin.variables'"), '保留作者新变量写入链')
     const note = '\n// 用户新树现场说明，卸载不能回盖\n'

@@ -1,7 +1,5 @@
-// Issue #15具名断言：仅合成变量、真实临时SQLite与vm模块；不读取任何业务存档/联网。
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import vm from 'node:vm'
 import {mkdtempSync,rmSync,existsSync} from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
@@ -10,7 +8,6 @@ import {readVariables} from '../lib/read-variables.js'
 import {rewriteSaveTables} from '../lib/db-save-identities.js'
 import {createRollbackWorldbookRecallLog} from '../lib/worldbook-recall-store.js'
 import {createChatSqliteStore} from '../chat-sqlite-store.js'
-import {createEsmModuleLoader} from '../lib/mvu/esm-module-loader.js'
 const chatOf=stat_data=>({id:'chat-issue15',_storageRevision:1,messages:[{role:'assistant',turn:1,variables:[{stat_data}]}]})
 const pages=(chat,args)=>{const out=[];let cursor;const seen=new Set();do{const page=readVariables(chat,{...args,...(cursor?{cursor}:{})});out.push(page);cursor=page.nextCursor;if(cursor){assert.ok(!seen.has(cursor),'游标必须推进');seen.add(cursor)}assert.ok(out.length<100,'页数有界')}while(cursor);return out}
 
@@ -23,10 +20,10 @@ test('B02 UTF-8预算：中文ASCII条目逐页不超4000字节且不漏不重',
 })
 test('B03 Unicode分页预览：代理对跨边界完整且多页拼接等于原文',()=>{
  const text='a'.repeat(999)+'😀'+'中'.repeat(1000)+'😀end',chat=chatOf({text})
- const all=pages(chat,{action:'read',path:'/text'})
+ const all=pages(chatOf({text}),{action:'read',path:'/text'})
  assert.ok(all.every(p=>p.value.isWellFormed()));assert.equal(all.map(p=>p.value).join(''),text)
  const preview=readVariables(chatOf({text:'a'.repeat(199)+'😀end'}),{action:'read'})
- assert.equal(preview.entries[0].value.isWellFormed(),true);assert.equal(preview.entries[0].truncated,true)
+ assert.ok(preview.entries[0].value.isWellFormed(),true);assert.equal(preview.entries[0].truncated,true)
 })
 test('B04 单项超限：控制字符转义后超预算必须明确报错而非重复空游标',()=>{
  assert.throws(()=>readVariables(chatOf({['\u0001'.repeat(700)]:1})),/单项超过4000字节/)
@@ -96,30 +93,4 @@ test('B10 update身份：首写零建库，后续拒绝后热冷读取都保持�
  await a.update(id,()=>seed(id));await assert.rejects(()=>a.update(id,c=>({...c,id:'wrong',_storageRevision:2})),/chat.id/)
  assert.equal((await a.read(id)).id,id);assert.equal((await a.read(id))._storageRevision,1);a.dispose()
  const b=createChatSqliteStore({dataRoot:root,helpers:await realHelpers()});try{assert.equal((await b.read(id)).id,id);await b.update(id,c=>({...c,title:'valid',_storageRevision:2}));assert.equal((await b.read(id)).title,'valid')}finally{b.dispose()}
-})
-test('B09 同步模块循环依赖：重复导入不重复执行且live binding正常',async()=>{
- const ctx=vm.createContext({executions:0}),sources=new Map([
-  ['https://modules.example.com/a.js',"import {readA} from './b.js';globalThis.executions++;export let a=3;export function setA(v){a=v};export function fromB(){return readA()}"],
-  ['https://modules.example.com/b.js',"import {a} from './a.js';export function readA(){return a}"]
- ])
- const loader=createEsmModuleLoader({context:ctx,lookupImpl:async()=>[{address:'93.184.216.34',family:4}],fetchImpl:async url=>new Response(sources.get(url),{headers:{'content-type':'application/javascript'}})})
- try{
-  const first=await loader.load({name:'cycle-first',code:"const m=await import('https://modules.example.com/a.js');m.setA(9);export const value=m.fromB()"})
-  assert.equal(first.namespace.value,9)
-  const second=await loader.load({name:'cycle-second',code:"const m=await import('https://modules.example.com/b.js');export const value=m.readA()"})
-  assert.equal(second.namespace.value,9);assert.equal(ctx.executions,1)
- }finally{loader.dispose()}
-})
-
-test('B09 并发动态导入TLA：共享求值必须等待gate且同模块只执行一次',async()=>{
- let release,entered;const gate=new Promise(r=>release=r),ready=new Promise(r=>entered=r),ctx=vm.createContext({gate,signal:()=>entered(),executions:0})
- const loader=createEsmModuleLoader({context:ctx,lookupImpl:async()=>[{address:'93.184.216.34',family:4}],fetchImpl:async()=>new Response('globalThis.executions++;signal();await gate;export const ready=42',{headers:{'content-type':'application/javascript'}})})
- try{
-  const first=loader.load({name:'first',code:"const m=await import('https://modules.example.com/issue15-gated.js');export const value=m.ready"});first.catch(()=>{})
-  await ready;let settled=false
-  const second=loader.load({name:'second',code:"const m=await import('https://modules.example.com/issue15-gated.js');export const value=m.ready"});second.then(()=>settled=true,()=>settled=true)
-  await new Promise(r=>setImmediate(r));assert.equal(settled,false,'gate未释放不得提前读取未初始化导出')
-  release();const both=await Promise.all([first,second]);assert.deepEqual(both.map(m=>m.namespace.value),[42,42]);assert.equal(ctx.executions,1)
-  const third=await loader.load({name:'third',code:"const m=await import('https://modules.example.com/issue15-gated.js');export const value=m.ready"});assert.equal(third.namespace.value,42);assert.equal(ctx.executions,1)
- }finally{release();loader.dispose()}
 })
