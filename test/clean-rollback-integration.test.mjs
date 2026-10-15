@@ -28,6 +28,7 @@ import {createRollbackExtensionSettings} from '../lib/rollback-extension-setting
 import {rewindRollbackHandles} from '../lib/rollback-handles.js'
 import {installSendAcceptance, activeSendCapture} from '../lib/send-acceptance.js'
 import {assertSendAfterCleanup} from '../lib/failure-state.js'
+import {TASK_STATE_FIELDS} from '../lib/chat-query-service.js'
 configureRollbackCleanup({sessionEvents:s=>s.snapshotEvents()})
 const requireHost=createRequire(path.join(process.env.DSH_CHECKOUT || 'D:/Program Files (x86)/DSH Desktop/resources/app','package.json'))
 const helpers={copyJsonTree:value=>value===undefined?undefined:structuredClone(value),applyJsonChangesShared:value=>value}
@@ -224,15 +225,14 @@ test('旧轮物理回退后后台turn1固定系统头保留，真实任务入口
   assert.equal(f.workerDb.cursor(),background.log.length)
  }finally{await f.cleanup()}
 })
-for(const kind of ['missing-token','missing-baseline','unknown-worker','missing-sync','missing-inbox'])test('删前硬拒：'+kind+'不能假报干净，archive与Session尾部均不变',async()=>{
+for(const kind of ['missing-token','unknown-worker','missing-sync','missing-inbox'])test('删前硬拒：'+kind+'不能假报干净，archive与Session尾部均不变',async()=>{
  const f=await fixture()
  try{
-  if(kind==='missing-baseline')await f.update(f.base.id,c=>{delete c.timeline.checkpoints[0].businessBefore;delete c.timeline.operations.body.businessBefore;return c},{source:'fixture.prepare'})
   if(kind==='unknown-worker')await f.update(f.base.id,c=>{c.timeline.operations.independent={id:'independent',kind:'agent',startedSessionId:'untracked-session'};return c},{source:'fixture.prepare'})
   const before=await f.read(),eventCount=f.mainDb.cursor()
   if(kind==='missing-inbox')delete f.agents.get(f.session.id).inbox
   const args={...f.args,chat:before,...(kind==='missing-token'?{services:{...f.args.services,tokenMeterProvider:()=>undefined}}:kind==='missing-sync'?{services:{...f.args.services,rollbackSyncProvider:()=>undefined}}:{})}
-  const reasons={'missing-token':/token/,'missing-baseline':/基准/,'unknown-worker':/独立任务会话/,'missing-sync':/同连接同步/,'missing-inbox':/inbox/}
+  const reasons={'missing-token':/token/,'unknown-worker':/独立任务会话/,'missing-sync':/同连接同步/,'missing-inbox':/inbox/}
   await assert.rejects(cleanRollback(args),reasons[kind])
   const after=await f.read();assert.equal(after._storageRevision,before._storageRevision);assert.equal(after.rollbackPending,undefined);assert.equal(f.mainDb.cursor(),eventCount);assert.deepEqual(after.messages,before.messages)
  }finally{await f.cleanup()}
@@ -761,14 +761,13 @@ test('统一撤销先取消在途发送且拒陈旧凭据',async()=>{
   assert.equal(after.rollbackPending,undefined)
   assert.equal(f.agents.get(f.session.id).phase.lastTurn,52)
  }finally{await f.cleanup()}
- // 伪造凭据：零取消、零库写、零 store 写、phase 不变。
+  // 伪造**身份/锚点**必须拒（防删错数据）：chat/session/branch 与原生输入锚点仍是硬底线。
+  // operationId 与 revision 只是页面签发时的快照，不再作为回退资格（目标轮由后端按权威事件流确定）。
  const forged=[
   ['错chat',t=>({...t,chatId:'other-chat'}),/不一致/],
   ['错session',t=>({...t,sessionId:'other-session'}),/不一致/],
   ['错branch',t=>({...t,branchId:'other-branch'}),/不一致|过期/],
-  ['旧operationId',t=>({...t,operationId:'old-op'}),/已变化|不一致/],
   ['错nativeAnchor',t=>({...t,nativeAnchor:{...(t.nativeAnchor||{}),input:Number(t.nativeAnchor?.input||0)+999}}),/锚点|已变化|不一致/],
-  ['错revision',t=>({...t,revision:Number(t.revision)+3}),/过期|不一致/],
  ]
  for(const [name,mutate,pattern] of forged){
   const g=await fixture(false,false,{status:'running',reason:'aborted',reply:false,variables:true})
@@ -1072,4 +1071,59 @@ test('原生取消新增：无前像活动尾取消新终态后按原接受身�
   assert.equal(canceled,1);assert.equal(f.mainDb.cursor(),f.keep)
   assert.equal(f.session.snapshotEvents().some(event=>event.data?.turn===53),false)
  }finally{await f.cleanup()}
+})
+
+// 真实作者 2.7.0 入口链路回归（本轮核心修复）：
+// round-history.js:551-565 经 chats.readState(=taskStateReader.read) 读档，taskStateFields
+// **不含** timeline.checkpoints 与 messages；clean-rollback-transform 的 rollbackChat 垫片
+// 又直接把这枚摘要当作 chat 传给 cleanRollback。若执行端用摘要判"是否最新发送/是否带基准"，
+// 就会把可回退的最新轮误判成不可回退（现场报"回退目标不是当前最新发送"）。
+// 这里复现该形态：最新轮 body 已被账本回收、发轮前基准只存在于 checkpoint。
+test('真实入口：任务摘要缺checkpoints与messages仍能回退最新轮，并可连续清理上一轮',async()=>{
+  // 真实会话在首轮之前必有会话头/种子（resolveTurnCut 的 first-turn 模式据此保留 metadata），
+  // 否则第一轮回退会被「没有安全边界」拒绝——那是夹具不真实，不是回退资格问题。
+  const f=await fixture(false,false,{before52:s=>s.append('session/end-seed',{})})
+  const {latestSendTarget}=await import('../lib/latest-send.js')
+  try{
+   // ① 构造真实形态：最新轮(53) body operation 已回收，同轮 checkpoint 仍是唯一发轮前基准。
+   await f.update(f.base.id,c=>{
+    delete c.timeline.operations.body
+    // 同时给上一轮(52)补真实发轮前像（messageCount=1、hp51），否则连续回退只能走 synthetic 基准。
+    const before52=structuredClone((c.timeline.checkpoints||[]).find(cp=>Number(cp.turn)===53).businessBefore)
+    before52.messageCount=1;before52.fields={...before52.fields,variables:{hp:51}}
+    c.timeline.checkpoints=[{id:'cp52',turn:52,businessBefore:before52},...(c.timeline.checkpoints||[])]
+    return c})
+   f.args.chat=await f.read()
+   assert.equal(f.args.chat.timeline.operations.body,undefined,'构造条件：最新轮 body 必须已回收')
+   assert.ok((f.args.chat.timeline.checkpoints||[]).some(cp=>Number(cp.turn)===53),'构造条件：同轮 checkpoint 必须仍在')
+   // ② 按作者入口口径取窄摘要（不含 checkpoints/messages）。
+   const entry=await f.store.readSlice(f.base.id,[],TASK_STATE_FIELDS)
+   assert.ok(entry?.chat,'窄读必须返回摘要')
+   assert.equal(entry.chat.timeline.checkpoints,undefined,'构造条件：入口摘要必须没有 checkpoints')
+   assert.equal(entry.chat.messages.length,0,'构造条件：入口摘要 messages 必须为空')
+   // ③ 视图层用完整档签目标（与线上一致），执行端只收到摘要。
+   const signed=latestSendTarget(await f.read(),{events:f.session.snapshotEvents()})
+   assert.equal(signed?.kind,'rollback')
+   assert.equal(signed.turn,53)
+   // ④ 摘要作入口发起回退：不得因"摘要里找不到同轮基准"而拒绝。
+   const result=await cleanRollback({...f.args,chat:entry.chat,requestedTurn:signed})
+   assert.equal(result.turn,52,'必须回到上一轮边界')
+   const after=await f.read()
+   assert.equal(after.messages.at(-1).turn,52,'正文必须回到 52')
+   assert.deepEqual(after.variables,{hp:52},'变量必须恢复 52 的发轮前像')
+   assert.equal(after.rollbackPending,undefined)
+   assert.equal(f.mainDb.readMeta().eventCount,f.keep,'必须正好删掉最新轮，不多删上一轮')
+   // ⑤ 上一轮成为最新轮后必须仍可继续清理（连续回退，不因形态/分支变化拒绝）。
+   const nextEntry=await f.store.readSlice(f.base.id,[],TASK_STATE_FIELDS)
+   const nextTarget=latestSendTarget(await f.read(),{events:f.session.snapshotEvents()})
+   assert.equal(nextTarget.turn,52,'上一轮必须成为新的最新发送')
+   const second=await cleanRollback({...f.args,chat:nextEntry.chat,requestedTurn:nextTarget})
+   assert.equal(second.rolledBack.hiddenTurn,52,'必须撤销当前最新轮 52')
+   const settled=await f.read()
+   assert.equal(settled.messages.length,1,'必须回到 52 的发轮前像（只剩上一条输入）')
+   assert.deepEqual(settled.variables,{hp:51},'必须恢复 52 的发轮前像变量 hp51')
+   assert.equal(settled.rollbackPending,undefined)
+   assert.equal(f.mainDb.readMeta().eventCount,1,'连续回退必须只留会话头，不删 metadata')
+   assert.equal(f.session.snapshotEvents().some(event=>Number(event.data?.turn)>=52),false,'52/53 的事件必须都已物理删除')
+  }finally{await f.cleanup()}
 })
