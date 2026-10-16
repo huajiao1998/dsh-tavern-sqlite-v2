@@ -41,6 +41,8 @@ export function applyUpstreamExecutor(source) {
   once('const ALLOWED_METHODS = new Set([', "const ALLOWED_METHODS = new Set(['confirmSessionPatch',")
   once('  const records = new Map(), retryAfter = new Map()', '  const records = new Map(), retryAfter = new Map(), pending = new Map(), closing = new Map(), openingWaiters = new Map()\n  let disposed = false')
   once('本次运行改由页面执行卡脚本', '暂停本次服务端尝试；任务保留，禁止客户端计算')
+  // 私有开局有自己的超时与取消；等待初始化/IPC期间不能被普通空闲回收器提前终止。
+  once('if (now() - record.demandedAt <= lingerMs) continue', 'if (openingWaiters.has(record.sessionId) || now() - record.demandedAt <= lingerMs) continue')
   once('    records.delete(sessionId)\n    record.stopSignals()', "    records.delete(sessionId)\n    invalidate(sessionId)\n    openingWaiters.get(sessionId)?.reject(new Error('服务端开局任务已失效'))\n    openingWaiters.delete(sessionId)\n    record.stopSignals()")
   once('  async function answer(record, message) {', `  function track(id, work) {
     const task = Promise.resolve().then(work)

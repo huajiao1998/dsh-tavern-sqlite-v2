@@ -752,6 +752,8 @@ test('统一撤销先取消在途发送且拒陈旧凭据',async()=>{
   assert.equal(cancels,1,'在途发送必须先被取消')
   assert.equal(idleWaits,1,'必须等待代理静止')
   assert.equal(lateWrites,1,'迟到写必须真的发生（模拟）')
+   assert.equal((await f.read()).rollbackCompletion.ordinaryTarget.revision,signed.revision,'完成意图保留发起版本，同一凭据才能精确重试')
+   assert.ok((await f.read())._storageRevision>signed.revision,'取消终态写入真实推进revision，不能把同轮正常收口误判为陈旧目标')
   const after=await f.read()
   assert.equal(result.turn,52,'返回视图轮号必须是恢复后的 52')
   assert.equal(f.mainDb.readMeta().eventCount,f.keep,'取消后写入的终态必须随纯尾一并删除')
@@ -762,9 +764,31 @@ test('统一撤销先取消在途发送且拒陈旧凭据',async()=>{
   assert.equal(f.agents.get(f.session.id).phase.lastTurn,52)
  }finally{await f.cleanup()}
   // 伪造**身份/锚点**必须拒（防删错数据）：chat/session/branch 与原生输入锚点仍是硬底线。
-  // operationId 与 revision 只是页面签发时的快照，不再作为回退资格（目标轮由后端按权威事件流确定）。
+  // 入口仍拒绝过期版本；静止期间同轮正常终态可推进revision，但分支/轮次/操作漂移仍拒。
+  for(const [name,mutate,pattern] of [
+   ['分支变化',c=>{c.timeline.branchId='new-branch';return c},/版本已过期|分支/],
+   ['轮次变化',c=>{c.timeline.operations.body.turn=54;return c},/回退目标已经变化/],
+   ['操作变化',c=>{c.timeline.operations.replacement=c.timeline.operations.body;delete c.timeline.operations.body;return c},/操作身份已变化/],
+  ]){
+   const g=await fixture(false,false,{status:'running',reason:'interrupted',reply:false,variables:true,end:false})
+   try{
+    const chat=await g.read(),signed=latestSendTarget(chat,{events:g.session.snapshotEvents()})
+    const agent=g.agents.get(g.session.id)
+    agent.phase={kind:'running',lastTurn:53}
+    agent.cancel=()=>{agent.phase={kind:'idle',lastTurn:53}}
+    agent.whenIdle=async()=>{await g.update(g.base.id,mutate)}
+    const cursor=g.mainDb.cursor()
+    await assert.rejects(cleanRollback({...g.args,chat,requestedTurn:signed}),pattern,name)
+    const after=await g.read()
+    assert.equal(g.mainDb.cursor(),cursor,name+'：不得截断原生库')
+    assert.deepEqual(after.messages,chat.messages,name+'：不得删除正文')
+    assert.deepEqual(after.variables,chat.variables,name+'：不得改写变量')
+    assert.equal(after.rollbackPending,undefined,name+'：不得创建完成意图')
+   }finally{await g.cleanup()}
+  }
  const forged=[
   ['错chat',t=>({...t,chatId:'other-chat'}),/不一致/],
+   ['错revision',t=>({...t,revision:t.revision+1}),/版本已过期/],
   ['错session',t=>({...t,sessionId:'other-session'}),/不一致/],
   ['错branch',t=>({...t,branchId:'other-branch'}),/不一致|过期/],
   ['错nativeAnchor',t=>({...t,nativeAnchor:{...(t.nativeAnchor||{}),input:Number(t.nativeAnchor?.input||0)+999}}),/锚点|已变化|不一致/],
