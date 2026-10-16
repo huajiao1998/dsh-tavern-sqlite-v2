@@ -45,3 +45,15 @@ git diff --check 与三个修改源码文件的 node --check 均通过。
 - 大包测试为 1/4/8 MiB 合成容器进入 schema 检查，不等同完整大存档玩法验收；原有合成完整 DB 交换往返测试通过。
 
 本 PR 仅修改存储源码、回归测试及本说明，不改变包版本或安装器。没有自动修复此前已被错误写入的玩家数据。
+
+## PR 后续：B21–B23（基于 6c341eef，2026-10-15）
+
+- B21：snapshotAt 与 snapshotAll 在同楼多个非选中变量树的排序平局时使用一致的 swipe_id 次序。保持既有非选中树回退语义，不将缺失选中槽改成空结果。
+- B22：patch 中间 splice 前只补齐受影响后缀，在同一事务内清理旧索引快照并按新楼序归档。覆盖删除、插入无变量行、多次 splice、删尾与失败回滚；避免变量错配持久化。
+- B23：单楼/追加窄命令记录撤销前像时，写入前按需补齐被改旧楼的变量。显式删除冷楼变量即使原始行 JSON 看起来不变也记录前像；同轮重复修改保留最初前像。普通未归属写入不增加撤销记录。
+
+新增 19 项测试；test/audit-store-regressions.test.mjs 合计 41 项。B23 覆盖冷热楼的替换、删除、重复修改、无归属写入、事务失败，以及恢复保存后重新打开数据库。
+
+本次定向验证：前述 10 文件加 rollback-owned-runtime-writes.test.mjs 与 rollback-worldbook-history.test.mjs，共 88/88 通过；audit-storage-fixes.test.mjs 另 10/10 通过，总计 98 项。git diff --check 通过。
+
+边界：B23 此次修复和验证的是 recordCommandUndo 窄命令链，不宣称通用 patch/update 的所有撤销路径均已验证。B20 冷楼变量子路径修改失败，以及 B18 deleteFrom 后再编辑文字使旧树重新归档的问题仍未修复。不自动恢复此前已错配或缺失的玩家数据。未运行完整宿主 UI/E2E。

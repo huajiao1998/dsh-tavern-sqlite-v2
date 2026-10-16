@@ -487,7 +487,8 @@ export function createChatSqliteStore(options = {}) {
       const deletedVariables = (changes || []).filter(change => change.path?.length === 3
         && change.path[0] === 'messages' && change.path[2] === 'variables' && change.op === 'delete')
         .map(change => change.path[1])
-      const prepared = variables.prepareWrite(db, chatId, chat, { touched: touchedIndices, truncated, deletedVariables })
+      const prepared = variables.prepareWrite(db, chatId, chat, { touched: touchedIndices, truncated, deletedVariables,
+        resetSnapshotsFrom: options.resetSnapshotsFrom })
       const storedChat = prepared.chat
       const storedMessages = Array.isArray(storedChat.messages) ? storedChat.messages : messages
       // prepareWrite只在修剪时替换自有楼对象；仅在实际written楼内补内部变化，不比较整档。
@@ -982,9 +983,20 @@ export function createChatSqliteStore(options = {}) {
       assertRollbackChatWritable(state?.chat, metadata)
       if (!state || state.revision !== expectedRevision) return undefined
       if (changes.length === 0) { metadata.assertCurrent?.(); return slice(state.chat, []).chat }
-      const normalized = normalizePatchChanges(state.chat, changes, state.chat.messages.length)
+      // splice 会改变快照的 message_index 身份；先补齐受影响区间，再按写后楼序重新归档。
+      // 不修改缓存中的瘦行。尾部追加的起点等于长度，无需读取已有变量。
+      const splices = changes.filter(change => change.op === 'splice' && change.path?.length === 1 && change.path[0] === 'messages')
+      const resetSnapshotsFrom = splices.length ? Math.min(...splices.map(change => change.index)) : undefined
+      let patchBase = state.chat
+      if (Number.isSafeInteger(resetSnapshotsFrom) && resetSnapshotsFrom >= 0 && resetSnapshotsFrom < state.chat.messages.length) {
+        const rows = state.chat.messages.slice(resetSnapshotsFrom)
+        variables.hydrateRange(handle(chatId), chatId, resetSnapshotsFrom, state.chat.messages.length, rows)
+        patchBase = { ...state.chat, messages: [...state.chat.messages.slice(0, resetSnapshotsFrom), ...rows] }
+      }
+      const normalized = normalizePatchChanges(patchBase, changes, state.chat.messages.length)
+
       changes = normalized
-      const next = applyJsonChangesShared(state.chat, changes)
+      const next = applyJsonChangesShared(patchBase, changes)
       const undoOperation=recordRollbackBusinessWrites(state.chat,next,metadata,copyJsonTree)
       if(undoOperation) {
         changes=[...changes,{op:'set',path:['timeline','operations',undoOperation,'businessBefore'],value:next.timeline.operations[undoOperation].businessBefore}]
@@ -999,7 +1011,7 @@ export function createChatSqliteStore(options = {}) {
       if (Number(db.prepare('SELECT revision FROM archive_head WHERE id=1').get()?.revision)!==expectedRevision) return undefined
       // storedChat = 实际落库的形态（老楼 variables 可能已被 K4 修剪进同库快照表）：
       // 写缓存/返回都用它，避免"库是瘦的、内存缓存是全的"这种 hydrate-full-then-remember-huge。
-      const written = writeChat(db, chatId, next, expectedRevision + 1, now(), changes, {expectedRevision})
+      const written = writeChat(db, chatId, next, expectedRevision + 1, now(), changes, {expectedRevision, resetSnapshotsFrom})
       const storedChat = written.chat
       // 复用调用方及内部整理的最终写集；不再全档比较，也不漏掉额外修剪楼。
       changes = written.changes
@@ -1879,6 +1891,7 @@ export function createChatSqliteStore(options = {}) {
       try {
         outcome = commandAppendMessages(db, { chatId: id, sessionId: metadata.sessionId, revision: expectedRevision, items, headerSets, timelineUpdate }, {
           assertWritableChat, now, rollbackMetadata:metadata,
+          hydrateUndoRow: (targetDb, targetChatId, index, row) => variables.hydrateRow(targetDb, targetChatId, index, row),
           archiveLocalWrite: (targetDb, targetChatId, touchedRows, messageCount, options) =>
             variables.prepareLocalWrite(targetDb, targetChatId, touchedRows, messageCount, options),
           applyMessageWrite: ({ revision, keys, messages, timeline, changes }) => {
@@ -1929,6 +1942,7 @@ export function createChatSqliteStore(options = {}) {
       try {
         outcome = commandSetMessageFloor(db, { chatId: id, sessionId: metadata.sessionId, revision: expectedRevision, index, changes: floorChanges }, {
           assertWritableChat, now, headerSets, rollbackMetadata:metadata,
+          hydrateUndoRow: (targetDb, targetChatId, index, row) => variables.hydrateRow(targetDb, targetChatId, index, row),
           archiveLocalWrite: (targetDb, targetChatId, touchedRows, messageCount, options) =>
             variables.prepareLocalWrite(targetDb, targetChatId, touchedRows, messageCount, options),
           applyMessageWrite: ({ revision, keys, messages, timeline, changes: committed }) => {

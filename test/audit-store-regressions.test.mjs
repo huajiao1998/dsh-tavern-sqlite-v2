@@ -20,6 +20,7 @@ const helpers = {
       if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) changes.push(Object.hasOwn(after, key)
         ? { op: 'set', path: [key], value: after[key] } : { op: 'delete', path: [key] })
     }
+    if (!Array.isArray(before.messages) && !Array.isArray(after.messages)) return changes
     assert.equal(before.messages.length, after.messages.length, '本夹具 update 不修改数组长度')
     after.messages.forEach((row, index) => {
       if (JSON.stringify(before.messages[index]) !== JSON.stringify(row)) changes.push({ op: 'set', path: ['messages', index], value: row })
@@ -33,7 +34,8 @@ const helpers = {
       let parent = next
       for (const key of change.path.slice(0, -1)) { assert.ok(parent && Object.hasOwn(parent, key)); parent = parent[key] }
       const key = change.path.at(-1)
-      if (change.op === 'delete') delete parent[key]
+      if (change.op === 'splice') parent[key].splice(change.index, change.deleteCount, ...(structuredClone(change.items ?? [])))
+      else if (change.op === 'delete') delete parent[key]
       else { assert.equal(change.op, 'set'); parent[key] = structuredClone(change.value) }
     }
     return next
@@ -59,6 +61,46 @@ async function fixture(t) {
   return { id, get store() { return store }, reopen }
 }
 const set = (index, leaf, value) => ({ op: 'set', path: ['messages', index, ...leaf], value })
+
+for (const selected of [0, 1, 2, 3]) test('B21: history APIs agree for null/missing/selected swipe ' + selected, async t => {
+  const f = await fixture(t)
+  await f.store.setMessageFloor(f.id, 1, 7, { changes: [set(7, ['swipes'], ['A','B','C','D']),
+    set(7, ['variables'], [null, {stat_data:{tag:'B'},schema:{}}, {stat_data:{tag:'C'},schema:{}}]), set(7, ['swipeId'], selected)] })
+  for (let attempt=0; attempt<2; attempt++) {
+    const store = attempt ? f.reopen() : f.store
+    assert.equal(store.variables.snapshotAt(f.id,7).stat_data.tag, selected === 2 ? 'C' : 'B')
+    assert.deepEqual(store.variables.snapshotAt(f.id,7), store.variables.snapshotAll(f.id).get(7))
+  }
+})
+
+const splice = (index, deleteCount, items=[]) => ({op:'splice',path:['messages'],index,deleteCount,items})
+test('PR19 merge: splice keeps shared undefined normalization on hydrated rows', async t => {
+  const f = await fixture(t)
+  await f.store.patch(f.id,1,[splice(1,1),set(1,['variables'],undefined),{op:'set',path:['_storageRevision'],value:2}])
+  const chat=await f.reopen().read(f.id)
+  assert.equal(chat.messages[1].text,'floor-2')
+  assert.equal(Object.hasOwn(chat.messages[1],'variables'),false)
+  assert.equal(chat.messages[2].variables[0].stat_data.floor,3)
+})
+for (const mode of ['delete-cold','insert-empty','multiple','tail','rollback']) test('B22: splice preserves variable identity: ' + mode, async t => {
+  const f = await fixture(t)
+  const before = await f.store.read(f.id)
+  const edits = mode === 'insert-empty' ? [splice(1,0,[{role:'user',turn:100,text:'inserted'}])]
+    : mode === 'multiple' ? [splice(1,1),splice(2,0,[{role:'user',turn:100,text:'inserted'}]),splice(5,1)]
+    : mode === 'tail' ? [splice(7,1)] : [splice(1,1)]
+  const expected = helpers.applyJsonChangesShared(before,edits)
+  const changes = [...edits,{op:'set',path:['_storageRevision'],value:2}]
+  if (mode === 'rollback') {
+    const db = new DatabaseSync(f.store.rollbackArchivePath(f.id))
+    try { db.exec("CREATE TRIGGER fail_splice BEFORE INSERT ON archive_messages WHEN NEW.message_index=2 BEGIN SELECT RAISE(ABORT,'splice failed'); END") }
+    finally { db.close() }
+    await assert.rejects(f.store.patch(f.id,1,changes),/splice failed/)
+    assert.deepEqual((await f.reopen().read(f.id)).messages,before.messages)
+  } else {
+    await f.store.patch(f.id,1,changes)
+    assert.deepEqual((await f.reopen().read(f.id)).messages,expected.messages)
+  }
+})
 
 for (const mode of ['floor', 'patch']) for (const index of [1, 7]) test(`B16: ${mode} deletes variables on floor ${index} durably`, async t => {
   const f = await fixture(t)
@@ -234,4 +276,35 @@ for (const command of ['setMessageFloor', 'patch']) test('B15: ' + command + ' s
   assert.equal(f.store.variables.snapshotAt(f.id, 101).stat_data.floor, 1)
   assert.equal(f.reopen().variables.snapshotAt(f.id, 101).stat_data.floor, 1)
   assert.equal((await f.store.read(f.id)).messages[1].turn, 101)
+})
+
+for (const index of [1,7]) for (const mode of ['replace','delete','twice','unowned','failure']) test(`B23: durable undo for ${mode} on floor ${index}`, async t => {
+  const f = await fixture(t)
+  const {captureRollbackBusinessState,restoreRollbackBusinessState} = await import('../lib/rollback-business-state.js')
+  const initial=await f.store.read(f.id)
+  initial.timeline.operations.body8={id:'body8',kind:'body',status:'running',turn:8,businessBefore:captureRollbackBusinessState(initial)}
+  initial._storageRevision=2
+  await f.store.update(f.id,()=>initial)
+  const changes=[mode==='delete'?{op:'delete',path:['messages',index,'variables']}:set(index,['variables'],[{stat_data:{floor:101},schema:{}}])]
+  const metadata={source:mode==='unowned'?'configuration.edit':'tavern-helper.test'}
+  if(mode==='failure') {
+    const db=new DatabaseSync(f.store.rollbackArchivePath(f.id))
+    try { db.exec(`CREATE TRIGGER reject_undo BEFORE INSERT ON archive_messages WHEN NEW.message_index=${index} BEGIN SELECT RAISE(ABORT,'undo failed'); END`) }
+    finally {db.close()}
+    await assert.rejects(f.store.setMessageFloor(f.id,2,index,{changes},metadata),/undo failed/)
+    const cold=await f.reopen().read(f.id)
+    assert.equal(cold.messages[index].variables[0].stat_data.floor,index)
+    assert.equal(cold.timeline.operations.body8.businessBefore.messagePreimages,undefined)
+    return
+  }
+  await f.store.setMessageFloor(f.id,2,index,{changes},metadata)
+  if(mode==='twice') await f.store.setMessageFloor(f.id,3,index,{changes:[set(index,['variables'],[{stat_data:{floor:202},schema:{}}])]},metadata)
+  const written=await f.reopen().read(f.id)
+  const baseline=written.timeline.operations.body8.businessBefore
+  if(mode==='unowned') {assert.equal(baseline.messagePreimages,undefined);return}
+  assert.equal(baseline.messagePreimages[index].variables[0].stat_data.floor,index)
+  const restored=restoreRollbackBusinessState(structuredClone(written),baseline)
+  restored._storageRevision=written._storageRevision+1
+  await f.store.update(f.id,()=>restored)
+  assert.equal((await f.reopen().read(f.id)).messages[index].variables[0].stat_data.floor,index)
 })
