@@ -210,7 +210,7 @@ test('干净清理7 built组合：clientCoreWrites built含failureTarget/handler
   const fixRoot = new URL('../../../tmp/release-034-20261008/author-fixture/src/dsh-tavern-68215e47516637e00c75d2b4bba3192679559425/tavern-plugin/', import.meta.url)
   const base = mkdtempSync(path.join(tmpdir(), 'tavern-error-purge-built-'))
   try {
-    for (const rel of ['lib/client.js', 'src/client/main.js', 'src/client/turn-error-controls.js', 'src/client/features/play-controls.js', 'src/client/features/turn-history.js', 'src/client/ui/error-center.js', 'src/client/helper-resources.js', 'src/client/runtime/helper-bootstrap.js', 'src/client/runtime/helper-script-runtime.js', 'src/client/modules/tavern-coordination.js']) {
+    for (const rel of ['lib/client.js', 'src/client/main.js', 'src/client/features/sidebar.js', 'src/client/runtime/conversation-lifecycle.js', 'src/client/turn-error-controls.js', 'src/client/features/play-controls.js', 'src/client/features/turn-history.js', 'src/client/ui/error-center.js', 'src/client/helper-resources.js', 'src/client/runtime/helper-bootstrap.js', 'src/client/runtime/helper-script-runtime.js', 'src/client/modules/tavern-coordination.js']) {
       const dst = path.join(base, 'tavern-plugin', rel)
       mkdirSync(path.dirname(dst), {recursive:true})
       writeFs(dst, readFileSync(new URL(rel, fixRoot), 'utf8'))
@@ -713,7 +713,7 @@ test('干净清理17 真实注册为失败提示控件注入同步服务', async
   const fixRoot = new URL('../../../tmp/release-034-20261008/author-fixture/src/dsh-tavern-68215e47516637e00c75d2b4bba3192679559425/tavern-plugin/', import.meta.url)
   const base = mkdtempSync(path.join(tmpdir(), 'tavern-error-purge-reg17-'))
   try {
-    for (const rel of ['lib/client.js', 'src/client/main.js', 'src/client/turn-error-controls.js', 'src/client/features/play-controls.js', 'src/client/features/turn-history.js', 'src/client/ui/error-center.js', 'src/client/helper-resources.js', 'src/client/runtime/helper-bootstrap.js', 'src/client/runtime/helper-script-runtime.js', 'src/client/modules/tavern-coordination.js']) {
+    for (const rel of ['lib/client.js', 'src/client/main.js', 'src/client/features/sidebar.js', 'src/client/runtime/conversation-lifecycle.js', 'src/client/turn-error-controls.js', 'src/client/features/play-controls.js', 'src/client/features/turn-history.js', 'src/client/ui/error-center.js', 'src/client/helper-resources.js', 'src/client/runtime/helper-bootstrap.js', 'src/client/runtime/helper-script-runtime.js', 'src/client/modules/tavern-coordination.js']) {
       const dst = path.join(base, 'tavern-plugin', rel)
       mkdirSync(path.dirname(dst), {recursive:true})
       writeFs(dst, readFs(new URL(rel, fixRoot), 'utf8'))
@@ -843,7 +843,7 @@ test('干净清理18 真协调服务：清理回执后定向失效并刷新下�
   const fixRoot = new URL('../../../tmp/release-034-20261008/author-fixture/src/dsh-tavern-68215e47516637e00c75d2b4bba3192679559425/tavern-plugin/', import.meta.url)
   const base = mkdtempSync(path.join(tmpdir(), 'tavern-error-purge-coord18-'))
   try {
-    for (const rel of ['lib/client.js', 'src/client/main.js', 'src/client/turn-error-controls.js', 'src/client/features/play-controls.js', 'src/client/features/turn-history.js', 'src/client/ui/error-center.js', 'src/client/helper-resources.js', 'src/client/runtime/helper-bootstrap.js', 'src/client/runtime/helper-script-runtime.js', 'src/client/modules/tavern-coordination.js']) {
+    for (const rel of ['lib/client.js', 'src/client/main.js', 'src/client/features/sidebar.js', 'src/client/runtime/conversation-lifecycle.js', 'src/client/turn-error-controls.js', 'src/client/features/play-controls.js', 'src/client/features/turn-history.js', 'src/client/ui/error-center.js', 'src/client/helper-resources.js', 'src/client/runtime/helper-bootstrap.js', 'src/client/runtime/helper-script-runtime.js', 'src/client/modules/tavern-coordination.js']) {
       const dst = path.join(base, 'tavern-plugin', rel)
       mkdirSync(path.dirname(dst), {recursive: true})
       writeFs(dst, readFs(new URL(rel, fixRoot), 'utf8'))

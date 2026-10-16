@@ -103,11 +103,12 @@ test('最新施工：完整接入及现场卸载', t => {
     assert.ok(installed.includes('chats: chatPersistence, runtimeGeneration,'))
     for (const method of Object.keys(SAVE_HANDLERS)) assert.equal(installed.includes("case '" + method + "':"), false, method)
     assert.ok(installed.includes('lastNativeTurn'))
-    // 维护目标总数快照：HOST 8 + SOURCE 12 + DOMAINS 44 + RETIRED_OWNED 3 = 67。
-    // 其中 4 项（server-script-executor/server-script-worker/helper-generation-tasks/
-    // storage-upstream-compute）是计算改唯一上游服务端时新增的；该组在 buildCore 里带能力
-    // 门控（作者树无 createServerScriptExecutor 时不生成），但仍是受管目标，故计入总数。
-    assert.equal(maintenanceTargets.length, 67)
+    // 维护目标总数快照：HOST 8 + SOURCE 14 + DOMAINS 44 + RETIRED_OWNED 3 = 69。
+    // 0.4.17新增sidebar及conversation-lifecycle，分别承载删除/新开/放弃消费者和attempt store。
+    // 上游计算4项目标仍按能力门控生成，但属于受管目标；两项新客户端目标必须可正式卸载。
+    assert.equal(maintenanceTargets.length, 69)
+    assert.ok(maintenanceTargets.includes('tavern-plugin/src/client/features/sidebar.js'))
+    assert.ok(maintenanceTargets.includes('tavern-plugin/src/client/runtime/conversation-lifecycle.js'))
 
     // 块外用户说明必须保留，卸载恢复现场原文而非旧官方整文件。
     const userComment = '\n// 用户现场说明，卸载必须保留\n'

@@ -1,6 +1,6 @@
 {
   "name": "dsh-tavern-sqlite-v2",
-  "version": "0.4.16",
+  "version": "0.4.17",
   "private": true,
   "type": "module",
   "description": "V2 SQLite权威存储与物理纯尾撤销；计算唯一调用上游服务端运行时，禁止客户端回落；原档只读、用户手动新ID分叉",
