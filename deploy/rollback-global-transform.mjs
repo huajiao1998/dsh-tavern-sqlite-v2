@@ -20,8 +20,10 @@ export function applyRollbackGlobalAdapterTransform(source){
   function trackRollbackAdapterRun(work) {
     return (...args)=>{
       const id=String(typeof args[0]==='object'?args[0]?.sessionId || '':args[0] || '')
-      if(rollbackBarrier.has(id)||rollbackSchedulingBarrier.has(id))return Promise.reject(new Error('物理回退期间禁止新手动写任务'))
-      const task=Promise.resolve().then(()=>work(...args))
+      const task=Promise.resolve().then(async()=>{
+        if((rollbackBarrier.has(id)||rollbackSchedulingBarrier.has(id))&&(await resourcePermissionChat(id))?.mode!=='card')throw new Error('物理回退期间禁止新手动写任务')
+        return work(...args)
+      })
       if(!rollbackAdapterRuns.has(id))rollbackAdapterRuns.set(id,new Set())
       rollbackAdapterRuns.get(id).add(task)
       task.finally(()=>{const set=rollbackAdapterRuns.get(id);set?.delete(task);if(!set?.size)rollbackAdapterRuns.delete(id)}).catch(()=>{})

@@ -47,6 +47,7 @@ import { applyForkRequestTransform } from './fork-request-transform.mjs'
 import { applyLatestFailureHostTransform, applyLatestFailureViewTransform } from './latest-failure-transform.mjs'
 import { applyActivityStateTransform } from './activity-state-transform.mjs'
 import { viewAssemblerSource } from './view-assembler-source.mjs'
+import { applyWorkbenchTurnTransform } from './workbench-mode-transform.mjs'
 import { needsPluginTaskSeams, applyPluginTaskHostTransform, applyPluginTaskApiTransform } from './plugin-task-quiescence-transform.mjs'
 
 
@@ -165,6 +166,7 @@ export function buildCore(appDir, sourceFiles) {
     write.set(DOMAIN + 'turn-orchestration.js', applyNativeMessageTransform(write.get(DOMAIN + 'turn-orchestration.js'), 'appendMessages'))
     if (present(DOMAIN + 'background-task-coordinator.js')) write.set(DOMAIN + 'background-task-coordinator.js', applyActivityStateTransform(applyNativeMessageTransform(text(appDir, DOMAIN + 'background-task-coordinator.js'), 'setMessageFloor')))
   }
+  write.set(DOMAIN + 'turn-orchestration.js', applyWorkbenchTurnTransform(write.get(DOMAIN + 'turn-orchestration.js')))
   // 接管期的资源历史恢复也属于可撤接缝；不在 CLI 块外永久改作者入口。
   const startup = write.get('tavern-plugin/lib/index.js')
   const initializer = '    const recoveredIndex = await initializeRuntimeState()'

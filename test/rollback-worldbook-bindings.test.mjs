@@ -82,7 +82,7 @@ test('实际资源图改名文件后SQL故障重试保当前卡书绑定，删�
  }finally{for(const sql of [characters,books,bindings])await sql.dispose();rmSync(root,{recursive:true,force:true})}
 })
 
-test('实际FileResource普通复制与新MVU转换当前SQL卡书，已有副本混合写前拒绝且提交后故障可重试',async()=>{
+test('实际FileResource普通复制与新MVU转换当前SQL卡书，已有副本可混合编辑且提交后故障可重试',async()=>{
  const root=mkdtempSync(path.join(os.tmpdir(),'resource-copy-sql-')),characters=createRollbackCharacterVariables({dataRoot:root}),books=createRollbackWorldbookResources({dataRoot:root}),bindings=createRollbackWorldbookBindings({dataRoot:root,profileData:{readJson:async()=>undefined,remove:async()=>{}}})
  try{
   const source=readFileSync(new URL('../../../tools/live-plugin-src/lib/domain/file-resources.js',import.meta.url),'utf8'),patched=applyRollbackWorldbookBindingsFileTransform(source),base=new URL('../../../tools/live-plugin-src/lib/domain/',import.meta.url)
@@ -104,7 +104,7 @@ test('实际FileResource普通复制与新MVU转换当前SQL卡书，已有副�
   await assert.rejects(resources.saveMvuCard(input),/绑定提交后/);assert.equal(existsSync(path.join(root,'resources',mvuPath)),true)
   const expectedTargetText=await resources.readText(mvuPath);await resources.saveMvuCard({...input,expectedTargetText});const published=JSON.parse(readFileSync(path.join(root,'resources',mvuPath),'utf8'));assert.equal(published.data.extensions.tavern_helper.variables,undefined);assert.deepEqual(published.data.character_book,{entries:[]});assert.deepEqual(JSON.parse(await resources.readText(mvuPath)),mvu);assert.equal((await bindings.read())[mvuPath].cardPath,mvuPath);assert.equal((await books.read({kind:'card',cardPath:mvuPath})).entries.length,2);assert.deepEqual(await characters.read(mvuPath),{hp:99})
   const changed=structuredClone(mvu);changed.data.description='不应部分落文件';changed.data.character_book.entries[0].content='混合改运行书';const versions=[await characters.version(),await books.version(),await bindings.version()],raw=readFileSync(path.join(root,'resources',mvuPath),'utf8')
-  await assert.rejects(resources.saveMvuCard({...input,document:changed,expectedTargetText:await resources.readText(mvuPath)}),/已有MVU副本跨文件\/SQL/);assert.equal(readFileSync(path.join(root,'resources',mvuPath),'utf8'),raw);assert.deepEqual([await characters.version(),await books.version(),await bindings.version()],versions)
+  await resources.saveMvuCard({...input,document:changed,expectedTargetText:await resources.readText(mvuPath)});assert.equal(JSON.parse(await resources.readText(mvuPath)).data.description,changed.data.description);assert.equal((await books.read({kind:'card',cardPath:mvuPath})).entries[0].content,'混合改运行书');assert.deepEqual(await characters.read(mvuPath),{hp:99})
   await characters.save(sourcePath,{hp:100},undefined,{hp:99});await assert.rejects(resources.saveMvuCard({...input,targetPath:'cards/stale.json'}),/已变化/);assert.equal(existsSync(path.join(root,'resources/cards/stale.json')),false)
   assert.equal(existsSync(path.join(root,'.worldbook-bindings.json')),false);assert.equal(readFileSync(target,'utf8'),JSON.stringify(document));assert.deepEqual(await characters.read(sourcePath),{hp:100});assert.equal((await books.read({kind:'card',cardPath:sourcePath})).entries[0].content,'SQL当前手改')
  }finally{for(const sql of [characters,books,bindings])await sql.dispose();rmSync(root,{recursive:true,force:true})}

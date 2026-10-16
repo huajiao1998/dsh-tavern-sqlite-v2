@@ -74,11 +74,12 @@ export function applyRollbackWorldbookAdapterTransform(source){
  return once(next,'options.worldBooks.replaceNative(resolved.record.source, nativeDocument)','options.worldBooks.replaceNative(resolved.record.source, nativeDocument, rollbackGlobalOwner(resolved.chat))')
 }
 function singleStoreEdit(value){
- if(value.includes('// [dsh-tavern-card-single-store-edit:v1]'))return value
- value="import { isDeepStrictEqual as rollbackCardEqual } from 'node:util'\n"+value
- const start=value.indexOf('    // 定义编辑显式变量改动也进SQL'),end=value.indexOf('    const savedCard = change.view',start)
+ if(value.includes('// [dsh-tavern-card-edit:v2]'))return value
+ if(!value.includes("import { isDeepStrictEqual as rollbackCardEqual } from 'node:util'"))value="import { isDeepStrictEqual as rollbackCardEqual } from 'node:util'\n"+value
+ const oldMarker='    // [dsh-tavern-card-single-store-edit:v1]'
+ const start=value.indexOf(value.includes(oldMarker)?oldMarker:'    // 定义编辑显式变量改动也进SQL'),end=value.indexOf('    const savedCard = change.view',start)
  if(start<0||end<start)throw Error('卡单存储编辑边界缺失')
- return value.slice(0,start)+`    // [dsh-tavern-card-single-store-edit:v1] 运行编辑单SQL提交；混合跨存储改动在写前拒绝，不能报错后留部分更新。
+ return value.slice(0,start)+`    // [dsh-tavern-card-edit:v2] 改卡可同时更新定义、变量和世界书；不套游玩回退资格。
     const previousVariables=cardPreparation.present({card:workspace,as:'card-extensions'}).variables || {}
     const nextVariables=cardPreparation.present({card:savedWorkspace,as:'card-extensions'}).variables || {}
     const rawOf=value=>value.raw || value
@@ -92,10 +93,7 @@ function singleStoreEdit(value){
     const previousBook=dataOf(rawOf(workspace)).character_book ?? null,nextBook=dataOf(rawOf(savedWorkspace)).character_book ?? null
     const variablesChanged=!rollbackCardEqual(previousVariables,nextVariables),bookChanged=!rollbackCardEqual(previousBook,nextBook)
     const definitionChanged=!rollbackCardEqual(definitionOf(workspace),definitionOf(savedWorkspace))
-    if(Number(variablesChanged)+Number(bookChanged)+Number(definitionChanged)>1 || ((variablesChanged||bookChanged)&&revision!=null))throw new Error('人物卡混合跨存储修改尚不支持原子提交，请分别修改定义、人物变量和世界书；未写入任何改动')
-    if(variablesChanged)await characterVariableStore.save(normalizeResourcePath(cardPath,'card'),nextVariables,undefined,previousVariables)
-    else if(bookChanged)await rollbackWorldbookResources.save({kind:'card',cardPath:normalizeResourcePath(cardPath,'card')},nextBook,previousBook)
-    else if(definitionChanged){
+    if(definitionChanged || revision!=null){
       const definition={...savedWorkspace},raw={...rawOf(savedWorkspace)},data={...dataOf(raw)},extensions={...data.extensions},helper={...extensions.tavern_helper}
       delete helper.variables;extensions.tavern_helper=helper;data.extensions=extensions
       data.character_book=nextBook===null?null:{entries:[]}
@@ -103,7 +101,9 @@ function singleStoreEdit(value){
       if(savedWorkspace.raw)definition.raw=raw;else Object.assign(definition,raw)
       await fileResources.writeWorking(normalizeResourcePath(cardPath,'card'),JSON.stringify(definition,null,2))
     }
-    if(definitionChanged || (!variablesChanged&&!bookChanged))await bumpCardProjectionRevision(cardPath)
+    if(variablesChanged)await characterVariableStore.save(normalizeResourcePath(cardPath,'card'),nextVariables,undefined,previousVariables)
+    if(bookChanged)await rollbackWorldbookResources.save({kind:'card',cardPath:normalizeResourcePath(cardPath,'card')},nextBook,previousBook)
+    if(definitionChanged || revision!=null || (!variablesChanged&&!bookChanged))await bumpCardProjectionRevision(cardPath)
 `+value.slice(end)
 }
 export function applyWorldbookSummaryCacheTransform(source){
@@ -124,7 +124,7 @@ export function applyRollbackWorldbookHostTransform(source){
   if(!value.includes('// [dsh-tavern-worldbook-card-projection:v1]'))value=once(value,"    data.extensions.tavern_helper.variables=await characterVariableStore.read(normalizeResourcePath(cardPath,'card'),data.extensions.tavern_helper.variables || {})",`    data.extensions.tavern_helper.variables=await characterVariableStore.read(normalizeResourcePath(cardPath,'card'),data.extensions.tavern_helper.variables || {})
     // [dsh-tavern-worldbook-card-projection:v1] 普通卡读取/导出也使用嵌入世界书SQL当前态。
     data.character_book=await rollbackWorldbookResources.read({kind:'card',cardPath:normalizeResourcePath(cardPath,'card')},data.character_book ?? null)`)
-  if(!value.includes('// [dsh-tavern-worldbook-card-edit:v1]')&&!value.includes('// [dsh-tavern-card-single-store-edit:v1]'))value=once(value,"    await fileResources.writeWorking(normalizeResourcePath(cardPath, 'card'), JSON.stringify(definition, null, 2))",`    // [dsh-tavern-worldbook-card-edit:v1] 卡编辑世界书差异进SQL，不把运行条目重新写到定义文件。
+  if(!value.includes('// [dsh-tavern-worldbook-card-edit:v1]')&&!value.includes('// [dsh-tavern-card-single-store-edit:v1]')&&!value.includes('// [dsh-tavern-card-edit:v2]'))value=once(value,"    await fileResources.writeWorking(normalizeResourcePath(cardPath, 'card'), JSON.stringify(definition, null, 2))",`    // [dsh-tavern-worldbook-card-edit:v1] 卡编辑世界书差异进SQL，不把运行条目重新写到定义文件。
     const previousBook=cardPreparation.present({card:workspace,as:'raw'})
     const nextBook=cardPreparation.present({card:savedWorkspace,as:'raw'})
     const bookOf=raw=>['chara_card_v2','chara_card_v3'].includes(raw.spec)&&raw.data?raw.data.character_book:raw.character_book
@@ -133,6 +133,15 @@ export function applyRollbackWorldbookHostTransform(source){
     await fileResources.writeWorking(normalizeResourcePath(cardPath, 'card'), JSON.stringify(definition, null, 2))`)
   if(!value.includes('// [dsh-tavern-worldbook-sql-version:v1]'))value=once(value,'return JSON.stringify([binding, versions,',`// [dsh-tavern-worldbook-sql-version:v1]
       return JSON.stringify([binding, versions, await rollbackWorldbookResources.version(), await characterVariableStore.version(),`)
+  if(!value.includes('// [dsh-tavern-card-restore-sql:v1]'))value=once(value,'    const restoredCard = cardPreparation.project(restored.card)',`    // [dsh-tavern-card-restore-sql:v1] 原版恢复也写SQL当前值，否则读投影会把旧运行值盖回来。
+    const restoredRaw=cardPreparation.present({card:restored.card,as:'raw'})
+    const restoredData=['chara_card_v2','chara_card_v3'].includes(restoredRaw.spec)&&restoredRaw.data?restoredRaw.data:restoredRaw
+    await characterVariableStore.save(normalizeResourcePath(cardPath,'card'),restoredData.extensions?.tavern_helper?.variables || {})
+    await rollbackWorldbookResources.save({kind:'card',cardPath:normalizeResourcePath(cardPath,'card')},restoredData.character_book ?? null)
+    const restoredCard = cardPreparation.project(restored.card)`)
+  if(!value.includes('// [dsh-tavern-card-name-originals:v1]'))value=once(value,'    for (const item of (idx.chats || []).filter(function (entry) { return entry.cardPath === cardPath })) {',`    for (const item of (idx.chats || []).filter(function (entry) { return entry.cardPath === cardPath })) {
+      // [dsh-tavern-card-name-originals:v1] 原件仍保留不写，但不能因此中断卡片编辑。
+      if (legacyViewSeams.readOnlyChat(item.id)) continue`)
   return singleStoreEdit(value)
  }
  if(source.includes(MARKER)){if(!source.includes('const rollbackWorldbookResources=createRollbackWorldbookResources({dataRoot})'))throw Error('世界书SQL Host标记不完整');return complete(source)}

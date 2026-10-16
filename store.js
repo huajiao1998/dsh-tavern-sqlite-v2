@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite"
 import { existsSync, mkdirSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { isDeepStrictEqual } from 'node:util'
-import {rollbackSchedulingBarrier} from './lib/rollback-barrier.js'
+import {assertRollbackSessionWritable,rollbackSchedulingBarrier} from './lib/rollback-barrier.js'
 import {assertRollbackArchiveWritable,validateRollbackArchive} from './lib/rollback-archive-guard.js'
 
 const SCHEMA_VERSION = 1
@@ -90,9 +90,12 @@ export class SqliteSessionDb {
 		if(previous && previous!==file)throw new Error('Session回退archive绑定禁止静默替换')
 		this.db.prepare("INSERT OR REPLACE INTO meta(key,value) VALUES('rollback_archive',?)").run(file)
 	}
-	assertRollbackWritable(events) {
+	assertRollbackWritable(events,sessionGuard=false) {
 		const archive=this.db.prepare("SELECT value FROM meta WHERE key='rollback_archive'").get()?.value
-		const owner=archive&&assertRollbackArchiveWritable(archive)
+		const sessionId=this.readMeta()?.header.id
+		const owner=archive&&assertRollbackArchiveWritable(archive,sessionGuard?sessionId:undefined)
+		if(owner===false)return
+		if(sessionGuard&&!archive)assertRollbackSessionWritable(sessionId)
 		if(events?.some(event=>event.type==='turn/start') && rollbackSchedulingBarrier.has(owner || this.readMeta()?.header.id))throw new Error('物理回退静止期间禁止新Session轮次')
 		if (this.db.prepare("SELECT value FROM meta WHERE key='rollback_pending'").get()?.value === '1') throw new Error('物理回退未完成，Session禁止追加事件，请先重试回退')
 	}

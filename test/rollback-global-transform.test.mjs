@@ -16,10 +16,12 @@ test('实际adapter清理回调解除旧53正文基线和模板环境缓存，�
 test('实际adapter手动写入口整个Promise可join且静止期间新请求拒绝',async()=>{
  const adapter=readFileSync(new URL('../../../tmp/plg-standard-1001-code/b/lib/domain/tavern-script-host-adapter.js',import.meta.url),'utf8'),next=applyRollbackGlobalAdapterTransform(adapter)
  const start=next.indexOf('  // [dsh-tavern-adapter-runs:v1]'),end=next.indexOf(RUNS_BLOCK_END,start)+RUNS_BLOCK_END.length
- const barrier=new Set(),runState=new Function('serverExecution','rollbackBarrier','rollbackSchedulingBarrier',next.slice(start,end)+';return {trackRollbackAdapterRun,whenRollbackAdapterIdle}')({whenIdle:async()=>{}},new Set(),barrier)
+ const barrier=new Set();let mode='story'
+ const runState=new Function('serverExecution','rollbackBarrier','rollbackSchedulingBarrier','resourcePermissionChat',next.slice(start,end)+';return {trackRollbackAdapterRun,whenRollbackAdapterIdle}')({whenIdle:async()=>{}},new Set(),barrier,async()=>({mode}))
  let release;const gate=new Promise(r=>release=r);const manual=runState.trackRollbackAdapterRun(async()=>{await gate;return 53})
  const task=manual('fixture');let done=false;const idle=runState.whenRollbackAdapterIdle('fixture').then(()=>done=true);await Promise.resolve();assert.equal(done,false)
  barrier.add('fixture');await assert.rejects(manual('fixture'),/禁止新手动写任务/);await assert.rejects(manual({sessionId:'fixture'}),/禁止新手动写任务/);release();assert.equal(await task,53);await idle;assert.equal(done,true)
+ mode='card';assert.equal(await manual('fixture'),53);assert.equal(await manual({sessionId:'fixture'}),53);await runState.whenRollbackAdapterIdle('fixture')
 })
 test('旧施缝marker源码升级补完整脚本run等待且第二次幂等',()=>{
  const adapter=readFileSync(new URL('../../../tmp/plg-standard-1001-code/b/lib/domain/tavern-script-host-adapter.js',import.meta.url),'utf8')

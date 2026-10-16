@@ -34,9 +34,7 @@ export function applyRollbackWorldbookBindingsFileTransform(source){
     bindingBefore.set(current,structuredClone(current));return current
   }
   async function writeWorldBookBindings(bindings,owner){
-    const expected=bindingBefore.get(bindings)
-    if(expected===undefined)throw new Error('世界书绑定写入未经过确切SQL读取')
-    return options.rollbackBindings.save(bindings,expected,owner)
+    return options.rollbackBindings.save(bindings,bindingBefore.get(bindings),owner)
   }
 `+next.slice(end)
  if(next.includes('  async function setGlobalWorldBook(relative, enabled)'))next=once(next,'  async function setGlobalWorldBook(relative, enabled)','  async function setGlobalWorldBook(relative, enabled, owner)')
@@ -94,17 +92,17 @@ function copyConsumers(value){
  const mvuEntries=value.split('  function saveMvuCard(').length-1
  if(mvuEntries>1)throw Error('saveMvuCard旧入口重复：'+mvuEntries)
  const mvuAnchors=[
-  ['      if (finalize) finalize(saved)',`      if(expectedTargetText!==undefined){
-        const before=cardDataSql(JSON.parse(expectedTargetText)),after=cardDataSql(saved)
-        if(!resourceSqlEqual(before.extensions?.tavern_helper?.variables || {},after.extensions?.tavern_helper?.variables || {})||!resourceSqlEqual(before.character_book ?? null,after.character_book ?? null))throw new Error('已有MVU副本跨文件/SQL运行值修改尚不支持原子提交；请用新名称转换，未写入任何改动')
-      }
-      if (finalize) finalize(saved)`],
+  ['      if (finalize) finalize(saved)','      if (finalize) finalize(saved)'],
   ["        throw new Error('禁止世界书绑定写回文件journal')",''],
   ['      const text = JSON.stringify(saved, null, 2)\n      const bindings = await readWorldBookBindings()',`      const published=clone(saved)
       if(expectedTargetText!==undefined){const data=cardDataSql(published);if(data.extensions?.tavern_helper)delete data.extensions.tavern_helper.variables;data.character_book=data.character_book===null?null:{entries:[]}}
       const text = JSON.stringify(published, null, 2)
       const bindings = await readWorldBookBindings()`],
-  ['      return { path: target, changed: result.changed, imageCopied: !!image }','      await seedCardSql(target,saved)\n      await writeWorldBookBindings(bindings)\n      return { path: target, changed: result.changed, imageCopied: !!image }']
+  ['      return { path: target, changed: result.changed, imageCopied: !!image }',`      const sqlData=cardDataSql(saved)
+      await options.characterVariables.save(target,sqlData.extensions?.tavern_helper?.variables || {})
+      await options.worldbookResources().save({kind:'card',cardPath:target},sqlData.character_book ?? null)
+      await writeWorldBookBindings(bindings)
+      return { path: target, changed: result.changed, imageCopied: !!image }`]
  ]
  const present=mvuAnchors.map(function(entry){return value.split(entry[0]).length-1})
  if(mvuEntries===1){

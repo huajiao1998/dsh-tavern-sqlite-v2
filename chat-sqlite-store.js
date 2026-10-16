@@ -2141,6 +2141,8 @@ export function createChatSqliteStore(options = {}) {
       // 已在 BEGIN IMMEDIATE 内：readSqlSnapshot 直接执行，不开嵌套读事务。
       const state=readSqlSnapshot(db,()=>narrowHeaderRows(chatId,db)),chat=state?.chat
       if(!chat || chat.id!==chatId || chat.sessionId!==input.sessionId)throw new Error('发送前像档/会话身份不一致')
+      // 工作台沿原生改卡路径，不捕获游玩正文前像，也不受旧版残留body账本影响。
+      if(chat.mode==='card') { db.exec('COMMIT');committed=true;return }
       assertRollbackChatWritable(chat,{source:'foreground.send-accepted'})
       if(rollbackSchedulingBarrier.has(input.sessionId) || rollbackCancellationBarrier.has(input.sessionId))throw new Error('物理回退静止期间禁止接受新发送')
       if(chat.timeline?.schemaVersion!==1 || !chat.timeline.branchId)throw new Error('发送前像缺少有效剧情时间线')

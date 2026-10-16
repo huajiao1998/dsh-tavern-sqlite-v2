@@ -16,9 +16,7 @@ const NEW_FIXTURE=new URL('../../../tmp/upstream-next-audit-20261005/src-core/ta
 const OLD_SHA='c456e511e0e3bfd9360ffc8f79305dc33cded174cb783c543c43b8456a32c411'
 const NEW_SHA='a35b18dbe13e3ba200bdfc5f515600dd87fd2e427e18feaacefac08cae102bc6'
 
-// OLD_OUTPUT_SHA：由 3961ee9 旧转换器对旧夹具实测得到的 baseline 输出逐字哈希（见 REVIEW.md/old-output-proof.json）。
-// 它是**实算锁定**的固定对照，不依赖运行期 git 读取，也不拿"当前产品自己的输出"当基线（那会自证循环）。
-const OLD_OUTPUT_SHA='ac94493af048f1b8a8028605082293097f799cb520004948a346b6d16d8278d2'
+// 工作台可混合编辑后，3961ee9的整份输出快照已失效；下方直接断言原版比较与实际SQL写口。
 
 function fixture(url,label,expectedSha){
  let text
@@ -69,43 +67,30 @@ test('两代真实public源码转换均一次成功且幂等',()=>{
  }
 })
 
-test('旧代saveMvuCard在则保强guard：原子写比较、去变量/书快照语义、两处绑定与种子插入',()=>{
+test('旧代saveMvuCard保留原版比较并允许混合编辑，SQL变量世界书与绑定实际接线',()=>{
  const source=fixture(OLD_FIXTURE,'旧代',OLD_SHA),before=anchorCounts(source)
  assert.equal(before.entry,1,'旧代夹具应恰有1个saveMvuCard入口')
- // 四处专用锚点以"作者原raw"为准：finalize/落盘写入/publish/mvuReturn 各1。
  assert.deepEqual([before.finalize,before.journalWrite,before.publish,before.mvuReturn],[1,1,1,1],'旧代四处专用锚点应各为1')
- // 哨兵在作者原raw中不存在，属 transform 注入物，单独登记其上游注入计数（此处恒0）。
- assert.equal(source.split(JOURNAL_SENTINEL).length-1,0,'哨兵非作者锚点，作者原raw应为0')
+ assert.equal(source.split(JOURNAL_SENTINEL).length-1,0,'哨兵非作者锚点')
  const next=applyRollbackWorldbookBindingsFileTransform(source)
- // 必要固定对照：当前transform对同源夹具的输出，必须与3961ee9旧转换器的baseline**逐字相等**。
- // 这条把"旧source受hash锁"落到实处——OLD_SHA锁输入、OLD_OUTPUT_SHA锁输出，二者缺一不可；
- // 若有人改动当前transform的旧代路径，此处会红，且红得可静态归因（不需要跑变异矩阵）。
- assert.equal(createHash('sha256').update(next,'utf8').digest('hex'),OLD_OUTPUT_SHA,
-  '当前transform对旧夹具的输出必须逐字等于3961ee9 baseline（输入OLD_SHA已锁，输出须相等）')
- // 强guard：once不得被改成缺失忽略。
- assert.ok(next.includes('已有MVU副本跨文件/SQL运行值修改尚不支持原子提交'),'旧代须保原子写前比较guard')
- assert.ok(next.includes('const published=clone(saved)'),'旧代须保发布副本')
- assert.ok(next.includes('delete data.extensions.tavern_helper.variables'),'旧代须保去变量快照')
- assert.ok(next.includes('data.character_book=data.character_book===null?null:{entries:[]}'),'旧代须保去书快照')
- assert.ok(next.includes('await seedCardSql(target,saved)'),'旧代MVU转换须保种子')
- assert.equal(next.split('await seedCardSql(target,saved)').length-1,2,'旧代应有MVU与普通副本两处种子')
- // 绑定写入锚点的精确语义（实测锁定，勿再放宽成宽 includes）：
- //   MVU锚点组插入的是**无owner**的 `await writeWorldBookBindings(bindings)`（见mvuAnchors第4项），
- //   全表的 owner 化来自**更早执行**的 replaceAll（transform L47），二者是不同步骤、不同产物。
- //   故「MVU 转换保住了 owner 绑定写入」不能用宽 includes 代证——它证明不了 MVU 段做了这件事。
- //   正确断言拆成三条：①MVU段的无owner站点在（证明该锚点确被执行）；
- //   ②带await的普通绑定调用有6处经replaceAll owner化（不含函数声明）；
- //   ③MVU段的无owner站点**未被** owner 化（replaceAll 早于 MVU 插入执行，够不到它）。
- //   OLD_OUTPUT_SHA 为旧转换器(3961ee9)对旧夹具的 baseline 逐字哈希，锁死上述形态不被改写。
- assert.ok(next.includes('      await seedCardSql(target,saved)\n      await writeWorldBookBindings(bindings)\n'),
-  '旧代MVU转换须保无owner绑定写入站点（该站点由MVU锚点组插入，非replaceAll产物）')
- assert.equal(next.split('await writeWorldBookBindings(bindings,owner)').length-1,6,
-  '全表owner化计数应为6（replaceAll产物的实测固定值）')
- assert.equal(next.split('await writeWorldBookBindings(bindings)').length-1,1,
-  'MVU段的无owner站点必须恰好1处未被owner化（replaceAll先于MVU插入执行）')
- // 落盘锚被替换成哨兵后，再经MVU锚点表移除 → 输出中两者都应归零。
- assert.equal(next.split(before.journalWrite?'        await plan.write(worldBookBindingsPath, JSON.stringify(bindings, null, 2))':'__never__').length-1,0,'旧代落盘锚须被移除')
- assert.ok(!next.includes(JOURNAL_SENTINEL),'旧journal哨兵须被移除')
+ // 整份旧输出快照与插件混合写拒绝按用户明确授权退役；原版比较仍保留。
+ const authorCompare="      if (await readText(source) !== expectedSourceText || await readText(target) !== expectedTargetText) throw new Error('人物卡已变化，请重新读取后转换')"
+ assert.ok(source.includes(authorCompare));assert.ok(next.includes(authorCompare),'原版读取版本比较未改')
+ assert.ok(!next.includes('已有MVU副本跨文件/SQL运行值修改尚不支持原子提交'),'不得恢复已撤插件混合写门槛')
+ assert.ok(next.includes('const published=clone(saved)'))
+ assert.ok(next.includes('delete data.extensions.tavern_helper.variables'))
+ assert.ok(next.includes('data.character_book=data.character_book===null?null:{entries:[]}'))
+ const start=next.indexOf('  function saveMvuCard('),end=next.indexOf('      return { path: target, changed: result.changed, imageCopied: !!image }',start)
+ assert.ok(start>=0&&end>start)
+ const mvu=next.slice(start,end)
+ assert.equal(mvu.split('await options.characterVariables.save(target,sqlData.extensions?.tavern_helper?.variables || {})').length-1,1,'MVU更新目标SQL变量而非只种子')
+ assert.equal(mvu.split("await options.worldbookResources().save({kind:'card',cardPath:target},sqlData.character_book ?? null)").length-1,1,'MVU更新目标SQL世界书')
+ assert.equal(mvu.split('await writeWorldBookBindings(bindings)').length-1,1,'独立编辑不附游玩owner')
+ assert.equal(next.split('await seedCardSql(target,saved)').length-1,1,'普通复制保持首次种子语义')
+ assert.equal(next.split('await writeWorldBookBindings(bindings,owner)').length-1,6,'其余绑定调用保留既有owner传递')
+ assert.equal(next.split('await writeWorldBookBindings(bindings)').length-1,1)
+ assert.ok(!next.includes('        await plan.write(worldBookBindingsPath, JSON.stringify(bindings, null, 2))'),'绑定保持SQL权威')
+ assert.ok(!next.includes(JOURNAL_SENTINEL))
 })
 
 test('半缺形态漂移：旧入口在但任一MVU锚点数量不为1必须拒绝',()=>{

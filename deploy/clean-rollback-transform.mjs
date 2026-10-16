@@ -5,6 +5,8 @@ const START='  async function rollbackChat(chat, requestedTurn, restoredAgent) {
 const END='  async function undoRollback(sessionId, chatId) {'
 const BODY=`${START}
     ${MARKER}
+    const mode = chat.mode || 'story'
+    if (mode !== 'story' && mode !== 'script') throw new Error('仅游玩模式支持回退本轮')
     void restoredAgent
     // 客户端握手只影响显示同步，不阻止后端物理回退。
     const cleanRollback = storageRollback.cleanRollback

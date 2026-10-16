@@ -168,8 +168,12 @@ export default class TavernSessionPersistence extends JsonlSessionPersistence {
 	 */
 	guardTurnStart(id, events) {
 		this.assertWritable(id)
-		assertRollbackSessionWritable(id)
-		if (events?.some(event => event.type === 'turn/start') && rollbackSchedulingBarrier.has(id)) throw new Error('物理回退静止期间禁止开启新轮次')
+		const session=this.store.openExisting(id)
+		if(session)session.assertRollbackWritable(events,true)
+		else {
+			assertRollbackSessionWritable(id)
+			if (events?.some(event => event.type === 'turn/start') && rollbackSchedulingBarrier.has(id)) throw new Error('物理回退静止期间禁止开启新轮次')
+		}
 	}
 
 	async persistBatch(header, events, _isMaterialized, inheritedEventCount) {

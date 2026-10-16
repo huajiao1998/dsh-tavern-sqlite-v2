@@ -11,7 +11,7 @@ import {applyRollbackHostTransform} from '../deploy/rollback-host-transform.mjs'
 import {applyRollbackGlobalHostTransform} from '../deploy/rollback-global-transform.mjs'
 import {applyRollbackCharacterHostTransform} from '../deploy/rollback-character-transform.mjs'
 import {applyRollbackWorldbookHostTransform} from '../deploy/rollback-worldbook-transform.mjs'
-test('实际卡编辑单SQL不写文件，混合与修订跨存储删前拒绝，定义文件故障不改两副库',async()=>{
+test('实际卡编辑单SQL不写文件，定义、变量与世界书可同改并存，定义文件故障不改两副库',async()=>{
  const root=mkdtempSync(path.join(os.tmpdir(),'card-single-store-')),characters=createRollbackCharacterVariables({dataRoot:root}),books=createRollbackWorldbookResources({dataRoot:root})
  try{
   const source=readFileSync(new URL('../../../tmp/rollback-compare-1001/current-index.js',import.meta.url),'utf8'),host=applyRollbackWorldbookHostTransform(applyRollbackCharacterHostTransform(applyRollbackGlobalHostTransform(applyRollbackHostTransform(source))))
@@ -28,16 +28,18 @@ test('实际卡编辑单SQL不写文件，混合与修订跨存储删前拒绝�
   const edit=new Function('rollbackCardEqual','readCardWorkspace','cardPreparation','characterVariableStore','rollbackWorldbookResources','normalizeResourcePath','fileResources','bumpCardProjectionRevision','syncCardName',host.slice(editStart,editEnd)+';return updateCard')(isDeepStrictEqual,async()=>project(cardPath,stored),preparation,characters,books,value=>value,{writeWorking:async(_path,text)=>{writes++;if(fail)throw Error('原创定义文件故障');stored=JSON.parse(text)}},async()=>{bumps++},async()=>{})
   await edit(cardPath,{},undefined,[{op:'set',path:'/data/extensions/tavern_helper/variables/hp',value:53}]);assert.equal(await characters.read(cardPath).then(v=>v.hp),53);assert.equal(writes,0);assert.equal(bumps,0)
   const variablesRevision=await revision(cardPath);assert.ok(variablesRevision>initialRevision);await edit(cardPath,{character_book:null});assert.equal(await books.read({kind:'card',cardPath}),null);assert.equal(writes,0);assert.ok(await revision(cardPath)>variablesRevision)
+  // 改卡是工作台能力：定义、人物变量、世界书可同改，不再以"混合跨存储"拒绝。
+  fail=false
+  await edit(cardPath,{name:'混合',character_book:{entries:[]}});assert.equal((await project(cardPath,stored)).raw.data.name,'混合');assert.deepEqual(await books.read({kind:'card',cardPath}),{entries:[]});assert.ok(writes>0)
+  await edit(cardPath,{character_book:{entries:[{id:0,content:'书变量同改'}]}},undefined,[{op:'set',path:'/data/extensions/tavern_helper/variables/hp',value:99}]);assert.equal((await characters.read(cardPath)).hp,99);assert.equal((await books.read({kind:'card',cardPath})).entries[0].content,'书变量同改')
+  await edit(cardPath,{character_book:{entries:[{id:1,content:'书与修订'}]}},{note:'跨文件修订'});assert.equal((await books.read({kind:'card',cardPath})).entries[0].content,'书与修订')
   const variableVersion=await characters.version(),bookVersion=await books.version()
-  await assert.rejects(edit(cardPath,{name:'混合',character_book:{entries:[]}}),/混合跨存储/)
-  await assert.rejects(edit(cardPath,{character_book:{entries:[]}},undefined,[{op:'set',path:'/data/extensions/tavern_helper/variables/hp',value:99}]),/混合跨存储/)
-  await assert.rejects(edit(cardPath,{character_book:{entries:[]}},{note:'跨文件修订'}),/混合跨存储/)
-  assert.equal(await characters.version(),variableVersion);assert.equal(await books.version(),bookVersion);assert.equal(writes,0)
+  fail=true
   await assert.rejects(edit(cardPath,{name:'只改名'}),/原创定义文件故障/);assert.equal(await characters.version(),variableVersion);assert.equal(await books.version(),bookVersion)
-  fail=false;await edit(cardPath,{name:'只改名'});assert.equal(stored.raw.data.name,'只改名');assert.equal(stored.raw.data.extensions.tavern_helper.variables,undefined);assert.equal(stored.raw.data.character_book,null);assert.equal((await project(cardPath,stored)).raw.data.extensions.tavern_helper.variables.hp,53)
-  await books.save({kind:'card',cardPath},{entries:[{id:0,content:'新书SQL'}]},null);fail=false;await edit(cardPath,{name:'再改名'});assert.deepEqual(stored.raw.data.character_book,{entries:[]});assert.equal((await project(cardPath,stored)).raw.data.character_book.entries[0].content,'新书SQL')
-  const beforeVariables=await characters.read(cardPath),beforeBook=await books.read({kind:'card',cardPath}),versions=[await characters.version(),await books.version()],writeCount=writes
-  await assert.rejects(edit(cardPath,{},undefined,[{op:'set',path:'/data/extensions/tavern_helper/variables/hp',value:55},{op:'set',path:'/data/description',value:'混合定义'}]),/混合跨存储/);assert.deepEqual(await characters.read(cardPath),beforeVariables);assert.deepEqual(await books.read({kind:'card',cardPath}),beforeBook);assert.deepEqual([await characters.version(),await books.version()],versions);assert.equal(writes,writeCount)
+  fail=false;await edit(cardPath,{name:'只改名'});assert.equal(stored.raw.data.name,'只改名');assert.equal(stored.raw.data.extensions.tavern_helper.variables,undefined);assert.deepEqual(stored.raw.data.character_book,{entries:[]},'定义文件只写空书占位，不落SQL世界书正文');assert.equal((await project(cardPath,stored)).raw.data.extensions.tavern_helper.variables.hp,99)
+  await books.save({kind:'card',cardPath},{entries:[{id:0,content:'新书SQL'}]},await books.read({kind:'card',cardPath}));fail=false;await edit(cardPath,{name:'再改名'});assert.deepEqual(stored.raw.data.character_book,{entries:[]});assert.equal((await project(cardPath,stored)).raw.data.character_book.entries[0].content,'新书SQL')
+  const beforeVariables=await characters.read(cardPath),beforeBook=await books.read({kind:'card',cardPath}),versions=[await characters.version(),await books.version()]
+  await edit(cardPath,{},undefined,[{op:'set',path:'/data/extensions/tavern_helper/variables/hp',value:55},{op:'set',path:'/data/description',value:'混合定义'}]);assert.equal((await characters.read(cardPath)).hp,55);assert.ok(writes>0);assert.deepEqual(await books.read({kind:'card',cardPath}),beforeBook);assert.equal(await books.version(),versions[1],'未改世界书则书存储不得推进');assert.notEqual(await characters.version(),versions[0]);const writeCount=writes
   const savedBook=books.save;let fault=true
   books.save=async(...args)=>{const result=await savedBook(...args);if(fault){fault=false;throw Error('原创单SQL提交后回包故障')}return result}
   await assert.rejects(edit(cardPath,{character_book:{entries:[{id:0,content:'提交后重试'}]}}),/单SQL提交后回包故障/);const commitVersion=await books.version();await edit(cardPath,{character_book:{entries:[{id:0,content:'提交后重试'}]}});assert.equal(await books.version(),commitVersion);assert.equal(writes,writeCount);assert.equal((await project(cardPath,stored)).raw.data.character_book.entries[0].content,'提交后重试')

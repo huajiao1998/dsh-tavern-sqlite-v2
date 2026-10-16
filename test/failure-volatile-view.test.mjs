@@ -85,7 +85,9 @@ test('易变清理链：真实SQL状态经缓存和脏投影保持7目标，静�
   // 就要求产物含"（未完成发送）"，故此处按现行产品文案断言（2026-10-15 更新）。
   const button=renderRealMenu(reused);assert.equal(button.props.disabled,false);assert.match(button.children.join(''),/回退第 7 轮/);assert.equal(typeof button.props.onClick,'function')
   const dirty=await hostContext.api.projectDirtySessionView({...state,mode:'card'}, {...opening,tavernHelper:{messages:[]}},new Set([1]),idle,{layoutChanged:false})
-  assert.equal(dirty.failureTarget.turn,7);assert.equal(dirty.canRollback,true);assert.equal(proofs,2)
+  // 工作台（mode=card）不得签发游玩撤销目标：旧版把工作台当游玩正文捕获，残留 running 账本
+  // 会让下一轮发送在 turn/start 前被拒（消息只入队不启轮）。此处固定该分流后的合同。
+  assert.equal(dirty.failureTarget,null);assert.equal(dirty.canRollback,false);assert.equal(dirty.rollbackTarget,null);assert.equal(proofs,2)
   busy=true;assert.equal((await hostContext.api.projectCachedSessionView(state,opening,idle)).failureTarget.turn,7,'前台忙不再取消签出')
   busy=false;assert.equal((await hostContext.api.projectCachedSessionView(state,opening,{phase:'pending',busy:false})).failureTarget.turn,7,'后台 pending 不再取消签出')
   native[4].data.message.content.push({type:'tool-call'});const rejected=await hostContext.api.projectCachedSessionView(state,opening,idle)
