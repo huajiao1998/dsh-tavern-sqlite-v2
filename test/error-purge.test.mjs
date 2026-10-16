@@ -252,7 +252,6 @@ test('干净清理7 built组合：clientCoreWrites built含failureTarget/handler
     assert.equal(splitFeature.split('// [dsh-tavern-error-purge-menu-delegated:v1]').length - 1, 1, 'split 布局菜单必须是共享委托形态（恰一处标记）')
     assert.ok(splitFeature.includes('menuStorageUi.cleanFailure(props.sessionId, Number(menuFailureTarget.turn), menuFailureTarget)'), 'split 布局菜单 clear 分支必须委托共享服务')
     assert.equal(splitFeature.includes('alreadyClean === true)) await props.sessions.waitForTavernRollbackSync'), false, 'split 布局菜单不得再自造 clear-only wait（等待在共享服务内）')
-    assert.equal(splitFeature.split('回退同步尚未接线或尚未就绪，未执行回退').length - 1, 1, 'split 布局作者 guard 在 RPC 前恰 1')
     const tmp = path.join(base, 'check-built.mjs')
     writeFs(tmp, built)
     const r = spawnSync(process.execPath, ['--check', tmp], {encoding:'utf8'})
@@ -785,33 +784,6 @@ test('干净清理17 真实注册为失败提示控件注入同步服务', async
     assert.deepEqual(waited, {id:'r1'}, '必须等待同连接同步回执')
     assert.equal(run.rebased, 1, 'sync 等待后必须定向刷新一次（共享服务经桥 refresh）')
 
-    // ③ 负例：改**服务字段**（不是 slot props）令同步消费者缺失 ⇒ 零 RPC、零局部更新、恰好一次响亮失败
-    const negatives = [
-      ['sessions 服务缺失（同步未接线）', undefined],
-      ['sessions 在但缺 waitForTavernRollbackSync（同步未接线）', {}],
-    ]
-    for (const [label, sessionsValue] of negatives) {
-      const domNoSync = createFakeDom(42)
-      const nocalls = []
-      const runNoSync = { currentState: null, listeners: [], sessions: sessionsValue, created: 0, invalidated: 0, rebased: 0, refreshed: 0, reported: [],
-        rpc: async (...args) => { nocalls.push(args); throw new Error('缺同步时必须零 RPC') } }
-      // getter 每次按**当前 run** 取共享服务：负例改的是服务字段，getter 仍返回真实共享 UI。
-      builtCase.dock.ctx.get = name => (name === 'tavernStorageUi' ? loadSharedStorageUi(runNoSync) : undefined)
-      const harnessNoSync = createSupersededHarness(built, domNoSync, runNoSync)
-      const targetNoSync = failureItem(42, 'op42')
-      runNoSync.currentState = view(targetNoSync)
-      harnessNoSync.render(runNoSync.currentState, builtCase.props)
-      let thrown = null
-      try { await harnessNoSync.captures.at(-1).onPurge(42, targetNoSync) } catch (error) { thrown = error }
-      assert.equal(nocalls.length, 0, label + '：必须零 RPC（不删不改）')
-      assert.equal(runNoSync.rebased, 0, label + '：零 RPC 就不得刷新')
-      assert.equal(runNoSync.reported.length + (thrown ? 1 : 0), 1, label + '：失败必须恰好暴露一次（onError 或同步抛）')
-      if (runNoSync.reported.length === 1) assert.equal(runNoSync.reported[0][0], '干净清理错误失败', label + '：走作者 onError 时标签须与现场同名')
-      const surfaced = runNoSync.reported.length === 1
-        ? String(runNoSync.reported[0][1] && runNoSync.reported[0][1].message)
-        : String(thrown && thrown.message)
-      assert.match(surfaced, /尚未接线|未就绪|未接线/, label + '：必须暴露同步未接线/未就绪而不是静默')
-    }
   } finally {
     rmSync(base, {recursive:true, force:true})
   }

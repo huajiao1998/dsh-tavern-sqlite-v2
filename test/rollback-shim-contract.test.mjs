@@ -9,7 +9,8 @@ import path from 'node:path'
 const source=readFileSync(new URL('../deploy/rollback-cleanup.shim.js',import.meta.url),'utf8')
 test('部署shim导出前台与后台严格回退函数',async()=>{
   const exportNames=[...source.matchAll(/export const (\w+)\s*=/g)].map(match=>match[1])
-  for(const name of ['cleanupAfterRollback','preflightRollback','preflightRollbackAtSeq','cleanupAfterRollbackAtSeq','cleanupRollbackHeadIndex']) assert.ok(exportNames.includes(name),`shim缺少${name}`)
+  for(const name of ['cleanupAfterRollback','preflightRollback','preflightRollbackAtSeq','cleanupAfterRollbackAtSeq']) assert.ok(exportNames.includes(name),`shim缺少${name}`)
+  assert.equal(exportNames.includes('cleanupRollbackHeadIndex'),false,'退役L4不应再由垫片转出')
   assert.match(source,/impl\?\.preflightRollbackAtSeq/)
   assert.match(source,/impl\?\.cleanupAfterRollbackAtSeq/)
 })

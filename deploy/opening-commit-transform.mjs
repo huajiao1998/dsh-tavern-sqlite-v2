@@ -11,7 +11,7 @@ export function applyOpeningCommitTransform(source) {
     for (const required of ['const openingBaseline = captureChatHeader(chat)', "await chats.writeHeader(draft, openingBaseline, { source: 'opening.native-append' })", 'const committed = draft']) {
       if (!source.includes(required)) throw new Error('开场字段提交标记存在但实现不完整：' + required)
     }
-    return source
+    return applyOpeningCaptureScope(source)
   }
   let next = "import { captureChatHeader } from './chat-persistence.js'\n" + OPENING_COMMIT_MARKER + '\n' + source
   next = replaceOnce(next, '    if (chat.nativeOpeningAppended === true) return',
@@ -19,5 +19,14 @@ export function applyOpeningCommitTransform(source) {
   next = replaceOnce(next,
     "    const saved = await chats.write(draft, { source: 'opening.native-append' })\n    const committed = saved && typeof saved === 'object' ? saved : draft",
     "    await chats.writeHeader(draft, openingBaseline, { source: 'opening.native-append' })\n    // writeHeader返回header；完整已刷新草稿才可回填，不能用header删除messages。\n    const committed = draft")
-  return next
+  return applyOpeningCaptureScope(next)
+}
+function applyOpeningCaptureScope(source){
+ const marker='// [dsh-tavern-opening-capture-scope:v1]'
+ if(source.includes(marker)){if(!source.includes('withNativeOpening(session, () => appendOpeningEventsImpl('))throw Error('开场捕获作用域不完整');return source}
+ source="import { withNativeOpening } from './storage-rollback.js'\n"+marker+'\n'+source
+ return replaceOnce(source,'  function appendOpeningEvents(session, chat, text, recovering) {',`  function appendOpeningEvents(session, chat, text, recovering) {
+    return withNativeOpening(session, () => appendOpeningEventsImpl(session, chat, text, recovering))
+  }
+  function appendOpeningEventsImpl(session, chat, text, recovering) {`)
 }

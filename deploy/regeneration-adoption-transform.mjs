@@ -1,10 +1,11 @@
 // 原按钮/临时生成/结算不改，替换作者遮蔽采用与历史revision恢复消费者。
+import {applyRollbackOperationTransform} from './rollback-operation-transform.mjs'
 const MARKER='// [dsh-tavern-regeneration-physical:v1]'
 function once(source,old,next){if(source.split(old).length!==2)throw Error('正文物理采用锚点缺失/不唯一：'+old.slice(0,100));return source.replace(old,next)}
 export function applyRegenerationAdoptionTransform(source){
  if(source.includes(MARKER)){
   for(const key of ['const regenerationRecovery = createRegenerationAdoption(', 'const adoption = regenerationRecovery.plan(', 'restore: regenerationRestore.record'])if(!source.includes(key))throw Error('正文物理采用接线不完整')
-  return source
+  return applyRollbackOperationTransform(source)
  }
  source=once(source,"import { createRegenerationRecovery } from './regeneration-recovery.js'",MARKER+"\nimport { createRegenerationAdoption } from './storage-rollback.js'")
  source=once(source,'  const regenerationRecovery = createRegenerationRecovery({ chats, sessions, timeline, isActive: id => pendingRegenerations.has(id) })',`  const regenerationRecovery = createRegenerationAdoption({ chats, sessions, timeline, sessionPatch,
@@ -26,5 +27,5 @@ export function applyRegenerationAdoptionTransform(source){
  source=once(source,'        next.suppressedDshTurns = Array.from(new Set((Array.isArray(next.suppressedDshTurns) ? next.suppressedDshTurns : []).concat([syntheticTurn]))).sort(function (left, right) { return left - right })','        // 本次临时轮从SQL事件尾真正删除，不靠suppressed隐藏。')
  // 失败恢复不调用作者空消息覆盖；提交后原生采用失败保留同SQL可重入意图。
  source=once(source,'    result.adopted = { text: body, guidance: guide, hiddenTurn: oldTurn, syntheticTurn: syntheticTurn }','    result.adopted = { text: body, guidance: guide, hiddenTurn: oldTurn, syntheticTurn: oldTurn }')
- return source
+ return applyRollbackOperationTransform(source)
 }

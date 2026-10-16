@@ -218,14 +218,7 @@ test('缺陷B：baseline 停在合法 null 中间态 ⇒ 不再误抛，边界�
   assert.equal(after.timeline.participants.background.boundary, 34, '重建后的 participant 记录实际切点')
 })
 
-test('缺陷B：只有现行 participant 水位不能冒充发轮前切点，零删拒绝', async () => {
-  const f = await harness({ currentBoundary: 48, currentSyncedRevision: 34, sessionCut: undefined })
-  const before = await f.read()
-  await assert.rejects(cleanRollback(f.args), /上一轮后台缺少权威seq边界/)
-  assert.deepEqual(f.truncated, [], '缺发轮前切点时前后台均不能删')
-  assert.equal(f.background.log.length, 49)
-  assert.deepEqual(await f.read(), before, '失败操作/变量/正文/完成意图保持原样')
-})
+
 
 test('缺陷B：只用 rollbackSessionCuts 也能收敛（现行 participant 也停在中间态时）', async () => {
   const f = await harness({ currentBoundary: null, currentSyncedRevision: null, sessionCut: 34 })
@@ -235,12 +228,7 @@ test('缺陷B：只用 rollbackSessionCuts 也能收敛（现行 participant 也
 
 // ---------- ② 回归：原有拒绝一字不减 ----------
 
-test('回归：三者都无权威 seq ⇒ 仍响亮拒绝（不为跨会话搬运 boundary）', async () => {
-  const f = await harness({ currentBoundary: null, currentSyncedRevision: null, sessionCut: undefined })
-  await assert.rejects(cleanRollback(f.args), /上一轮后台缺少权威seq边界/)
-  assert.equal(f.truncated.filter(([id]) => id === BACKGROUND_ID).length, 0, '拒绝时不得碰后台库')
-  assert.equal(f.background.log.length, 49, '拒绝时后台事件一条不动')
-})
+
 
 test('缺陷B：同Session登记切点优先于后置水位，实际删尽后台失败尾', async () => {
   const f = await harness({ currentBoundary: 48, currentSyncedRevision: 34, sessionCut: 34 })
@@ -267,22 +255,7 @@ test('缺陷B：换代参与者的小seq不得截旧Session，分别按各自前
   assert.equal((await f.read()).timeline.participants.background.sessionId, BACKGROUND_ID)
 })
 
-test('缺陷B：换代Session水位再合法也不能填补旧Session缺失前像，零删拒绝', async () => {
-  const f = await harness({ currentBoundary: 2, currentSyncedRevision: 34, sessionCut: undefined })
-  const replacementId = 'background-replacement'
-  const replacement = makeSession([{ seq: 0, type: 'session/end-seed', data: {} }, ...turnEvents(1, 1)])
-  replacement.header.id = replacementId
-  f.agents.set(replacementId, { session: replacement, phase: { kind: 'idle', lastTurn: 1 }, inbox: { nextTurn: [], nextStep: [] } })
-  const current = f.chats.get('chat-id')
-  current.timeline.participants.background.sessionId = replacementId
-  current.rollbackSessionCuts = { '113': { [replacementId]: -1 } }
-  const before = await f.read()
-  await assert.rejects(cleanRollback(f.args), /上一轮后台缺少权威seq边界/)
-  assert.deepEqual(f.truncated, [])
-  assert.deepEqual(await f.read(), before)
-  assert.equal(f.background.log.length, 49)
-  assert.equal(replacement.log.length, 5)
-})
+
 
 test('回归：新建 participant（基准里没有该会话）⇒ -1 哨兵语义保留', async () => {
   const f = await harness({ currentBoundary: null, currentSyncedRevision: null, sessionCut: undefined, baselineBoundary: undefined })

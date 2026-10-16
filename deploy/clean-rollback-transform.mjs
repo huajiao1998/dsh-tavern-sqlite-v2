@@ -6,10 +6,10 @@ const END='  async function undoRollback(sessionId, chatId) {'
 const BODY=`${START}
     ${MARKER}
     void restoredAgent
-    if (sessionPatch && !sessionPatch.replacementAllowed()) throw new Error(sessionPatch.blockReason())
+    // 客户端握手只影响显示同步，不阻止后端物理回退。
     const cleanRollback = storageRollback.cleanRollback
     if (typeof cleanRollback !== 'function') throw new Error('缺少统一物理回退消费者')
-    return await cleanRollback({ chat, requestedTurn, availability: rollbackAvailability,
+    return await cleanRollback({ chat, requestedTurn,
       readChat, updateChat, chats, sessions, view, readCard: readChatCard, quiesce: quiesceRollback, sideCleanup: cleanupRollbackSides,
       persistence: typeof persistenceProvider === 'function' ? persistenceProvider() : persistenceProvider,
       services: {
@@ -22,9 +22,9 @@ const BODY=`${START}
   }
 
 `
-const IDLE_PROVIDER = '        isFailureCleanupIdle,\n        preserveRetainedBodyEdits: true,\n'
+const IDLE_PROVIDER = '        preserveRetainedBodyEdits: true,\n'
 const UPGRADED_BODY = body => body.replace('      services: {\n','      services: {\n' + IDLE_PROVIDER)
-const IDLE_SIGNATURE = 'rollbackSyncProvider, variableStore, quiesceRollback, cleanupRollbackSides, isFailureCleanupIdle })'
+const IDLE_SIGNATURE = 'rollbackSyncProvider, variableStore, quiesceRollback, cleanupRollbackSides })'
 const SYNC_BODY=BODY.replace('webServerProvider: () => typeof webServerProvider === \'function\' ? webServerProvider() : webServerProvider,', 'rollbackSyncProvider: () => typeof rollbackSyncProvider === \'function\' ? rollbackSyncProvider() : rollbackSyncProvider,')
 // 新作者布局直接接最终消费者；不先修补随即会删除的软回退/历史窗口路径。
 export function applyLatestCleanRollbackTransform(source) {
@@ -43,9 +43,17 @@ export function applyLatestCleanRollbackTransform(source) {
  next=next.replace(regenCall,'    // SQLite只有当前态：重生成沿行级checkpoint，不探测不存在的历史正文。\n    try { return await regenBody(chat.id, guidance, sessionId) }')
  return applyCleanRollbackTransform(next)
 }
-export function applyCleanRollbackTransform(source) {
+function applyCleanRollbackTransformCore(source) {
  if (source.includes(MARKER) && (source.split(MARKER).length!==2 || source.split(START).length!==2 || source.split(END).length!==2)) throw new Error('统一物理回退消费者重复/边界不唯一')
- if (source.includes('rollbackSyncProvider')) {
+ if(source.includes(MARKER) && source.includes('rollbackSyncProvider')) {
+   const start=source.indexOf(START),end=source.indexOf(END,start)
+   if(end<=start)throw Error('旧consumer函数边界不完整')
+   const old=source.slice(start,end)
+   for(const token of ['storageRollback.cleanRollback','readChat, updateChat','sideCleanup: cleanupRollbackSides'])if(!old.includes(token))throw Error('旧consumer接线不完整：'+token)
+   source=source.slice(0,start)+UPGRADED_BODY(SYNC_BODY)+source.slice(end)
+   source=source.replace('cleanupRollbackSides, isFailureCleanupIdle })','cleanupRollbackSides })')
+  }
+  if (source.includes('rollbackSyncProvider')) {
   const signature='rollbackSyncProvider, variableStore, quiesceRollback, cleanupRollbackSides })'
    if(source.includes('        isFailureCleanupIdle,\n') && !source.includes('preserveRetainedBodyEdits: true'))source=source.replace('        isFailureCleanupIdle,\n',IDLE_PROVIDER)
   if(source.includes(UPGRADED_BODY(SYNC_BODY)) && source.split(IDLE_SIGNATURE).length===2)return applyRegenerationRollbackTransform(source)
@@ -93,4 +101,37 @@ function applyLegacyCleanRollbackTransform(source) {
 
 `+next.slice(undoEnd)
  return next
+}
+
+// 回退优先于重放/重生成：入口不再要求在途业务先完成，改由 cleanRollback 统一取消并收口半态。
+function relaxRollbackEntryGates(source){
+  const gate=`    if (pendingReplays.has(chat.id)) throw new Error('正在重放失败回合，请等待完成')
+    if (pendingRegenerations.has(chat.id) || chat.regenInProgress) throw new Error('正文正在重新生成，请先完成恢复或生成')
+    if (pendingRollbacks.has(chat.id)) throw new Error('正在回退本轮，请等待完成')
+    pendingRollbacks.add(chat.id)`
+  const relaxed=`    // 回退优先：重放/重生成在途先取消，regenInProgress/regenRecovery 半态由 rollback.prepare 一并清除。
+    // 只保留同一会话并发回退的串行保护（后台由 schedulingBarrier 兜底）。
+    if (pendingReplays.has(chat.id)) pendingReplays.delete(chat.id)
+    if (pendingRegenerations.has(chat.id)) pendingRegenerations.delete(chat.id)
+    if (pendingRollbacks.has(chat.id)) throw new Error('正在回退本轮，请等待完成')
+    pendingRollbacks.add(chat.id)`
+  if(!source.includes(relaxed) && !source.includes('// [dsh-tavern-rollback-entry-cancel:v2]')) {
+    if(source.split(gate).length!==2)throw new Error('回退入口门锚点缺失或不唯一')
+    source=source.replace(gate,relaxed)
+  }
+  source=source.replace('    if (pendingReplays.has(chat.id)) pendingReplays.delete(chat.id)\n','').replace('    if (pendingRegenerations.has(chat.id)) pendingRegenerations.delete(chat.id)\n','')
+  source=source.replace('    // 回退优先：重放/重生成在途先取消，regenInProgress/regenRecovery 半态由 rollback.prepare 一并清除。','    // [dsh-tavern-rollback-entry-cancel:v2] 真实任务取消与等待由统一消费者执行。')
+  // rollbackTurn 外层同样不再做客户端握手前置：握手只影响显示同步，不阻止后端物理回退。
+  const handshake=`    if (sessionPatch && !sessionPatch.replacementAllowed()) throw new Error(sessionPatch.blockReason())
+    // Identity and task flags only; rollbackChat reads the story it changes.`
+  const noHandshake=`    // 客户端握手只影响显示同步，不阻止后端物理回退（与 rollbackChat 同一口径）。
+    // Identity and task flags only; rollbackChat reads the story it changes.`
+  if(!source.includes(noHandshake)){
+    source=source.replace(handshake,noHandshake)
+  }
+  return source
+}
+export function applyCleanRollbackTransform(source){
+ if(source.includes('// [dsh-tavern-rollback-operation-cancel:'))return source
+ return relaxRollbackEntryGates(applyCleanRollbackTransformCore(source))
 }

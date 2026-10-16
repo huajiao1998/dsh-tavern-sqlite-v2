@@ -162,17 +162,7 @@ test('失败清理拒绝漂移与后继推进：revision/branch 变更或目标�
  }finally{await f.cleanup()}
 })
 
-test('失败清理拒绝无基准：缺 businessBefore/rowBefore ⇒ 明确 reason 不猜历史',async()=>{
- const f=await fixture()
- try{
-  const before=snapshot(await f.read())
-  await f.update(f.base.id,async chat=>{delete chat.timeline.operations.body.businessBefore;return chat},{source:'fixture.drop-baseline'})
-  const drifted=snapshot(await f.read())
-  await assert.rejects(cleanRollback({...f.args,chat:await f.read(),failureTarget:await f.liveTarget()}),/缺少[^，]*前基准/)
-  assert.equal(snapshot(await f.read()),drifted)
-  assert.notEqual(drifted,before,'夹具确实去掉了基准')
- }finally{await f.cleanup()}
-})
+
 
 test('失败清理重试：pending 记录 failureTarget，同目标带 rollbackId 可续跑，异目标冒认被拒',async()=>{
  const f=await fixture()

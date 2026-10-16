@@ -62,7 +62,6 @@ export function applyPluginTaskHostTransform(source){
 `
  source=source.slice(0,start)+body+source.slice(end)
  source=once(source,'      await cancelSettlement(chat.id, { wait: true })','      await cancelSettlement(chat.id, { wait: true })\n      await quiescePluginTasks(chat)')
- source=once(source,"!settlementJobs.isBusy(chat.id) && !Object.values(chat.timeline?.participants", "!settlementJobs.isBusy(chat.id) && !pluginTaskJobs.has(chat.id) && !Object.values(chat.timeline?.participants")
  source=once(source,'    pluginApi.stopTasks(chat.sessionId)\n    backgroundAgentRunner.cancel(chat.sessionId)',"    pluginTaskJobs.get(chat.id)?.controller.abort(new Error('玩家停止了插件任务'))\n    pluginApi.stopTasks(chat.sessionId)\n    backgroundAgentRunner.cancel(chat.sessionId)")
  return source
 }

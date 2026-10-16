@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite'
 import { isProxy } from 'node:util/types'
-import { assertRollbackChatWritable, rollbackSchedulingBarrier } from './lib/rollback-barrier.js'
+import { assertRollbackChatWritable, rollbackSchedulingBarrier, rollbackCancellationBarrier } from './lib/rollback-barrier.js'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { gunzipSync } from 'node:zlib'
@@ -484,9 +484,15 @@ export function createChatSqliteStore(options = {}) {
       // ---- 变量（同一事务）：变化楼落快照 + 当前态 + 尾部清残 + K4 修剪（窗口外老楼先存快照再删）----
       //   header-only 写（touchedIndices 空且无截断）在这里不做任何扫描，直接原样返回。
       //   written = 本次 touched ∪ 被修剪的楼：修剪改了行内容，必须一起落库。
-      const deletedVariables = (changes || []).filter(change => change.path?.length === 3
+      const deletedVariables = new Set((changes || []).filter(change => change.path?.length === 3
         && change.path[0] === 'messages' && change.path[2] === 'variables' && change.op === 'delete')
-        .map(change => change.path[1])
+        .map(change => change.path[1]))
+      for(const change of changes || []) {
+        if(change.op!=='set')continue
+        const path=change.path || []
+        if(path[0]==='messages' && path.length===2 && !Array.isArray(messages[path[1]]?.variables))deletedVariables.add(path[1])
+        if(path.length===0 || (path[0]==='messages' && path.length===1))for(const index of touchedIndices)if(!Array.isArray(messages[index]?.variables))deletedVariables.add(index)
+      }
       const prepared = variables.prepareWrite(db, chatId, chat, { touched: touchedIndices, truncated, deletedVariables,
         resetSnapshotsFrom: options.resetSnapshotsFrom })
       const storedChat = prepared.chat
@@ -495,7 +501,9 @@ export function createChatSqliteStore(options = {}) {
       // 修剪楼可能不在业务touched里，仍须进入changedSlice/indices等增量证据。
       if (changes !== null && storedChat !== chat) {
         const internal = []
+        const businessTouched=new Set(touchedIndices)
         for (const index of prepared.written) {
+          if (!businessTouched.has(index) && options.hydratedBase && !Array.isArray(options.hydratedBase[index]?.variables)) continue
           if (storedMessages[index] === messages[index]) continue
           for (const change of diffJson(messages[index], storedMessages[index])) {
             internal.push({ ...change, path: ['messages', index, ...change.path] })
@@ -993,11 +1001,24 @@ export function createChatSqliteStore(options = {}) {
         variables.hydrateRange(handle(chatId), chatId, resetSnapshotsFrom, state.chat.messages.length, rows)
         patchBase = { ...state.chat, messages: [...state.chat.messages.slice(0, resetSnapshotsFrom), ...rows] }
       }
+      // B20/B23：深路径写入和首次撤销必须在覆盖快照前看到同一份完整旧行。
+      // 明确写集只补目标楼；整messages替换才读取全部旧楼，不污染长期瘦行缓存。
+      const allRows = changes.some(change => change.path?.length===0 || (change.path?.[0] === 'messages' && change.path.length === 1 && change.op !== 'splice'))
+      const indices = allRows ? state.chat.messages.map((_row,index)=>index)
+        : [...new Set(changes.filter(change=>change.path?.[0]==='messages' && Number.isSafeInteger(change.path[1]))
+          .map(change=>change.path[1]).filter(index=>index>=0 && index<state.chat.messages.length))]
+      if (indices.length) {
+        const rows=indices.map(index=>patchBase.messages[index])
+        variables.hydrateIndices(handle(chatId),chatId,indices,rows)
+        const messages=patchBase.messages.slice()
+        indices.forEach((index,position)=>{messages[index]=rows[position]})
+        patchBase={...patchBase,messages}
+      }
       const normalized = normalizePatchChanges(patchBase, changes, state.chat.messages.length)
 
       changes = normalized
       const next = applyJsonChangesShared(patchBase, changes)
-      const undoOperation=recordRollbackBusinessWrites(state.chat,next,metadata,copyJsonTree)
+      const undoOperation=recordRollbackBusinessWrites(patchBase,next,metadata,copyJsonTree)
       if(undoOperation) {
         changes=[...changes,{op:'set',path:['timeline','operations',undoOperation,'businessBefore'],value:next.timeline.operations[undoOperation].businessBefore}]
         if(Array.isArray(next.timeline.checkpoints))next.timeline.checkpoints.forEach((cp,index)=>{
@@ -1011,7 +1032,7 @@ export function createChatSqliteStore(options = {}) {
       if (Number(db.prepare('SELECT revision FROM archive_head WHERE id=1').get()?.revision)!==expectedRevision) return undefined
       // storedChat = 实际落库的形态（老楼 variables 可能已被 K4 修剪进同库快照表）：
       // 写缓存/返回都用它，避免"库是瘦的、内存缓存是全的"这种 hydrate-full-then-remember-huge。
-      const written = writeChat(db, chatId, next, expectedRevision + 1, now(), changes, {expectedRevision, resetSnapshotsFrom})
+      const written = writeChat(db, chatId, next, expectedRevision + 1, now(), changes, {expectedRevision, resetSnapshotsFrom,hydratedBase:state.chat.messages})
       const storedChat = written.chat
       // 复用调用方及内部整理的最终写集；不再全档比较，也不漏掉额外修剪楼。
       changes = written.changes
@@ -1033,8 +1054,10 @@ export function createChatSqliteStore(options = {}) {
       assertWritableChat(chatId)
       const currentState = await cachedState(chatId, 'update')
       assertWritableChat(chatId, currentState)
-      const current = currentState == null ? undefined : currentState.chat
+      // 通用callback没有可预知写集，沿read()合同给完整脱离历史；不把补齐对象放进读缓存。
+      let current = currentState == null ? undefined : copyJsonTree(currentState.chat)
       assertRollbackChatWritable(current, metadata)
+      if (current && currentState.legacy !== true) variables.hydrateChat(handle(chatId),chatId,current)
       const produced = await updater(copyJsonTree(current))
       if (currentState && Number(handle(chatId).prepare('SELECT revision FROM archive_head WHERE id=1').get()?.revision)!==currentState.revision) throw new Error('Chat 存储写入 revision 非连续：异步更新期间发送前像或其他提交已推进，拒绝覆盖')
       if (produced === undefined) return copyJsonTree(current)
@@ -1063,6 +1086,8 @@ export function createChatSqliteStore(options = {}) {
         if (revision !== baseRevision + 1) throw new Error('Chat 存储写入 revision 非连续，期望 ' + (baseRevision + 1) + '，实际 ' + revision)
         recordRollbackBusinessWrites(current,next,metadata,copyJsonTree)
         changes = diffJson(current, next)
+        // 补齐只供callback/前像使用；头部写后缓存仍沿用未改的瘦楼，避免下次误报重新修剪。
+        if (!changes.some(change=>change.path.length===0 || change.path[0]==='messages')) next.messages=currentState.chat.messages
         if (changes.length === 0) return copyJsonTree(current)
       }
       const existed = existsSync(dbFile(chatId))
@@ -1070,7 +1095,8 @@ export function createChatSqliteStore(options = {}) {
       let storedChat = next
       let touched
       try {
-        const written = writeChat(db, chatId, next, revision, now(), changes, {expectedRevision:currentState?.revision??null})
+        metadata.assertCurrent?.()
+        const written = writeChat(db, chatId, next, revision, now(), changes, {expectedRevision:currentState?.revision??null,hydratedBase:currentState?.chat.messages})
         storedChat = written.chat
         changes = written.changes
         touched = written.touched
@@ -2116,7 +2142,7 @@ export function createChatSqliteStore(options = {}) {
       const state=readSqlSnapshot(db,()=>narrowHeaderRows(chatId,db)),chat=state?.chat
       if(!chat || chat.id!==chatId || chat.sessionId!==input.sessionId)throw new Error('发送前像档/会话身份不一致')
       assertRollbackChatWritable(chat,{source:'foreground.send-accepted'})
-      if(rollbackSchedulingBarrier.has(input.sessionId))throw new Error('物理回退静止期间禁止接受新发送')
+      if(rollbackSchedulingBarrier.has(input.sessionId) || rollbackCancellationBarrier.has(input.sessionId))throw new Error('物理回退静止期间禁止接受新发送')
       if(chat.timeline?.schemaVersion!==1 || !chat.timeline.branchId)throw new Error('发送前像缺少有效剧情时间线')
       if(input.type==='turn/start')assertSendAfterCleanup(chat,{events:input.events || [],accepting:true})
       const existingEntry=Object.entries(chat.timeline.operations || {}).find(([,op])=>op?.kind==='body' && Number(op.turn)===input.turn)

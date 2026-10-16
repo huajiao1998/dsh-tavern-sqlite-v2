@@ -79,6 +79,34 @@ async function fixture({ sessionId = 'session-send-accept', chatId = 'chat-send-
   return { root, home, dataRoot, Session, sessionId, chatId, store, read, bodyOpFor, cleanup }
 }
 
+test('审查修复R10真实开场：静态append不造running记录，随后真实发送即时捕获完整前像',async()=>{
+ const f=await fixture()
+ try{
+  const {applyOpeningCommitTransform}=await import('../deploy/opening-commit-transform.mjs')
+  const {withNativeOpening}=await import('../lib/send-acceptance.js')
+  const {latestSendTarget}=await import('../lib/latest-send.js')
+  const {createHash}=await import('node:crypto')
+  const domain=new URL('../../../tmp/upstream-a390af17-adapt-20261016/author-fixture/src/dsh-tavern-a390af170cfe5ed3e9213a2801cbcce321e2008b/tavern-plugin/lib/domain/',import.meta.url)
+  const {sessionEvents,appendSessionEvent}=await import(new URL('session-events.js',domain))
+  const source=applyOpeningCommitTransform(readFileSync(new URL('conversation-initialization.js',domain),'utf8'))
+  const from=source.indexOf('  function openingId(chat) {'),to=source.indexOf('  async function appendNativeOpening(',from)
+  assert.ok(from>=0&&to>from)
+  const append=new Function('withNativeOpening','sessionEvents','appendSessionEvent','createHash','str',source.slice(from,to)+'\nreturn appendOpeningEvents')(withNativeOpening,sessionEvents,appendSessionEvent,createHash,value=>String(value??''))
+  await f.store.update(f.chatId,current=>{current.messages=[{role:'assistant',turn:1,greeting:true,text:'原创开场',swipeId:0,swipes:['原创开场'],variables:[{hp:1}]}];current.variables={hp:1};current._storageRevision++;return current})
+  const session=f.Session.create(f.sessionId),before=await f.read()
+  append(session,before,'原创开场',false)
+  const opening=await f.read()
+  assert.equal(opening._storageRevision,before._storageRevision,'静态开场不触发发送前像提交')
+  assert.equal(Object.values(opening.timeline.operations).some(op=>op.kind==='body'),false)
+  assert.equal(latestSendTarget(opening,{events:session.snapshotEvents()}),null)
+  session.append('turn/start',{turn:2})
+  session.append('user/message',{id:'real-input-2',role:'user',content:[{type:'text',text:'真正发送'}],source:{kind:'user'}},{surfaceOp:'append'})
+  const accepted=await f.read(),op=Object.values(accepted.timeline.operations).find(op=>op.turn===2)
+  assert.ok(op?.businessBefore);assert.deepEqual(op.businessBefore.fields.variables,{hp:1});assert.equal(op.businessBefore.messageCount,1)
+  assert.ok(op.nativeAnchor);assert.equal(latestSendTarget(accepted,{events:session.snapshotEvents()}).turn,2)
+ }finally{await f.cleanup()}
+})
+
 test('发送接受同步前像：turn/start立即落running body前像、user/message补nativeAnchor且body.begin复用占位不覆盖', async () => {
   const f = await fixture()
   try {

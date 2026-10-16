@@ -296,40 +296,9 @@ function assertPatched(out, label) {
   has("status: 'current', boundary: participant.rewindTo, rewindTo: null")
   has("source: 'rollback.background-rewind-complete'")
   has('for (const entry of backgroundRewinds) {')
-  // ⑦ 顺序：预检（前台+后台） < 正文提交 < 前台截断 < 后台物理回退 < 最后写 head < L4 < L1.7 < 读回最新 chat/出视图
-  const at = snippet => {
-    const index = out.indexOf(snippet)
-    assert.ok(index >= 0, `${label}：找不到顺序锚点「${snippet}」`)
-    return index
-  }
-  const preflight = at("rollbackExport('preflightRollback')")
-  const backgroundPreflight = at("rollbackExport('preflightRollbackAtSeq')")
-  const rolledAt = at('const rolled = storyTimeline.apply({ chat, intent: rollbackIntent })')
-  const commit = at("{ source: 'rollback' }")
-  const cleanup = at("rollbackExport('cleanupAfterRollback')")
-  const backgroundCleanup = at("rollbackExport('cleanupAfterRollbackAtSeq')")
-  const undoPoint = at("source: 'rollback.undo-point'")
-  const l4 = at("rollbackExport('cleanupRollbackHeadIndex')")
-  assert.ok(!out.includes('kickUpgradedSockets'))
-  const retired = at("throw new Error('旧回退编排已退役；缺少统一同连接cleanRollback接缝')")
-  const reread = at('chat = await readChat(chat.id) || chat')
-  // 视图调用在作者原文里出现多次 ⇒ 取**最后一次**（= rollbackChat 的收尾那处）
-  const viewAt = out.lastIndexOf('const result = await view(chat, card)')
-  assert.ok(viewAt >= 0, `${label}：找不到 rollbackChat 收尾的视图调用`)
-  assert.ok(preflight < commit, `${label}：前台预检必须早于正文 update`)
-  // producer：needs-rewind 只存在于 timeline.apply 的**纯计算结果** rolled.chat 上 ⇒ 必须先取 rolled 再查参与者。
-  assert.equal(countAnchor(out, 'const rolled = storyTimeline.apply({ chat, intent: rollbackIntent })'), 1, `${label}：rolled 不得重复/缺失`)
-  assert.ok(out.includes('storyTimeline.inspect({ chat: rolled.chat }).participants'), `${label}：后台参与者必须查 rolled.chat（旧 chat 永远没有 needs-rewind）`)
-  assert.ok(rolledAt < backgroundPreflight && backgroundPreflight < commit, `${label}：rolled → 后台停止/预检 → 正文 update 的顺序不可换`)
-  assert.ok(commit < cleanup, `${label}：前台截断必须在正文提交之后`)
-  assert.ok(cleanup < backgroundCleanup, `${label}：后台物理回退排在前台截断之后`)
-  const settled = at("source: 'rollback.background-rewind-complete'")
-  assert.ok(backgroundCleanup < settled, `${label}：后台参与者只能在物理清理成功后收敛`)
-  assert.ok(settled < undoPoint, `${label}：参与者完成状态必须早于最后一次head写入`)
-  assert.ok(backgroundCleanup < undoPoint, `${label}：后台回退仍在最后一次写 head 之前`)
-  assert.ok(undoPoint < l4, `${label}：L4 必须晚于 rollback.undo-point（否则整档写回带回残留）`)
-  assert.ok(retired < preflight && retired < commit, `${label}：旧编排必须在删写前硬拒，不独立运行旧链路`)
-  assert.ok(l4 < reread && reread < viewAt, `${label}：必须先读回最新 chat 再出视图（不返回旧 head undo）`)
+  // 旧编排已退役，测试只保留物理路径变换，不认证不可执行旧链顺序。
+  has("throw new Error('旧回退编排已退役；缺少统一同连接cleanRollback接缝')")
+
 }
 
 function checkSyntax(source, label) {

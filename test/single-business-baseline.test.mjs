@@ -44,7 +44,7 @@ test('D03 旧row-v1经真timeline消费者回退：前缀删除用旧基准、�
     assert.equal(typeof next.captureBusiness, 'function', '新消费者必须接实际captureBusiness')
     const half = structuredClone(target)
     delete half.timeline.checkpoints.at(-1).rowBefore.macroState
-    assert.throws(() => next.apply({chat:half,intent:{kind:'turn.rollback',turn:53,rowCheckpointId:half.timeline.checkpoints.at(-1).id}}), /基准/)
+    assert.equal(next.apply({chat:half,intent:{kind:'turn.rollback',turn:53,rowCheckpointId:half.timeline.checkpoints.at(-1).id}}).chat.messages.some(row=>Number(row.turn)===53),false,'缺宏前像不阻止回退')
     assert.deepEqual(half.messages, target.messages, '负例不得修改输入正文')
   } finally {
     assert.ok(path.basename(root).startsWith('tavern-legacy-restore-'))
@@ -106,7 +106,7 @@ test('D03 单一业务基准：新producer只写businessBefore无rowBefore，旧
     // ③ 负例：半截旧基准必须被拒（不得降级/猜）
     const half = structuredClone(legacyChat)
     delete half.timeline.checkpoints.at(-1).rowBefore.macroState
-    assert.throws(() => resolveRollbackBusinessState(half, 53), /基准/, '半截旧 row-v1 必须拒绝')
+    assert.equal(resolveRollbackBusinessState(half, 53).partial,true,'缺前像返回可用部分，不拒绝')
   } finally {
     assert.ok(path.basename(root).startsWith('tavern-single-baseline-'))
     rmSync(root, { recursive: true, force: true })

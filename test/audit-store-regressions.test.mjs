@@ -62,6 +62,65 @@ async function fixture(t) {
 }
 const set = (index, leaf, value) => ({ op: 'set', path: ['messages', index, ...leaf], value })
 
+for (const entry of ['patch','update','setMessageFloor']) test('B20-B23修复：真实协议冷楼深写与首次撤销 ' + entry, async t => {
+  const protocol=await import('../../../tmp/upstream-a390af17-adapt-20261016/author-fixture/src/dsh-tavern-a390af170cfe5ed3e9213a2801cbcce321e2008b/tavern-plugin/lib/domain/json-mutation.js')
+  const {captureRollbackBusinessState,restoreRollbackBusinessState}=await import('../lib/rollback-business-state.js')
+  const root=mkdtempSync(path.join(tmpdir(),'sqv2-full-undo-'))
+  const make=()=>createChatSqliteStore({dataRoot:root,helpers:{...helpers,...protocol}})
+  let store=make();t.after(()=>{store.dispose();rmSync(root,{recursive:true,force:true})})
+  const id='chat-cold-undo';await store.update(id,()=>seed(id))
+  const initial=await store.read(id),expected=structuredClone(initial.messages[1])
+  initial.timeline.operations.body8={id:'body8',kind:'body',status:'running',turn:8,businessBefore:captureRollbackBusinessState(initial)}
+  initial._storageRevision=2;await store.update(id,()=>initial)
+  const db=new DatabaseSync(store.rollbackArchivePath(id))
+  try{assert.equal(Object.hasOwn(JSON.parse(db.prepare('SELECT message_json FROM archive_messages WHERE message_index=1').get().message_json),'variables'),false)}finally{db.close()}
+  const metadata={source:'tavern-helper.variables'}
+  async function write(revision,value,remove=false){
+    if(entry==='update')return store.update(id,draft=>{if(remove)delete draft.messages[1].variables;else draft.messages[1].variables[0].stat_data.floor=value;draft._storageRevision=revision+1;return draft},metadata)
+    const changes=[remove?{op:'delete',path:['messages',1,'variables']}:set(1,['variables',0,'stat_data','floor'],value)]
+    if(entry==='patch')return store.patch(id,revision,[...changes,{op:'set',path:['_storageRevision'],value:revision+1}],metadata)
+    return store.setMessageFloor(id,revision,1,{changes},metadata)
+  }
+  await write(2,101);await write(3,202)
+  assert.equal((await store.read(id)).messages[1].variables[0].stat_data.floor,202)
+  await write(4,null,true)
+  store.dispose();store=make()
+  const written=await store.read(id),baseline=written.timeline.operations.body8.businessBefore
+  assert.equal(written.messages[1].variables,undefined,'删除不被旧快照复活')
+  assert.deepEqual(baseline.messagePreimages[1],expected,'重复写仍保留完整首次旧值和全部swipe')
+  restoreRollbackBusinessState(written,baseline);written._storageRevision++
+  await store.update(id,()=>written,{source:'rollback.prepare'})
+  store.dispose();store=make()
+  assert.deepEqual((await store.read(id)).messages[1],expected,'真实回退恢复消费者写回后冷开仍完整')
+})
+
+test('B23异步护栏：callback已返回但提交前失效，变量和前像同事务零写',async t=>{
+ const f=await fixture(t),{captureRollbackBusinessState}=await import('../lib/rollback-business-state.js')
+ const initial=await f.store.read(f.id);initial.timeline.operations.body8={kind:'body',turn:8,businessBefore:captureRollbackBusinessState(initial)};initial._storageRevision=2
+ await f.store.update(f.id,()=>initial)
+ await assert.rejects(f.store.update(f.id,async draft=>{await Promise.resolve();draft.messages[1].variables[0].stat_data.floor=999;draft._storageRevision++;return draft},{source:'tavern-helper.variables',assertCurrent:()=>{throw Error('运行已失效')}}),/运行已失效/)
+ const saved=await f.reopen().read(f.id);assert.equal(saved._storageRevision,2);assert.equal(saved.messages[1].variables[0].stat_data.floor,1);assert.equal(saved.timeline.operations.body8.businessBefore.messagePreimages,undefined)
+})
+
+for(const entry of ['patch','update'])for(const mode of ['unowned','failure'])test('B23通用护栏：'+entry+' '+mode+' 不污染首次旧值或快照',async t=>{
+ const f=await fixture(t),{captureRollbackBusinessState}=await import('../lib/rollback-business-state.js')
+ const initial=await f.store.read(f.id)
+ initial.timeline.operations.body8={kind:'body',turn:8,status:'running',businessBefore:captureRollbackBusinessState(initial)}
+ initial._storageRevision=2;await f.store.update(f.id,()=>initial)
+ const metadata={source:mode==='unowned'?'configuration.edit':'tavern-helper.variables'}
+ if(mode==='failure'){const db=new DatabaseSync(f.store.rollbackArchivePath(f.id));try{db.exec("CREATE TRIGGER reject_generic BEFORE INSERT ON archive_messages WHEN NEW.message_index=1 BEGIN SELECT RAISE(ABORT,'generic failed'); END")}finally{db.close()}}
+ const write=()=>entry==='patch'?f.store.patch(f.id,2,[set(1,['variables'],[{stat_data:{floor:99},schema:{}}]),{op:'set',path:['_storageRevision'],value:3}],metadata):f.store.update(f.id,draft=>{draft.messages[1].variables=[{stat_data:{floor:99},schema:{}}];draft._storageRevision++;return draft},metadata)
+ if(mode==='failure')await assert.rejects(write,/generic failed/);else await write()
+ const saved=await f.reopen().read(f.id)
+ assert.equal(saved._storageRevision,mode==='failure'?2:3);assert.equal(saved.messages[1].variables[0].stat_data.floor,mode==='failure'?1:99)
+ assert.equal(saved.timeline.operations.body8.businessBefore.messagePreimages,undefined)
+})
+for(const entry of ['patch','setMessageFloor'])test('B20父路径护栏：'+entry+' 不虚构真实缺失父容器',async t=>{
+ const f=await fixture(t),changes=[set(1,['variables',0,'stat_data','missing','leaf'],1)]
+ await assert.rejects(entry==='patch'?f.store.patch(f.id,1,[...changes,{op:'set',path:['_storageRevision'],value:2}]):f.store.setMessageFloor(f.id,1,1,{changes}))
+ const current=await f.reopen().read(f.id);assert.equal(current._storageRevision,1);assert.deepEqual(current.messages[1].variables[0].stat_data,{floor:1})
+})
+
 for (const selected of [0, 1, 2, 3]) test('B21: history APIs agree for null/missing/selected swipe ' + selected, async t => {
   const f = await fixture(t)
   await f.store.setMessageFloor(f.id, 1, 7, { changes: [set(7, ['swipes'], ['A','B','C','D']),

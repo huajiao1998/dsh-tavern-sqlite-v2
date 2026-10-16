@@ -137,15 +137,21 @@ const BUSY_MARKER='// [dsh-tavern-unified-rollback-busy-relax:v1]'
 const BUSY_BLOCKED_OLD='\t\t\tconst blocked = rolling || frontRunning || regenBusy || activity.busy || settlementActive;'
 const BUSY_BLOCKED_NEW=`\t\t\t${BUSY_MARKER}
 \t\t\tconst signedUnifiedTarget = !!(rollbackViewState.view && rollbackViewState.view.rollbackTarget && rollbackViewState.view.rollbackTarget.kind === 'rollback')
-\t\t\tconst blocked = rolling || regenBusy || (!signedUnifiedTarget && (frontRunning || activity.busy || settlementActive));`
+\t\t\tconst blocked = rolling;`
 const BUSY_TITLE_OLD='disabled: blocked, title: blocked ? "请等待当前生成或后台处理完成后再回退" : clearIncomplete ?'
 const BUSY_TITLE_NEW='disabled: blocked, title: blocked ? "请等待当前生成或后台处理完成后再回退" : signedUnifiedTarget && (frontRunning || activity.busy || settlementActive) ? "将先停止当前发送，再回退到这条消息之前" : clearIncomplete ?'
 export function applyUnifiedRollbackBusyRelax(source){
+  for(const old of [
+   'const blocked = rolling || regenBusy || (!signedUnifiedTarget && (frontRunning || activity.busy || settlementActive));',
+   'const blocked = rolling || (!signedUnifiedTarget && (frontRunning || regenBusy || activity.busy || settlementActive));'
+  ])source=source.replace(old,'const blocked = rolling;')
  if(source.includes(BUSY_MARKER)){
+  source=source.replace('const blocked = rolling || regenBusy || (!signedUnifiedTarget && (frontRunning || activity.busy || settlementActive));','const blocked = rolling || (!signedUnifiedTarget && (frontRunning || regenBusy || activity.busy || settlementActive));')
   if(source.split(BUSY_MARKER).length!==2 || !source.includes('const signedUnifiedTarget =') || !source.includes('将先停止当前发送'))
    throw Error('统一回退忙资格放开不完整')
   return source
  }
+ source=source.replace('const blocked = rolling || regenBusy || (!signedUnifiedTarget && (frontRunning || activity.busy || settlementActive));','const blocked = rolling || (!signedUnifiedTarget && (frontRunning || regenBusy || activity.busy || settlementActive));')
  if(!source.includes(BUSY_BLOCKED_OLD))return source
  let out=once(source,BUSY_BLOCKED_OLD,BUSY_BLOCKED_NEW,'普通回退忙资格行锚点缺失/不唯一')
  // 提示行可能已被上一代补过（marker 缺失但已接线）⇒ 仅在旧锚点仍在时替换，最终仍必须含新提示。

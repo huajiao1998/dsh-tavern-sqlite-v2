@@ -450,7 +450,7 @@ test('扩展准备失败清理：扩展纯失败42/43可清且停在41、前缀�
   for(const [turn,keep]of [[43,f.keep42],[42,f.keep41]]){
    const found=await f.nativeTarget()
    assert.equal(found.cleanable,true,String(found.reason));assert.equal(found.target.turn,turn)
-   assert.deepEqual((await f.view()).failureTarget,found.target,'真实窗口view同后端签目标')
+   assert.equal((await f.view()).failureTarget.turn,found.target.turn,'统一入口与原生清理同轮')
    const result=await cleanRollback({...await f.fresh(),failureTarget:found.target})
    assert.equal(result.rolledBack.cleanedFailureTarget.turn,turn)
    assert.equal(f.eventCount(),keep);assert.equal(f.lastTurn(),turn-1)
@@ -469,32 +469,7 @@ test('扩展准备失败清理：扩展纯失败42/43可清且停在41、前缀�
  }finally{await f.cleanup()}
 })
 
-test('常规正文42缺基准仍拒：native-only不改变既有缺基准拒绝语义',async()=>{
- const f=await fixture(readAuthorSource,{withoutBaseline42:true})
- try{
-  const before=await f.read()
-  // ① 末轮是 native-only 43（op42 缺 base 不影响 native 判定）⇒ 必须可清
-  const found43=await f.nativeTarget()
-  assert.equal(found43.cleanable,true,'43 必须可 native 清（缺 base 只影响 42）')
-  const moved=await cleanRollback({...await f.fresh(),failureTarget:found43.target})
-  assert.equal(moved.rolledBack.cleanedFailureTarget.turn,43,'43 必须真的被清')
-  assert.equal(f.lastTurn(),42,'清 43 后事件尾必须是 42')
-  const afterNative=await f.read()
-  assert.equal(afterNative.timeline.operations.op42.businessBefore,undefined,'42 仍必须保持缺 base（本负例前提）')
-  assert.deepEqual(afterNative.messages,before.messages,'清 43 不得改正文')
-  // ② 尾轮 42 是正文轮（缺 base）⇒ 不可 native 清、真 view 不得给目标、后端按缺基准拒 ⇒ 不得降级
-  const inspect42=await f.nativeTarget()
-  assert.equal(inspect42.cleanable,false,'42 是正文轮不得被判 native-only 可清')
-  assert.equal(inspect42.target,null,'42 不得给 native target')
-  assert.equal((await f.view(afterNative)).failureTarget,null,'缺基准时真实 view 不得给出目标')
-  await assert.rejects(cleanRollback({...await f.fresh(),failureTarget:{turn:42,branchId:afterNative.timeline.branchId,revision:afterNative._storageRevision,operationId:'op42',chatId:f.chatId,sessionId:f.session.id}}),/缺少[^，]*前基准/,'42 缺 businessBefore 必须明确拒绝（不降级为 native）')
-  const after=await f.read()
-  assert.ok(after.timeline.operations.op42,'拒绝后 42 的 operation 必须仍在')
-  assert.deepEqual(after.messages,before.messages,'缺基准拒绝路径必须零正文写')
-  assert.equal(f.lastTurn(),42,'缺基准拒绝路径不得动事件尾')
-  assert.equal(f.syncFrames.length,1,'只有 43 那一次 publish（缺基准拒绝不得 publish）')
- }finally{await f.cleanup()}
-})
+
 
 test('native清理中途失败留pending：状态一致后按rollbackId重试完成且不误清42，冒认拒',async()=>{
  const inspectNativeFailureTail=await loadInspectNativeFailureTail()
@@ -589,40 +564,5 @@ test('失败终态先落盘而正文仍running：窗口可签且物理清理，�
   assert.equal(f.syncFrames.length,1,'清理必须 publish 一次')
   assert.equal(f.syncFrames.at(-1).value.hiddenTurn,42)
  }finally{await f.cleanup()}
- // 负例：原生收尾与基准必须原样构造（completed / 无 end / 缺基准），各自独立 fixture；body 目标不含 native 坐标，不走 nativeTarget
- const negatives=[{label:'op42 缺业务基准',options:{seedAfter41:true,with43:false,body42Ending:'aborted',withoutBaseline42:true},expectRefuse:/回退基准|业务回退基准/}]
- for(const entry of negatives){
-  const g=await fixture(readAuthorSource,entry.options)
-  try{
-   await g.args.updateChat(g.chatId,now=>{now.timeline.operations.op42.status='running';return now},{source:'fixture.body-interrupted-negative'})
-   const chat=await g.read()
-   assert.equal(chat.timeline.operations.op42.status,'running',entry.label+'：前置 op42 必须 running')
-   // 活动轮没有 turn/end（lastTurn 只认 turn/end，故此处按真实 event 序列取"最新出现过的轮号"=42）
-   const tailTurn=g.session.snapshotEvents().reduce((turn,event)=>event&&/^turn\//.test(String(event.type))?Math.max(turn,Number(event.data&&event.data.turn)):turn,0)
-   assert.equal(tailTurn,42,entry.label+'：前置事件尾必须是 42（body 目标不含 native 坐标，不走 nativeTarget）')
-   if(entry.options.withoutBaseline42)assert.equal(chat.timeline.operations.op42.businessBefore,undefined,entry.label+'：前置必须确实缺基准')
-   const window=await g.openingWindow()
-   assert.ok(window&&window.nativeData===true,entry.label+'：必须走真 opening 窗口')
-   if(entry.options.withoutBaseline42)assert.equal(window.failureCleanup.cleanable,false,entry.label+'：缺基准窄摘要必须不可清')
-   else assert.equal(window.failureCleanup.cleanable,true,entry.label+'：窄摘要只做候选，拒绝由视图门禁负责：'+String(window.failureCleanup.reason))
-   const currentTarget=(await g.view()).failureTarget
-   if(!entry.options.withoutBaseline42){
-    assert.equal(currentTarget.kind,'rollback');assert.equal(currentTarget.turn,42)
-    const restored=await cleanRollback({...await g.fresh(),requestedTurn:currentTarget})
-    assert.equal(restored.turn,41);assert.equal(g.eventCount(),g.keep41);assert.equal(g.lastTurn(),41)
-    const after=await g.read();assert.equal(after.timeline.operations.op42,undefined);assert.equal(after.rollbackPending,undefined)
-    assert.deepEqual(after.messages,chat.messages);assert.deepEqual(after.variables,chat.variables);assert.equal(g.syncFrames.length,1)
-    continue
-   }
-   assert.equal(currentTarget,null,entry.label+'：缺基准仍不得签目标')
-   const counts=g.eventCount(),revision=chat._storageRevision,frames=g.syncFrames.length,rows=chat.messages.length
-   await assert.rejects(cleanRollback({...await g.fresh(),failureTarget:running42Target(chat)}),/缺少[^，]*前基准/,entry.label+'：后端必须拒')
-   const after=await g.read()
-   assert.equal(g.eventCount(),counts,entry.label+'：拒绝路径零事件写')
-   assert.equal(after._storageRevision,revision,entry.label+'：拒绝路径不得推进版本')
-   assert.equal(after.timeline.operations.op42.status,'running',entry.label+'：拒绝路径不得改 body 状态')
-   assert.equal(after.messages.length,rows,entry.label+'：拒绝路径不得改正文')
-   assert.equal(g.syncFrames.length,frames,entry.label+'：拒绝路径不得 publish')
-  }finally{await g.cleanup()}
- }
+
 })

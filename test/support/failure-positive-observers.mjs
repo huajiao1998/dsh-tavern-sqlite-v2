@@ -53,7 +53,8 @@ export function registerFailureTests(test, lifecycle) {
     assert.equal(shimDomain.includes("import { storagePackage } from './storage-package.js'"), true, 'domain 垫片必须走 storagePackage 转出')
     for (const name of ['cleanRollback', 'inspectNativeFailureTail', 'readFailureEvidence', 'latestSendTarget'])
       assert.equal(new RegExp("export const \\{[^}]*\\b" + name + "\\b[^}]*\\} = await storagePackage\\('clean-rollback'\\)").test(shimDomain), true, 'domain 垫片必须导出 ' + name)
-    assert.equal(shimDomain.includes('export const { cleanupAfterRollback, cleanupRollbackHeadIndex, preflightRollback, preflightRollbackAtSeq, cleanupAfterRollbackAtSeq } = impl'), true, 'domain 垫片原回退导出不得丢')
+    assert.equal(shimDomain.includes('export const { cleanupAfterRollback, preflightRollback, preflightRollbackAtSeq, cleanupAfterRollbackAtSeq } = impl'), true, 'domain 垫片原回退导出不得丢')
+    assert.equal(shimDomain.includes('cleanupRollbackHeadIndex'), false, '退役L4不应再由垫片转出')
     // 视图就在 lib/domain，`./storage-rollback.js` 相对解析即该 domain 垫片；必须真 import（不是只写在常量里）
     assert.equal(VIEW_REL.includes('lib/domain/'), true, '被接线的视图必须位于 domain（相对 import 才指到该垫片）')
     assert.equal(view.includes("import { inspectNativeFailureTail } from './storage-rollback.js'"), true, '视图必须真的 import 该导出')

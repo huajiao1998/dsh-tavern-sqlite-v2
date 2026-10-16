@@ -495,14 +495,14 @@ window.__ModuleLoader__.load({
             const unifiedTarget = !!(ft && ft.kind === 'rollback')
             const liveActivity = handle.getSnapshot && handle.getSnapshot() && handle.getSnapshot().view
               ? handle.getSnapshot().view.activity : null
-            if (!sessionsRef || typeof sessionsRef.waitForTavernRollbackSync !== 'function') {
-              throw new Error('回退同步尚未接线或尚未就绪，未执行清理')
-            }
             // 统一目标按 expectedTurn=ft 发送且**不带** failureTarget（否则与 clean 入口身份冲突）；legacy 保持原样。
             const resp = unifiedTarget
               ? await view.request('rollbackTurn', { expectedTurn: ft }, owner)
               : await view.request('rollbackTurn', { expectedTurn: Number(turn), failureTarget: ft }, owner)
             const rb = resp && resp.view && resp.view.rolledBack
+            if (rb && rb.alreadyClean !== true && typeof sessionsRef?.waitForTavernRollbackSync !== 'function') {
+              throw new Error('回退已落盘，但宿主缺少同连接同步消费者；请重开页面')
+            }
             if (unifiedTarget) {
               if (!rb) throw new Error('统一回退未返回同步凭据，不更新本地状态')
               // 同步凭据硬必须：缺 rb.sync 一律拒绝（绝不静默跳过等待，避免"库已删、页面未知"）。

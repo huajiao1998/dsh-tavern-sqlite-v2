@@ -41,8 +41,8 @@ test('最新发送选择：四状态共用同一max turn、历史failed不抢、
   assert.equal(latestSendTarget(withSummary, { events }, withSummary._storageRevision).turn, 53, 'narrow summary 候选也不得抢过最新轮')
   // 新原生轮没有基准：不得误回前一轮（历史 51 有基准也不许回落）。
   const noBaseline = chatOf({ latestStatus: 'running', latestBaseline: null, olderFailed: true })
-  assert.equal(latestSendRecord(noBaseline, { events }), null, '最新轮无基准时不得回落更早轮（record 为空）')
-  assert.equal(latestSendTarget(noBaseline, { events }, noBaseline._storageRevision), null, '最新轮无基准时不得签发更早轮')
+  assert.equal(latestSendRecord(noBaseline, { events }).turn, 53, '缺前像仍选最新轮，不回落旧轮')
+  assert.equal(latestSendTarget(noBaseline, { events }, noBaseline._storageRevision).turn, 53)
   // narrow 与完整坐标一致：summary 与 body op 同轮同 op 时，target 坐标只由该轮决定（anchor 可缺）。
   const narrowChat = chatOf({ latestStatus: 'running', olderFailed: true })
   const narrowTarget = latestSendTarget(narrowChat, { events: [] }, narrowChat.windowRevision)
@@ -63,7 +63,7 @@ test('最新发送选择：无 target 时 baseline 只认 body/checkpoint 现有
   // body 与 checkpoint 都无基准：不签（也不回落更早轮）。
   const bare = chatOf({ latestBaseline: null, olderFailed: true, nativeOnly: false })
   bare.timeline.operations.bodyLatest = { kind: 'body', role: 'body', status: 'running', turn: 53, userText: '最新输入' }
-  assert.equal(latestSendTarget(bare, { events }, bare._storageRevision), null, '无 body/checkpoint 基准时不得签发')
+  assert.equal(latestSendTarget(bare, { events }, bare._storageRevision).turn, 53, '无前像仍可回退最新轮')
 })
 
 test('最新发送选择：同轮坏 body 前像不得遮蔽有效 checkpoint 前像', () => {

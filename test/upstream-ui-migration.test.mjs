@@ -396,6 +396,21 @@ test('自有UI：页头入口按固定 order 注册且只在用户点击后走 p
   assert.deepEqual(h2.trace.filter(item => item.kind === 'fork'), [], '数据库态不得自动 fork')
 })
 
+test('审查修复UI同步：缺消费者仍先请求物理回退，明确报显示未同步且不refresh', async () => {
+ const h=harness(),target=failureTarget(42)
+ try{
+  h.live.setView({failureTarget:target,activity:null})
+  delete h.sessions.waitForTavernRollbackSync
+  const ui=h.provided.get('tavernStorageUi')
+  await assert.rejects(ui.cleanFailure('session-child',42,target),/回退已落盘.*缺少同连接/)
+  assert.equal(h.bridgeCalls.filter(item=>item.kind==='request').length,1)
+  assert.equal(h.bridgeCalls.filter(item=>item.kind==='refresh').length,0)
+  h.bridge.request=async(_method,args)=>({view:{rolledBack:{alreadyClean:true,cleanedFailureTarget:args.failureTarget}}})
+  await ui.cleanFailure('session-child',42,target)
+  assert.equal(h.bridgeCalls.filter(item=>item.kind==='refresh').length,1,'已完成无需伪造sync')
+ }finally{h.close()}
+})
+
 test('自有UI：退役dock后共享清理服务保留目标及回执守卫', async () => {
   const h = harness()
   assert.equal(h.found('conversation.input.dock'), undefined, '正常/失败/活动状态均不应注册常驻条')

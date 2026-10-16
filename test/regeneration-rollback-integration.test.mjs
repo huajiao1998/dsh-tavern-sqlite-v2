@@ -57,7 +57,8 @@ async function loadRealModules(root,physical=false){
  const timeline=await import(writeModule(root,'timeline',rewrite(timelineSource).replace(new URL('storage-rollback-business.js',AUTHOR).href,business)))
  const historySource=applyRowHistoryTransform(applyRollbackTransform(readFileSync(new URL('round-history.js',AUTHOR),'utf8')).text)
  assert.equal(applyRegenerationRollbackTransform(historySource),historySource,'R3消费者须幂等')
- const adoptedSource=physical?applyRegenerationAdoptionTransform(historySource):historySource
+ const {applyCleanRollbackTransform}=await import('../deploy/clean-rollback-transform.mjs')
+  const adoptedSource=physical?applyRegenerationAdoptionTransform(applyCleanRollbackTransform(historySource)):historySource
  if(physical)assert.equal(applyRegenerationAdoptionTransform(adoptedSource),adoptedSource)
  const history=await import(writeModule(root,'history',rewrite(adoptedSource).replaceAll(new URL('storage-rollback.js',AUTHOR).href,shim)))
  const persistence=await import(new URL('chat-persistence.js',AUTHOR).href)
@@ -176,6 +177,55 @@ export async function fixture({withContext=false,physical=false}={}){
   cleanup:async()=>{for(const id of agents.keys()){rollbackBarrier.delete(id);rollbackSchedulingBarrier.delete(id)}store.dispose();mainDb.close();workerDb.close();await ctx.fiber.dispose();assert.ok(path.basename(root).startsWith('tavern-regen-rollback-'));rmSync(root,{recursive:true,force:true})}}
 }
 
+for(const pause of ['readCard','native-adoption','generation','prepare'])test('审查修复R2真实作者：回退取消等待 '+pause+' 不复活正文或晚结算',async()=>{
+ const f=await fixture({physical:true})
+ let resume,entered
+ const gate=new Promise(r=>resume=r),ready=new Promise(r=>entered=r)
+ let followups=0,settlements=0,reads=0
+ const followup=f.agent.followup;f.agent.followup=message=>{followups++;return followup(message)}
+ if(pause==='generation'){const idle=f.agent.whenIdle;f.agent.whenIdle=async()=>{await idle();entered();await gate}}
+ const persistencePort={...f.persistencePort,replaceRegeneratedTail:async(...args)=>{if(pause==='native-adoption'){entered();await gate}return f.persistencePort.replaceRegeneratedTail(...args)}}
+ const chats={...f.chats,readCard:async(...args)=>{if(pause==='readCard' && ++reads===1){entered();await gate}return f.chats.readCard(...args)}}
+ const history=f.createHistory({chats,sessions:f.sessions,scripts:{read:async()=>undefined,continuity:{}},timeline:f.storyTimeline,queueSettlement:async()=>{settlements++},cancelSettlement:async()=>{},present:async value=>value,
+  persistenceProvider:()=>persistencePort,projectionsProvider:()=>f.projections,projectionCacheProvider:()=>({write:async()=>{}}),tokenMeterProvider:()=>({states:new WeakMap()}),rollbackSyncProvider:f.rollbackSync,quiesceRollback:async()=>{if(pause==='prepare' && ++reads===1){entered();await gate}},cleanupRollbackSides:async()=>{},
+  sessionPatch:{replacementAllowed:()=>true,blockReason:()=>'',restoreStoredSession:stored=>f.Session.fromRestore(stored.header.id,structuredClone(stored.events),structuredClone(stored.header),stored.inheritedEventCount,'detached')}})
+ try{
+  const generation=history.regenerate(CHAT_ID,'本轮取消验证'),observed=generation.then(()=>({ok:true}),error=>({error}))
+  await ready
+  let finished=false
+  const {latestSendTarget}=await import('../lib/latest-send.js')
+  const signed=latestSendTarget(await f.read(),{events:f.session.snapshotEvents()});assert.equal(signed.turn,53,'临时生成不可签成新的用户轮')
+  const rollback=history.rollback(SESSION_ID,CHAT_ID,signed).then(result=>{finished=true;return result})
+  await new Promise(r=>setImmediate(r));assert.equal(finished,false,'旧Promise没结束不能先报告回退完成')
+  resume();const generated=await observed,done=await rollback
+  assert.match(generated.error?.message || '',/取消/);assert.equal(done.rolledBack.hiddenTurn,53)
+  assert.equal(followups,['readCard','prepare'].includes(pause)?0:1);assert.equal(settlements,0,'取消后不得继续排新结算')
+  assert.deepEqual(f.session.snapshotEvents(),f.prefix);assert.deepEqual(f.background.snapshotEvents(),f.workerPrefix)
+  assert.equal(f.mainDb.cursor(),f.prefix.length);assert.equal(f.workerDb.cursor(),f.workerPrefix.length)
+  const after=await f.read();assert.equal(after.messages.at(-1).turn,52);assert.equal(after.regenRecovery,undefined);assert.equal(after.regenInProgress,undefined)
+  assert.equal(rollbackBarrier.has(SESSION_ID),false);assert.equal(rollbackSchedulingBarrier.has(SESSION_ID),false)
+ }finally{resume();await f.cleanup()}
+})
+
+test('审查修复R2真实重放：取消等读卡续体结束，不重发已经撤回的输入',async()=>{
+ const f=await fixture({physical:true})
+ let resume,entered,followups=0
+ const gate=new Promise(r=>resume=r),ready=new Promise(r=>entered=r)
+ try{
+  const kept=structuredClone(f.session.snapshotEvents()),worker=structuredClone(f.background.snapshotEvents())
+  f.session.append('turn/start',{turn:54});f.session.append('user/message',{id:'failed-input-54',role:'user',content:[{type:'text',text:'本轮失败输入'}],source:{kind:'user'}},{surfaceOp:'append'});f.session.append('turn/end',{turn:54,reason:{kind:'error',error:{message:'确定性失败'}}});await f.sessions.flush(f.session);f.agent.phase.lastTurn=54
+  const history=f.createHistory({chats:{...f.chats,readCard:async()=>{entered();await gate;return {name:'原创卡'}}},sessions:f.sessions,scripts:{read:async()=>undefined,continuity:{}},timeline:f.storyTimeline,queueSettlement:async()=>{},cancelSettlement:async()=>{},present:async value=>value,
+   persistenceProvider:()=>f.persistencePort,projectionsProvider:()=>f.projections,projectionCacheProvider:()=>({write:async()=>{}}),tokenMeterProvider:()=>({states:new WeakMap()}),rollbackSyncProvider:f.rollbackSync,quiesceRollback:async()=>{},cleanupRollbackSides:async()=>{},sessionPatch:{replacementAllowed:()=>true,blockReason:()=>'',restoreStoredSession:stored=>f.Session.fromRestore(stored.header.id,structuredClone(stored.events),structuredClone(stored.header),stored.inheritedEventCount,'detached')}})
+  f.agent.followup=()=>{followups++}
+  const replay=history.replayFailed(CHAT_ID),observed=replay.then(()=>null,error=>error);await ready
+  let finished=false;const rollback=history.rollback(SESSION_ID,CHAT_ID,54).then(result=>{finished=true;return result})
+  await new Promise(r=>setImmediate(r));assert.equal(finished,false)
+  resume();assert.match((await observed)?.message || '',/取消/);const result=await rollback
+  assert.equal(result.rolledBack.hiddenTurn,54);assert.equal(followups,0)
+  assert.deepEqual(f.session.snapshotEvents(),kept);assert.deepEqual(f.background.snapshotEvents(),worker);assert.equal((await f.read()).messages.at(-1).turn,53)
+ }finally{resume();await f.cleanup()}
+})
+
 test('R3 重生成×物理回退：单次 regen 保留原轮基准，cleanRollback 按原轮删净替换',async()=>{
  const f=await fixture()
  try{
@@ -208,7 +258,7 @@ test('R3 自有请求上下文及前轮frame退役仍可回退；异档上下文
   other.session.append('user/message',{id:'foreign-context',role:'user',content:[{type:'text',text:'异档上下文'}],source:{kind:'plugin',plugin:'dsh-tavern',form:'foreground-frame',trace:{chatId:'foreign-chat'}}},{surfaceOp:'append'})
   other.mainDb.appendBatch(other.session.snapshotEvents(start),start)
   const chat=await other.read(),events=structuredClone(other.session.snapshotEvents()),main=other.mainDb.cursor(),worker=other.workerDb.cursor()
-  await assert.rejects(cleanRollback({...other.args(),chat,requestedTurn:53}),/独立输入/)
+  await assert.rejects(cleanRollback({...other.args(),chat,requestedTurn:53}),/独立(?:玩家)?输入/)
   assert.deepEqual(await other.read(),chat);assert.deepEqual(other.session.snapshotEvents(),events)
   assert.equal(other.mainDb.cursor(),main);assert.equal(other.workerDb.cursor(),worker)
  }finally{await other.cleanup()}

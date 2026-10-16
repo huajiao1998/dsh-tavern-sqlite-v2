@@ -28,7 +28,7 @@ const loadInitialization = async source => {
   const guardImport = "import { legacyViewSeams, isReadOnlySession } from './legacy-view-seams.js'"
   // 只替代原件访问边界：合成库没有原件，若调用只读会话检查仍明确失败。
   source = source.replace(guardImport, "const legacyViewSeams={assertWritable:()=>{},readOnlyChat:()=>false};const isReadOnlySession=()=>{throw Error('本闸不读原件')}")
-  source = source.replace(/from '(\.[^']+)'/g, (_, specifier) => 'from ' + JSON.stringify(new URL(specifier, domain).href))
+  source = source.replace(/from '(\.[^']+)'/g, (_, specifier) => 'from ' + JSON.stringify(specifier === './storage-rollback.js' ? new URL('../lib/clean-rollback.js', import.meta.url).href : new URL(specifier, domain).href))
   return (await import('data:text/javascript;base64,' + Buffer.from(source, 'utf8').toString('base64'))).createConversationInitialization
 }
 async function fixture(t, { installed = false } = {}) {

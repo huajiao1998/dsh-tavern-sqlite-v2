@@ -380,7 +380,7 @@ export default class TavernSessionPersistence extends JsonlSessionPersistence {
 		if (session === undefined) throw new SessionPersistenceNotFoundError(header.id)
 		const meta = session.truncateFrom(boundarySeq, identity,retainedEvents)
 		this.rewindOpenHandles(header.id, meta?.eventCount ?? 0)
-		return meta
+		return {...meta,drained:true}
 	}
 
 	/** 重生成专用尾替换：真实SQL同事务，旧写先drain，全部活动句柄回拨。 */

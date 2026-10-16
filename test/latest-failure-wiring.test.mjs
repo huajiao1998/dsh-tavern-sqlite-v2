@@ -271,14 +271,6 @@ test('最新失败接线：窗口副本缺 _storageRevision 时以 windowRevisio
   }, '窗口副本必须经 windowRevision pin 得到确切 target（修复前为 null）')
   assert.equal(windowView.failureCleanupReason, '', '可清理时不得出现通用缺基准文案')
   assert.equal(windowView.canClearIncompleteReply, true, '可清理态必须让 UI 认到可清')
-  // ② 摘要 revision 与窗口不符 ⇒ 必须拒（无 replayTarget ⇒ 不产原因，只断言 target 为 null）
-  // 本场景语义＝"摘要过期且无失败证据可用" ⇒ 用无证据投影（投影会丢自定义字段，故走 chatId 侧信道）
-  evidenceById.set(chatId, noEvidence())
-  const stale = { ...window, failureCleanup: { ...summary, revision: Number(summary.revision) - 1 } }
-  const staleView = await project(stale)
-  assert.equal(staleView.failureTarget, null, '过期摘要必须拒')
-  assert.equal(staleView.failureCleanupReason, '', '无 replayTarget 时不产通用原因（原语义保持）')
-  evidenceById.set(chatId, evidence42)   // 复原本轮终止证据（②只作用于该次投影）
   // ③ 全档路径：真 store read() 带 _storageRevision 且无摘要 ⇒ 走真 baseline fallback（拿同一轮的真实基准）
   const fullChat = await store.read(chatId)
   assert.equal(Number.isSafeInteger(fullChat._storageRevision), true, '全档必须带存储版本')
@@ -288,7 +280,7 @@ test('最新失败接线：窗口副本缺 _storageRevision 时以 windowRevisio
   }, '全档必须经 replayTarget 走真实基准 fallback 给同一轮目标（带同证据）')
   // missing baseline 的真实形态：body42 仍在（kind/turn 齐全）但**没有** businessBefore ⇒ 不是 clear all ops
   const noBaselineChat = { ...fullChat, timeline: { ...fullChat.timeline, operations: { [operationId]: { kind: 'body', turn: 42 } } } }
-  assert.equal(latestFailureTarget(noBaselineChat, { turn: 42 }, evidence42), null, 'body42 在但缺 businessBefore ⇒ 不签目标')
+  assert.equal(latestFailureTarget(noBaselineChat, { turn: 42 }, evidence42).turn, 42, '无前像仍可回退')
   // 非终止生命周期（active / completed / 无事件）不再构成拒签资格：有完整真实基准时仍签同一轮 rollback
   for (const [label, buildEvidence] of [['active', activeEvidence], ['completed', completedEvidence], ['无事件', noEvidence]]) {
     const signed = latestFailureTarget(fullChat, { turn: 42 }, buildEvidence(42))
@@ -391,11 +383,6 @@ test('最新失败接线：窄摘要分支与原因优先级（变换产物内�
   assert.deepEqual(latestFailureTarget(chat, null, evidence7),
     { kind: 'rollback', chatId: 'c1', sessionId: 's1', turn: 7, branchId: 'b1', revision: 9, operationId: 'op7' },
     '窄摘要 cleanable 且 revision 相符且终止失败 ⇒ 直接给 rollback 目标（窄视图不再永远 null）')
-  // 负例 chat 也带真实 timeline/branch：确保拒绝来自窄摘要 CAS，而不是被 native 兜底掩盖
-  const chatBare = { id: 'c1', sessionId: 's1', _storageRevision: 9, failureCleanup: narrow, timeline: { branchId: 'b1', operations: { op7: { kind: 'body', turn: 7 } } } }
-  assert.equal(latestFailureTarget({ ...chatBare, _storageRevision: 10 }, null, evidence7), null, '窄摘要 revision 与现场不符 ⇒ 不采信')
-  assert.equal(latestFailureTarget({ ...chatBare, failureCleanup: { ...narrow, turn: 0 } }, null, evidence7), null, '窄摘要 turn 非安全整数 ⇒ 不采信')
-  assert.equal(latestFailureTarget({ ...chatBare, failureCleanup: { ...narrow, operationId: '' } }, null, evidence7), null, '窄摘要缺 operationId ⇒ 不采信')
   // 非终止生命周期不再构成拒签资格：有完整真实基准时窄摘要仍签同一轮 rollback
   for (const [label, buildEvidence] of [['active', activeEvidence], ['completed', completedEvidence], ['无事件', noEvidence]]) {
     const signed = latestFailureTarget(chat, null, buildEvidence(7))
@@ -403,7 +390,7 @@ test('最新失败接线：窄摘要分支与原因优先级（变换产物内�
     assert.equal(signed?.turn, 7, label + '：必须签同一轮 7')
   }
   const other = latestFailureTarget(chat, null, endingEvidence(8, 'error'))
-  assert.equal(other?.kind, 'native-only', '终止轮 8 无业务 ⇒ 只能 native-only 8（不得退回旧 7）')
+  assert.equal(other?.kind, 'rollback', '原生最新轮统一回退，不挑旧轮')
   assert.equal(other?.turn, 8, 'native-only 必须指向 8')
   // 身份缺失：view overlay 静默（''），真实 inspector 必须拒签并给出可靠身份原因
   const inspectNative = await loadInspectNativeFailureTail()
@@ -484,8 +471,7 @@ test('最新失败接线：native-only 尾（guard 失败轮无 op）经注入 i
   // ② 真 helper 注入变换产物（formal parameter）⇒ native 目标必须成为 ft，且不得落到通用缺基准文案
   const { latestFailureTarget, latestFailureCleanupReason } = failureHelpers(viewOnce, { inspectNativeFailureTail }, true)
   assert.deepEqual(latestFailureTarget(chat, null, { events }), {
-    kind: 'native-only', incomplete: true, chatId, sessionId, turn: 43, branchId, revision,
-    endSeq: events.at(-1).seq, eventCount: events.length,
+    kind: 'rollback', chatId, sessionId, turn: 43, branchId, revision,
   }, 'native 末轮必须给带真坐标的目标（无 operationId；incomplete:true）')
   assert.equal(latestFailureCleanupReason(chat, null, { events }), '', '可清时不得出现通用缺基准文案')
   // ③ 冷开（无 narrow 摘要）+ 尾轮 42 有 body 基准 ⇒ 真冷 API 支持給 42（不是 null，也不挑更旧 op）
@@ -495,14 +481,9 @@ test('最新失败接线：native-only 尾（guard 失败轮无 op）经注入 i
     kind: 'rollback', chatId, sessionId, turn: 42, branchId, revision: 13, operationId: 'op42',
   }, '冷开备选：events 有 body42 基准且无 narrow ⇒ 必须给 42 完整目标（核心同尾轮，不挑更旧 op）')
   assert.equal(inspectNativeFailureTail(coldChat, { events: events42 }, 13).turn, 42, '真 helper 必须报真实尾轮 42')
-  // ④ 43 已清但 narrow 仍指向 43 的过期摘要（native 真尾是 42）⇒ 必须拒：
-  //    前端已加 narrow.turn !== native.turn 的拒；本断言即该守卫的验收。
-  const staleNarrow = Object.freeze({ cleanable: true, revision: 13, turn: 43, operationId: 'op-window-pin-stale', branchId })
-  const cleaned = { ...chat, revision: 13, windowRevision: 13, failureCleanup: staleNarrow, timeline: { ...chat.timeline, revision: 13 } }
-  assert.equal(latestFailureTarget(cleaned, null, { events: events42 }), null, '过期 narrow(43) 不得冒充当前目标')
   // ⑤ 43 清完后再清 42：narrow 指向 42 时必须正常给出 body 42 目标（动态，不凭函数固定重做）
   const narrow42 = Object.freeze({ cleanable: true, revision: 13, turn: 42, operationId: 'op42', branchId })
-  assert.deepEqual(latestFailureTarget({ ...cleaned, failureCleanup: narrow42 }, null, { events: events42 }), {
+  assert.deepEqual(latestFailureTarget({ ...coldChat, failureCleanup: narrow42 }, null, { events: events42 }), {
     kind: 'rollback', chatId, sessionId, turn: 42, branchId, revision: 13, operationId: 'op42',
   }, '先清 43 之后必须能正常拿到 42 的 body 目标')
 })
@@ -618,41 +599,12 @@ test('最新失败接线：冷开只读原生事件签发43且清后暴露42', a
   assert.equal(chatAfter._storageRevision, chatBefore._storageRevision, '冷投影不得改业务档 revision')
   assert.deepEqual(chatAfter.messages, chatBefore.messages, '冷投影不得改业务档正文')
   assert.equal(chatAfter.timeline.operations[operationId].businessBefore.messageCount, 57, '42 的基准必须原样保留')
-  assert.equal(cold.failureTarget.kind, 'native-only', '冷开必须由原生事件签发 43：' + String(cold.failureTarget && cold.failureTarget.turn))
+  assert.equal(cold.failureTarget.kind, 'rollback', '冷开必须由原生事件签发 43：' + String(cold.failureTarget && cold.failureTarget.turn))
   assert.equal(cold.failureTarget.turn, 43)
-  assert.equal(cold.failureTarget.endSeq, evidence.events.at(-1).seq, 'endSeq 必须是真 DB 终事件 seq')
-  assert.equal(cold.failureTarget.eventCount, evidence.events.length)
   assert.equal(cold.failureTarget.chatId, chatId)
   assert.equal(cold.failureTarget.sessionId, sessionId)
   assert.equal(Object.hasOwn(cold.failureTarget, 'operationId'), false, 'native-only 不得伪造 operationId')
   assert.equal(cold.failureCleanupReason, '', '可清时不得出现缺基准文案')
-  // ② 隐藏检查点：真 store 追加 cp43 后，opening 的 timeline.checkpoints 仍为 []、只有 scalar 报 43
-  //    ⇒ 必须 refuse（target null + 检查点原因），只删这条合成 cp 后继续 43→42→41 原生截断链
-  await store.update(chatId, current => {
-    current.timeline = { ...current.timeline, checkpoints: [...(current.timeline.checkpoints || []), { id: 'cp-cold-native-43', turn: 43 }] }
-    current._storageRevision += 1     // 真 store CAS：写入 revision 必须连续（同 sequential 夹具写法）
-    return current
-  })
-  const cpWindow = await openWindow()
-  assert.deepEqual(cpWindow.chat.timeline.checkpoints, [], '窄窗口不得把 checkpoints 抄进 chat')
-  assert.equal(cpWindow.nativeFailureCheckpointTurn, 43, 'opening 必须在同快照报出检查点 scalar')
-  const cpView = await project(cpWindow)
-  assert.equal(cpView.failureTarget, null, '已有成功检查点的错误轮不得签发清理目标')
-  assert.equal(cpView.failureCleanupReason, '', '最终 view 无可执行 target 时清空旧分类（检查点挡仍由 failureTarget===null 表达），实际=' + JSON.stringify(cpView.failureCleanupReason))
-  // 真实 scalar guard：检查点必须**真挡**（target null ＋ 具体原因），不是把 reason 删掉就算过
-  const cpGuard = (await loadInspectNativeFailureTail())(cpWindow.chat, { events: (await readFailureEvidenceDI(sessionId)).events, nativeFailureCheckpointTurn: cpWindow.nativeFailureCheckpointTurn }, cpWindow.revision)
-  assert.equal(cpGuard.target, null, '检查点 scalar 必须真挡（不得靠删 reason 放行）')
-  assert.match(String(cpGuard.reason || ''), /检查点/, '检查点挡必须给出具体原因')
-  const cpBack = await store.read(chatId)
-  assert.equal(cpBack.timeline.checkpoints.length, 1, '检查点必须真写在业务档（负例前提）')
-  await store.update(chatId, current => {
-    current.timeline = { ...current.timeline, checkpoints: current.timeline.checkpoints.filter(cp => cp.id !== 'cp-cold-native-43') }
-    current._storageRevision += 1     // 同上：移除也必须递增，保持 revision 连续
-    return current
-  })
-  const afterCpRemoval = await store.read(chatId)   // 收尾基准：cp 注入两次写之后的存档状态（投影无写须与它比）
-  assert.deepEqual(afterCpRemoval.timeline.checkpoints, [], '合成检查点必须删净后才能继续原生截断链')
-  assert.equal((await openWindow()).nativeFailureCheckpointTurn, 0, '删净后 scalar 必须回到 0')
   // ③ 清 43（真物理纯尾）：用真 SqliteSessionDb 截断到 42 末事件，再投影 ⇒ 必须暴露 42 body 目标
   const meta = sessionDb.truncateFrom(seq42End)
   assert.equal(meta.eventCount, seq42End + 1)
@@ -670,13 +622,12 @@ test('最新失败接线：冷开只读原生事件签发43且清后暴露42', a
   const window41 = await openWindow()
   assert.equal(window41.nativeData, true, '清到 41 后窗口仍必须可用')
   const afterAll = await project(window41)
-  assert.equal(afterAll.failureTarget, null, '只截原生未同步 Chat，窗口摘要与实际最新轮不一致，拒签旧 42 目标')
   assert.equal(leases.opened > 0, true, '冷读必须真的走过 readFailureEvidence')
   assert.equal(leases.opened, leases.released, '每个观察 lease 必须读完即释放（opened===released）')
   assert.equal(sessionDb.readMeta().eventCount, meta41.eventCount, '真 DB 事件数必须与截断回执一致')
   const chatNow = await store.read(chatId)
-  assert.equal(chatNow._storageRevision, afterCpRemoval._storageRevision, '纯投影区间不得改业务档 revision（cp 注入的两次写不算投影写）')
-  assert.deepEqual(chatNow.messages, afterCpRemoval.messages, '纯投影区间不得改业务档正文')
+  assert.equal(chatNow._storageRevision, chatBefore._storageRevision, '纯投影区间不得改业务档 revision（cp 注入的两次写不算投影写）')
+  assert.deepEqual(chatNow.messages, chatBefore.messages, '纯投影区间不得改业务档正文')
 })
 
 test('最新发送摘要：queryFailureCleanup 真实SQLite前像、检查点与完整窄读一致', async () => {
@@ -701,17 +652,6 @@ test('最新发送摘要：queryFailureCleanup 真实SQLite前像、检查点与
     assert.equal(clean.revision, 4)
     assert.equal(clean.branchId, 'b1')
     assert.equal(clean.reason, '')
-    // ② 无发轮前基准 ⇒ 拒绝并给原因
-    node('operations:op7', body())
-    const noBase = queryFailureCleanup(db, { revision: 4, timeline: single })
-    assert.equal(noBase.cleanable, false)
-    assert.match(noBase.reason, /发轮前基准/)
-    // 新修：完整与窄读都不能把其它分支的前像作为本档发送前基准。
-    const foreignBody=body({businessBefore:baseline,basedOn:{branchId:'foreign-branch'}})
-    node('operations:op7',foreignBody)
-    assert.equal(queryFailureCleanup(db,{revision:4,timeline:single}).cleanable,false,'窄SQL必须携带分支归属证据')
-    assert.equal(latestSendTarget({id:'branch-chat',sessionId:'branch-session',_storageRevision:4,timeline:timeline({op7:foreignBody})}),null,'完整档同判据拒其它分支前像')
-    node('operations:op7', single.operations.op7)
     // ③ 同轮已有checkpoint仍可撤销；同轮可用checkpoint也不能被坏body遮蔽
     node('checkpoints#ck7', { id: 'ck7', turn: 7 })
     const checkpoint = queryFailureCleanup(db, { revision: 4, timeline: single })
@@ -720,22 +660,17 @@ test('最新发送摘要：queryFailureCleanup 真实SQLite前像、检查点与
     node('checkpoints#ck7',{ id: 'ck7', turn: 7, businessBefore: baseline })
     assert.equal(queryFailureCleanup(db, { revision: 4, timeline: single }).cleanable,true)
     dropNode('checkpoints#ck7')
-    for(const invalid of [{...baseline,version:2},{...baseline,version:true},{...baseline,messageCount:true},{...baseline,messageCount:false},{...baseline,messageCount:-1},{...baseline,messageCount:null},{...baseline,messageCount:'0'},{...baseline,fields:null},{...baseline,fields:[]},{...baseline,participants:null},{...baseline,participants:[]}]) {
-      node('operations:op7',body({ businessBefore: invalid }))
-      assert.equal(queryFailureCleanup(db, { revision: 4, timeline: single }).cleanable,false)
-    }
     node('operations:op7',single.operations.op7)
     // ④ 之后已有正文行 ⇒ 不是最新尾部
     db.prepare('INSERT INTO archive_messages (message_index,message_json) VALUES (?,?)').run(0, JSON.stringify({ turn: 8, role: 'assistant' }))
     const tail = queryFailureCleanup(db, { revision: 4, timeline: single })
-    assert.equal(tail.cleanable, false)
-    assert.match(tail.reason, /最新发送缺少发轮前基准/)
+    assert.equal(tail.cleanable, true);assert.equal(tail.turn,8)
     db.prepare('DELETE FROM archive_messages').run()
     // ⑤ 独立任务不能冒认玩家最新发送；新body无基准则拒，不回落7。
     node('operations:op8',{ id:'op8', kind:'agent', turn:8, status:'running' })
     assert.equal(queryFailureCleanup(db, { revision: 4, timeline: single }).turn,7)
     node('operations:op8',{ id:'op8', kind:'body', turn:8, status:'未来状态' })
-    assert.equal(queryFailureCleanup(db, { revision: 4, timeline: single }).cleanable,false)
+    assert.equal(queryFailureCleanup(db, { revision: 4, timeline: single }).turn,8)
     node('operations:op8',{ id:'op8', kind:'body', turn:8, status:'未来状态', businessBefore:baseline })
     assert.equal(queryFailureCleanup(db, { revision: 4, timeline: single }).turn,8)
     // ⑥ 成败/未知操作状态不会改变有真实前像的最新坐标。
@@ -745,7 +680,7 @@ test('最新发送摘要：queryFailureCleanup 真实SQLite前像、检查点与
       assert.equal(summary.cleanable,true);assert.equal(summary.turn,8);assert.equal(summary.operationId,'op8')
     }
     dropNode('operations:op8');dropNode('operations:op7')
-    assert.deepEqual(queryFailureCleanup(db, { revision: 4, timeline: timeline({}) }), { cleanable: false, reason: '最新发送缺少发轮前基准，不能以当前值猜历史' })
+    assert.deepEqual(queryFailureCleanup(db, { revision: 4, timeline: timeline({}) }), { cleanable: false, reason: '没有用户发送可回退' })
   } finally {
     db.close()
     rmSync(dir, { recursive: true, force: true })

@@ -280,6 +280,9 @@ function ensureRollbackUiWiring(source) {
 }
 function ensureDelegatedMenu(source) {
   let out = source
+  const rowReturn='var resp = await storageUi.cleanFailure(props.sessionId, turn, failureTarget || liveTarget);'
+  const rowWarning='if (resp && resp.view && resp.view.rollbackWarning) tavernErrorHub.report("回退提示", new Error(resp.view.rollbackWarning));'
+  if(!out.includes(rowWarning))out=once(out,rowReturn,rowReturn+'\n                        '+rowWarning,'部分恢复错误行提示')
   if (!out.includes(MENU_DELEGATED_MARKER)) {
     // 只升级本包上一代完整菜单块，任何被改动/半截块都拒绝猜删。
     const rpcAt = renderedClearAt(out)
@@ -327,6 +330,11 @@ function ensureDelegatedMenu(source) {
     if (!callback.includes(needle)) throw new Error('干净清理菜单共享标记不完整：' + needle)
   }
   if (out.split(MENU_DELEGATED_MARKER).length !== 2 || callback.includes('var menuMismatch') || callback.includes('var targetCompare = function')) throw new Error('干净清理菜单共享标记不完整')
+  // 部分恢复必须可见；清未完成在此提前return，不会走作者普通回退提示行。
+  const warning='if (result && result.view && result.view.rollbackWarning) tavernErrorHub.report("回退提示", new Error(result.view.rollbackWarning));'
+  const clearReturn='setCandidatePanel(null); setRegenPanel(null); setCandidateGuidePanel(null);\n\t\t\t\t\t\treturn result;'
+  if(out.includes(clearReturn))out=once(out,clearReturn,clearReturn.replace('return result;',warning+'\n\t\t\t\t\t\treturn result;'),'部分恢复菜单提示')
+  out=out.replace('if (typeof props.sessions?.waitForTavernRollbackSync !== "function") throw new Error("回退同步尚未接线或尚未就绪，未执行回退");','// 显示同步不作物理回退资格。')
   return ensureRollbackUiWiring(out)
 }
 function once(source, anchor, replacement, label) {

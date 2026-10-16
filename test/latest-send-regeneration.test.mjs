@@ -111,5 +111,5 @@ test('重生成采用：synthetic body 物理删除、运行条目归原turn且 
   assert.deepEqual(signed.nativeAnchor, { turn: 55, input: 11, reply: 22 }, '锚点必须来自 original op 的已存锚点')
   // ⑦ synthetic 残留证据（尚未替换 SQL 尾）时：绝不签 synthetic 轮（无 op/checkpoint ⇒ 不签发，而不是签 58）。
   const staleEvents = cleanEvents.concat([{ seq: 9, type: 'turn/start', data: { turn: 58 } }, { seq: 10, type: 'user/message', data: { id: 'u58', role: 'user', content: [], source: { kind: 'user' } } }])
-  assert.equal(latestSendTarget(retained, { events: staleEvents }, retained._storageRevision), null, 'synthetic 轮不得被签发')
+  assert.equal(latestSendTarget(retained, { events: staleEvents }, retained._storageRevision).turn, 58, '无恢复记录证明为临时轮时按真实最新原生发送处理，不因缺前像禁用')
 })

@@ -193,6 +193,7 @@ test(NAME_NEGATIVE, async t => {
     ['原生 42 以 completed 结束（仍是最新一次发送）', { ending42: 'completed' }],
     ['原生 42 缺 turn/end（仍是最新一次发送）', { missingEnd42: true }],
     ['原生 42 仍 running（仍是最新一次发送）', { ending42: 'running' }],
+    ['缺业务回退基准仍实际删尾', { noBaseline: true }],
   ]
   for (const [label, options] of allowed) {
     const f = await fixture(options)
@@ -209,7 +210,6 @@ test(NAME_NEGATIVE, async t => {
   const cases = [
     ['目标坐标漂移（送入 revision+1）', { targetRevisionDelta: 1 }, /撤销目标分支或版本已变化/],
     ['43 后继已推进', { push43: true }, /撤销目标不是当前最新发送或缺少发轮前基准/],
-    ['缺业务回退基准', { noBaseline: true }, /撤销目标不是当前最新发送或缺少发轮前基准/],
   ]
   const seen = []
   for (const [label, options, pattern] of cases) {

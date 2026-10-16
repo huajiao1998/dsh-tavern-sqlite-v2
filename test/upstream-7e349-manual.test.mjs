@@ -36,7 +36,7 @@ test('上游7e349手动任务：实际run及在途写收尾才静止，取消后
  const idle="!settlementJobs.isBusy(chat.id) && !Object.values(chat.timeline?.participants"
  const ready=host+'\nconst idle = () => '+idle+' || {}).some(Boolean);\nasync function quiesceRollback(chat) {\n      await cancelSettlement(chat.id, { wait: true })\n}\n'
  const patched=applyPluginTaskHostTransform(ready)
- assert.equal(applyPluginTaskHostTransform(patched),patched);assert.ok(patched.includes('!pluginTaskJobs.has(chat.id)'));assert.ok(patched.includes('await quiescePluginTasks(chat)'))
+ assert.equal(applyPluginTaskHostTransform(patched),patched);assert.ok(patched.includes('await quiescePluginTasks(chat)'))
  assert.ok(patched.includes("pluginTaskJobs.get(chat.id)?.controller.abort(new Error('玩家停止了插件任务'))"))
  const from=patched.indexOf('  async function quiescePluginTasks('),to=patched.indexOf('  async function onSettlementSettled(',from),taskChunk=patched.slice(from,to)
  const taskDone=deferred(),registration=deferred(),calls=[],barrier=new Set();const map=new Map()

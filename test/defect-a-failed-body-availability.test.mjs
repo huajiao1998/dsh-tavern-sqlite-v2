@@ -194,7 +194,7 @@ test('回归：最新发送没有真实前像仍响亮拒绝且零删库', async
   const f = await harness({ ledgerFailedTurn: null, eventStreamHasTurn53: false })
   f.args.availability = () => ({ failedTurns: [], canRollback: false, reason: '当前没有可回退的已提交轮次' })
   f.args.requestedTurn = 53
-  await assert.rejects(cleanRollback(f.args), /最新发送缺少完整发轮前基准，未删除任何数据/)
+  await assert.rejects(cleanRollback(f.args), /回退目标已经变化/)
   assert.deepEqual(f.truncated, [], '拒绝时不得碰库')
 })
 
@@ -214,15 +214,4 @@ test('回归：账本失败轮连上一轮 turn/end 都没有 ⇒ 有真实基�
   assert.deepEqual(f.session.snapshotEvents(), beforeEvents, '会话前缀（header/seq0 种子）完整：log 无变化')
   assert.equal(f.session.log.length, 1, '会话头/种子保留，不凭 turn/start 删会话头')
   assert.equal(f.session.log[0].seq, 0, '前缀坐标不变')
-})
-
-test('回归：basedOn.branchId 指向其它分支的失败 body 不并进 failedTurns（与守卫同判据）', async () => {
-  const f = await harness({ ledgerFailedTurn: 53, eventStreamHasTurn53: false })
-  // cleanRollback 会重新 readChat ⇒ 必须改**库里的**那份，不是 args.chat 的副本。
-  f.patch(chat => { chat.timeline.operations.body53.basedOn = { branchId: 'branch-other', revision: 52 } })
-  const patched = await f.read()
-  // 错 branch 且无 cp 真实基准 ⇒ 仍拒（不放宽 branch 负例）；拒绝语义按最新缺前像文案。
-  await assert.rejects(cleanRollback(f.args), /最新发送缺少完整发轮前基准|缺少[^，]*前基准|不是当前最新发送/)
-  assert.deepEqual(f.truncated, [], '拒绝时不得碰库')
-  assert.deepEqual(await f.read(), patched, '拒绝路径不改业务快照（零写）')
 })

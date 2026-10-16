@@ -137,6 +137,6 @@ test('窄窗口真实摘要：cp-only 最新轮签 kind rollback 无 operationId
     assert.equal(target.operationId, undefined, 'cp-only 目标不得虚构 op 身份')
     // 最新原生轮（7）没有基准：必须阻签，且不得回落到更早的 6/5。
     const drifted = withNarrow(structuredClone(full), win.failureCleanup)
-    assert.equal(latestSendTarget(drifted, { events: eventsOf(5, 7) }, drifted._storageRevision), null, '最新原生无基准必须不签，也不得选旧轮')
+    assert.equal(latestSendTarget(drifted, { events: eventsOf(5, 7) }, drifted._storageRevision).turn, 7, '最新原生无前像仍可回退，不选旧轮')
   } finally { await f.cleanup() }
 })

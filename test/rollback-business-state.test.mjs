@@ -4,13 +4,30 @@ import {readFileSync} from 'node:fs'
 import {registerHooks} from 'node:module'
 import {captureRollbackBusinessState,restoreRollbackBusinessState,resolveRollbackBusinessState} from '../lib/rollback-business-state.js'
 import {applyRollbackBusinessTimelineTransform,applyRollbackBusinessTurnTransform} from '../deploy/rollback-business-transform.mjs'
-test('旧row-v1兼容只接受确切完整布局和行前缀，不降级未知新版基准',()=>{
+test('回退基准：完整布局照常解析；不完整/未知/无历史一律降为可用状态而不拒绝回退',()=>{
  const row={presentation:null,presentationWarnings:[],macroState:null,tavernScriptPrompts:[],runtimeInputs:null,posture:'',ledger:null,scriptState:null,candidates:null,settleStatus:'idle',settleError:null,lastSettle:null,preparedWorldBookContext:'',preparedWorldBook:null,worldBookReads:null}
  const chat={messages:[{role:'assistant',turn:52},{role:'user'},{role:'assistant',turn:53}],timeline:{checkpoints:[{turn:53,rowBefore:row,participants:{}}],operations:{}}}
  assert.equal(resolveRollbackBusinessState(chat,53).messageCount,1)
- const partial=structuredClone(chat);delete partial.timeline.checkpoints[0].rowBefore.macroState;assert.throws(()=>resolveRollbackBusinessState(partial,53),/基准/)
- const unsupported=structuredClone(chat);unsupported.timeline.checkpoints[0].businessBefore={version:99};assert.deepEqual(resolveRollbackBusinessState(unsupported,53),{version:99})
- const noHistory=structuredClone(chat);delete noHistory.timeline.checkpoints[0].rowBefore;noHistory.timeline.checkpoints[0].beforeRevision=12;assert.throws(()=>resolveRollbackBusinessState(noHistory,53),/基准/)
+ // 行缺字段：不再整次拒绝；按真实存在的字段恢复，行数仍按真实尾部定位。
+ const partial=structuredClone(chat);delete partial.timeline.checkpoints[0].rowBefore.macroState
+ const partialBaseline=resolveRollbackBusinessState(partial,53)
+ assert.equal(partialBaseline.messageCount,1)
+ assert.equal(partialBaseline.partial,true)
+ assert.equal(partialBaseline.fieldKeys.includes('macroState'),false)
+ // 未知版本/未知布局：不把未知负载当基准，也不因此拒绝回退。
+ const unsupported=structuredClone(chat);unsupported.timeline.checkpoints[0].businessBefore={version:99}
+ const unsupportedBaseline=resolveRollbackBusinessState(unsupported,53)
+ assert.equal(unsupportedBaseline.version,1)
+ assert.equal(unsupportedBaseline.messageCount,1)
+ // 完全没有保存过前像：按真实当前尾部定位，不伪造旧值、不拒绝回退。
+ const noHistory=structuredClone(chat);delete noHistory.timeline.checkpoints[0].rowBefore;noHistory.timeline.checkpoints[0].beforeRevision=12
+ const noHistoryBaseline=resolveRollbackBusinessState(noHistory,53)
+ assert.equal(noHistoryBaseline.version,1)
+ assert.equal(noHistoryBaseline.messageCount,1)
+ assert.equal(noHistoryBaseline.fields.variables,undefined)
+ // 正文不是连续尾部时必须拒绝（防误删独立历史），这与"缺基准"不同。
+ const broken=structuredClone(chat);broken.messages=[{role:'assistant',turn:52},{role:'assistant',turn:53},{role:'user',turn:1}]
+  assert.throws(()=>resolveRollbackBusinessState(broken,53),/纯尾|连续尾部/)
  const failed=structuredClone(chat);failed.messages.pop();failed.messages.at(-1).turn=53;failed.timeline.operations.body={kind:'body',turn:53,rowBefore:row,beforeParticipants:{}};assert.equal(resolveRollbackBusinessState(failed,53,true).messageCount,1)
 })
 test('定向剧情头恢复旧值及缺失语义，未知字段保持当前且无body引用任务删除',()=>{

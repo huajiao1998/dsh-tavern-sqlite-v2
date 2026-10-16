@@ -61,6 +61,19 @@ async function fixture(){
  const args={chat,requestedTurn:38,availability:()=>{throw Error('既有意图不得重新选择回退轮')},readChat:async()=>structuredClone(chat),updateChat:async(_id,fn,metadata)=>{assert.equal(metadata.source,'rollback.complete');await fn(chat);archive.prepare("DELETE FROM archive_head_fields WHERE key='rollbackPending'").run()},chats:{rollbackArchivePath:()=>archiveFile,readSlice:async()=>({chat:{}}),update:async()=>{}},sessions:{get:id=>agents.get(id),flush:async s=>{await persistence.drainOpenHandles(s.id)}},persistence,services:{projections,projectionCache:{write:async()=>{}},tokenMeterProvider:()=>({states:new WeakMap()}),rollbackSyncProvider:()=>rollbackSync},quiesce:async()=>{},sideCleanup:async()=>{if(fail)throw Error('原创收尾故障')},view:async c=>({turn:c.messages.at(-1).turn}),readCard:async()=>({})}
  return {root,Session,main,child,mainKeep,childKeep,archive,dbs,handles,persistence,args,agents,writes:()=>writes,setFault:v=>{fail=v},async close(){for(const h of handles){if(h.batchTimer!==undefined)clearTimeout(h.batchTimer);await h.close()}for(const id of dbs.keys()){rollbackBarrier.delete(id);rollbackSchedulingBarrier.delete(id)}archive.close();for(const db of dbs.values())db.close();rmSync(root,{recursive:true,force:true})}}
 }
+test('审查修复排空回执：真实后端完成drain后才返回drained，排空失败不删库',async()=>{
+ const f=await fixture()
+ try{
+  const id=f.main.id,db=f.dbs.get(id),before=db.cursor(),drain=f.persistence.drainOpenHandles
+  let drains=0
+  f.persistence.drainOpenHandles=async()=>{drains++;throw Error('排空失败')}
+  await assert.rejects(f.persistence.truncateEvents(f.main.header,f.mainKeep-1),/排空失败/);assert.equal(db.cursor(),before)
+  f.persistence.drainOpenHandles=async value=>{drains++;return drain.call(f.persistence,value)}
+  const meta=await f.persistence.truncateEvents(f.main.header,f.mainKeep-1)
+  assert.equal(meta.drained,true);assert.equal(drains,2);assert.equal(db.cursor(),f.mainKeep)
+ }finally{await f.close()}
+})
+
 test('完整回退屏障＋真实写句柄：身份与DELETE同事务，保37/不触发普通追加，重试无重复',async()=>{
  const f=await fixture()
  try{

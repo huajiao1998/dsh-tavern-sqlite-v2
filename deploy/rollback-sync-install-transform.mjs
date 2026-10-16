@@ -2,16 +2,14 @@
 const MARKER='// [dsh-tavern-rollback-sync-install:v1]'
 function once(s,a,b){if(s.split(a).length!==2)throw Error('同步安装锚点缺失/不唯一：'+a.slice(0,90));return s.replace(a,b)}
 export function applyRollbackSyncActionGuardTransform(source){
- if(source.includes('// [dsh-tavern-error-purge-play:v1]'))return source
- const old='const result = await rpc("rollbackTurn", { expectedTurn: clearIncomplete ? null : targetTurn }, props.sessionId);'
- const next='if (typeof props.sessions?.waitForTavernRollbackSync !== "function") throw new Error("回退同步尚未接线或尚未就绪，未执行回退");\n					'+old
- if(source.includes(next))return source
- return once(source,old,next)
+ // 显示能力不作物理撤销资格；只移除本包旧的精确前置句，RPC后仍须严格等待真实同步。
+ const guard='if (typeof props.sessions?.waitForTavernRollbackSync !== "function") throw new Error("回退同步尚未接线或尚未就绪，未执行回退");'
+ return source.replace(guard,'// 同步消费者在物理回退返回后检查。')
 }
 export function applyRollbackSyncInstallTransform(source,{runtimeOnly=false}={}){
  if(source.includes(MARKER)){
   if(source.split(MARKER).length!==2 || !source.includes('installTavernSessionHistoryPatch(require, rpc, ctx);') || (source.includes('function installTavernSessionHistoryPatch(') && !source.includes('ctx.effect(() => evaluated.installTavernRollbackSync(ctx.sessions),')) || source.includes('installTavernSessionHistoryPatch(require, rpc);'))throw Error('同连接安装接线不完整')
-  return source
+  return runtimeOnly?source:applyRollbackSyncActionGuardTransform(source)
  }
  let out=runtimeOnly?source:applyRollbackSyncActionGuardTransform(source)
  out=once(out,'function apply(ctx) {','function apply(ctx) {\n            installTavernSessionHistoryPatch(require, rpc, ctx);')

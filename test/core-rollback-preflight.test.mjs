@@ -165,7 +165,8 @@ test('preflight：四层接线齐全 ⇒ ok；任一缺失 ⇒ 各自明确拒�
   expectCode(() => preflightRollback(session, 2, { ...base, persistence: {} }), 'NO_PERSISTENCE', '缺 persistence')
   expectCode(() => preflightRollback(session, 2, { ...base, services: { ...base.services, projections: undefined } }), 'NO_PROJECTIONS', '缺 projections')
   expectCode(() => preflightRollback(session, 2, { ...base, services: { ...base.services, projectionCache: undefined } }), 'NO_PROJECTION_CACHE', '缺 projectionCache')
-  expectCode(() => preflightRollback(session, 2, { ...base, head: { update: async () => {} } }), 'NO_HEAD_STORE', '缺 readSlice（L4）')
+  // head.readSlice/update 已不是回退前置条件（退役 L4 遗留）：缺 head 不再拒绝物理删尾。
+  assert.equal(preflightRollback(session, 2, { ...base, head: { update: async () => {} } }).ok, true)
 })
 
 test('preflight：strict=false 只收集 violations（诊断用），不抛也不放行', () => {
@@ -184,12 +185,11 @@ test('cleanup strict：先预检、再 drain、再单事务截断、再内存/�
   })
   assert.equal(result.strict, true)
   assert.equal(result.truncated, true)
-  assert.equal(result.drained, true)
   assert.equal(result.keep, 4)
-  // 只读预检（stateOf 读 L1.5 有效数）先跑；之后必须是 **drain → 截断 → 重折 → cache → L1.5 取 agent**。
+  // 真正截断由 truncateEvents 单点负责（其内部统一排空活动写句柄），不再由清理层提前排空。
   assert.deepEqual(record.filter(item => !item.startsWith('stateOf')),
-    ['drain:synthetic-session', 'truncate:3', 'hydrate', 'cache.write'])
-  assert.equal(record.includes('stateOf:turnBoundary'), true, 'strict 预检必须核过 L1.5 的有效数')
+    ['truncate:3', 'hydrate', 'cache.write'])
+  assert.equal(record.includes('stateOf:turnBoundary'), true, '截断后必须重折轮次边界')
   assert.equal(session.log.length, 4, 'log 同一数组就地截短')
 })
 

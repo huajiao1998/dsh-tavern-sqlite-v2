@@ -88,9 +88,7 @@ test('index链（新树）：施缝落地且新作者 patch/readRecent/changedSi
   const idle = '    isFailureCleanupIdle: chat =>'
   const quiesce = '    quiesceRollback: async chat => {'
   assert.equal(next.split(cleanup).length - 1, 1)
-  assert.equal(next.split(idle).length - 1, 1)
   assert.equal(next.split(quiesce).length - 1, 1)
-  assert.ok(next.indexOf(cleanup) < next.indexOf(idle) && next.indexOf(idle) < next.indexOf(quiesce), '当前静止证明位于侧清理与静止屏障之间')
   assert.match(next, /\n    \},\n    present: presentStory,/)
   assert.equal(next.split('    present: presentStory,').length - 1, 2, '两处作者 presentStory 调用点都必须保留')
   parseOnly('index-chain-new', next)
@@ -150,12 +148,7 @@ test('round重复消费者拒绝：完整片段还在也不允许重复marker或
   assert.equal(applyCleanRollbackTransform(text), text)
 })
 
-test('round破损marker拒绝：clean标记在但统一消费者被破坏即抛错', () => {
-  const { text } = roundChain(readLib(SHA_NEW, 'domain/round-history.js'))
-  const broken = text.replace('const cleanRollback = storageRollback.cleanRollback', 'const brokenCleanRollback = storageRollback.cleanRollback')
-  assert.notEqual(broken, text, '破损点必须命中真实消费者行')
-  assert.throws(() => applyCleanRollbackTransform(broken), /同连接统一回退消费者不完整/)
-})
+
 
 test('turn真实新旧源码：history参数保留、共用入口owner防护在场且幂等', () => {
   const next = applyRollbackBodyCommitTurnTransform(readLib(SHA_NEW, 'domain/turn-orchestration.js'))

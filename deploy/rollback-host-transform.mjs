@@ -1,10 +1,8 @@
 // 回退写入不再触发模板/预热/压缩等新任务，整个任务run先静止。
 const MARKER='// [dsh-tavern-rollback-host-barrier:v1]'
-const IDLE='    isFailureCleanupIdle: chat => !chat.regenInProgress && agentRegistry.get(chat.sessionId)?.phase?.kind !== \'running\' && !foregroundHandoff.isBusy(chat.sessionId) && !settlementJobs.isBusy(chat.id) && !Object.values(chat.timeline?.participants || {}).some(p => agentRegistry.get(p.sessionId)?.phase?.kind === \'running\'),'
-function addIdle(source){return source.includes(IDLE)?source:once(source,'    quiesceRollback: async chat => {',IDLE+'\n    quiesceRollback: async chat => {')}
 function once(source,old,next){if(source.split(old).length!==2)throw new Error('回退Host锚点未命中/不唯一：'+old.slice(0,80));return source.replace(old,next)}
 export function applyRollbackHostTransform(source){
- if(source.includes(MARKER)){if(!source.includes('quiesceRollback: async chat =>') || !source.includes('rollbackSchedulingBarrier.has(sessionId)'))throw new Error('回退Host屏障不完整');return addIdle(source.includes('await tavernScriptHostAdapter.whenIdle(chat.sessionId)')?source:once(source,'      await candidateWorldbookPreparation?.whenIdle(chat.sessionId)','      await candidateWorldbookPreparation?.whenIdle(chat.sessionId)\n      await tavernScriptHostAdapter.whenIdle(chat.sessionId)'))}
+ if(source.includes(MARKER)){if(!source.includes('quiesceRollback: async chat =>') || !source.includes('rollbackSchedulingBarrier.has(sessionId)'))throw new Error('回退Host屏障不完整');return source.includes('await tavernScriptHostAdapter.whenIdle(chat.sessionId)')?source:once(source,'      await candidateWorldbookPreparation?.whenIdle(chat.sessionId)','      await candidateWorldbookPreparation?.whenIdle(chat.sessionId)\n      await tavernScriptHostAdapter.whenIdle(chat.sessionId)')}
  let next="import { rollbackSchedulingBarrier, createRollbackWorldbookRecallLog } from './domain/storage-rollback-business.js'\n"+MARKER+'\n'+source
  next=once(next,'  const worldbookRecallLog = createWorldbookRecallLog({ store: profileData })',"  const worldbookRecallLog = createRollbackWorldbookRecallLog({ store: profileData, dataRoot })\n  ctx.effect(() => () => worldbookRecallLog.dispose(), 'dsh-tavern: 召回SQLite释放')")
  next=once(next,'    if (!autoCompaction || compactionAbort.signal.aborted || compactionTimers.has(sessionId)) return','    if (rollbackSchedulingBarrier.has(sessionId) || !autoCompaction || compactionAbort.signal.aborted || compactionTimers.has(sessionId)) return')
@@ -16,7 +14,6 @@ export function applyRollbackHostTransform(source){
  const presentationName=presentation.endsWith('presentStory,')?'presentStory':'view'
  next=once(next,presentation,`    cancelSettlement,
     cleanupRollbackSides: (chat, turn) => worldbookRecallLog.pruneRollback(chat, turn, chat.timeline.branchId),
-    isFailureCleanupIdle: chat => !chat.regenInProgress && agentRegistry.get(chat.sessionId)?.phase?.kind !== 'running' && !foregroundHandoff.isBusy(chat.sessionId) && !settlementJobs.isBusy(chat.id) && !Object.values(chat.timeline?.participants || {}).some(p => agentRegistry.get(p.sessionId)?.phase?.kind === 'running'),
     quiesceRollback: async chat => {
       // 先撤销上游worker身份/派发租约，再join父进程已受理请求。
       serverScripts?.stop(chat.sessionId)

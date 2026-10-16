@@ -250,11 +250,7 @@ const COMMIT_NEXT = [
 ].join('\n')
 
 const TAIL_NEXT = [
-  `    ${ROLLBACK_MARKER} T3 L4：被回退轮的 head 痕迹清理（四类索引 / 世界书投递缓存 / 时间线账本 / rollbackUndo）。`,
-  '    // ⚠ 必须排在作者**最后一次写 head**（上面的 rollback.undo-point）之后，',
-  '    //   否则作者那次整档写回会把刚删掉的条目原样带回来（2026-09-28 实测踩过）。',
-  "    await rollbackExport('cleanupRollbackHeadIndex')(chats, chat.id, hiddenTurn)",
-  '    // 读回**最新**的 chat 再交给视图：L4 已把 rollbackUndo 从 head 删掉，不能返回还带着旧 head undo 的视图。',
+  '    // 读回**最新**的 chat 再交给视图：不能返回还带着旧 head undo 的视图。',
   '    chat = await readChat(chat.id) || chat',
   ROLLBACK_ANCHORS.rollbackTail,
 ].join('\n')
@@ -355,7 +351,6 @@ export const ROLLBACK_MARKERS = Object.freeze([
   "rollbackExport('cleanupAfterRollbackAtSeq')(livePersistence, background, participant.rewindTo",
   'for (const entry of backgroundRewinds) {',
   'current.rollbackUndo = { ...undo, ready: false',
-  "rollbackExport('cleanupRollbackHeadIndex')(chats, chat.id, hiddenTurn",
   '回退已物理清除，不可撤销',
 ])
 

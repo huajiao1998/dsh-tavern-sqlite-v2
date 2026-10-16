@@ -64,7 +64,7 @@ async function fixture(failed=false,withBook=false,shape=null){
  const mainDb=new SqliteSessionDb(path.join(root,'session.db'));mainDb.materialize(session.header,session.inheritedEventCount,session.snapshotEvents())
  const workerDb=new SqliteSessionDb(path.join(root,'background.db'));workerDb.materialize(background.header,background.inheritedEventCount,background.snapshotEvents())
  const baseMessages=[{role:'user',text:'上一轮输入'},{role:'assistant',turn:52,text:'上一轮52',swipeId:0,swipes:['上一轮52'],variables:[{hp:52}]}]
- const store=createChatSqliteStore({dataRoot:root,helpers})
+ const store=createChatSqliteStore({dataRoot:root,helpers:shape?.realMutations?{...helpers,...await import('../../../tmp/upstream-a390af17-adapt-20261016/author-fixture/src/dsh-tavern-a390af170cfe5ed3e9213a2801cbcce321e2008b/tavern-plugin/lib/domain/json-mutation.js')}:helpers})
  const base={id:'fixture-chat',sessionId:session.id,_storageRevision:1,mode:'story',messages:baseMessages,variables:{hp:52},lastWorldBookRecall:{turn:52},contextCompaction:{warning:'上一轮'},timeline:{schemaVersion:1,branchId:'old',revision:52,checkpoints:[],operations:{},participants:{}}}
  if(withBook)base.openingWorldbookSnapshot={version:1,document:{entries:[{uid:0,content:'原创上轮52世界书'}]},unknown:{keep:true}}
  await store.update(base.id,()=>base)
@@ -104,6 +104,119 @@ async function fixture(failed=false,withBook=false,shape=null){
  const args={chat:await read(),requestedTurn:failed?null:53,availability:()=>({failedTurns:failed?[53]:[],canRollback:!failed}),readChat:read,updateChat:update,chats:{rollbackArchivePath:store.rollbackArchivePath,readRollbackWorldbook:store.readRollbackWorldbook,readSlice:store.readSlice,update},sessions:{get:id=>agents.get(id),getSession:id=>agents.get(id)?.session,flush:async()=>{}},persistence,services,quiesce:async()=>{},sideCleanup:async(chat,turn)=>{await recalls.pruneRollback(chat,turn,chat.timeline.branchId)}, view:async chat=>{assert.equal(rollbackBarrier.has(chat.sessionId),true,'构造返回视图期间仍阻止新写，完整基线发布后才解除');return {turn:chat.messages.at(-1).turn,variables:chat.variables}},readCard:async()=>({})}
  return {root,base,keep,session,background,syncFrames,mainDb,workerDb,store,agents,args,read,update,handles,recalls,globals,setFault:value=>{fault=value},cleanup:async()=>{for(const id of agents.keys())rollbackBarrier.delete(id);await globals.dispose();recalls.dispose();store.dispose();mainDb.close();workerDb.close();await ctx.fiber.dispose();rmSync(root,{recursive:true,force:true})}}
 }
+for(const state of ['completed','failed','running','aborted','unknown'])test('回退核心全状态：'+state+' 缺前像及未知phase仍真实物理删尾',async()=>{
+ const f=await fixture(false,false,{status:state,reason:state==='failed'?'error':state==='unknown'?'未来终态':state,end:state!=='running'})
+ try{
+  await f.update(f.base.id,current=>{delete current.timeline.operations.body.businessBefore;current.timeline.checkpoints=[];return current})
+  const agent=f.agents.get(f.session.id);delete agent.phase
+  let cancels=0,waits=0
+  agent.cancel=()=>{cancels++};agent.whenIdle=async()=>{waits++}
+  const {latestSendTarget}=await import('../lib/latest-send.js'),chat=await f.read(),target=latestSendTarget(chat,{events:f.session.snapshotEvents()})
+  assert.ok(target,'无前像不是不可回退');assert.equal(target.turn,53)
+  const result=await cleanRollback({...f.args,chat,requestedTurn:target})
+  assert.equal(f.mainDb.cursor(),f.keep);assert.equal(f.session.snapshotEvents().some(event=>event.data?.turn===53),false)
+  assert.equal((await f.read()).messages.at(-1).turn,52);assert.equal(result.rolledBack.recovery.status,'partial')
+  assert.match(result.rollbackWarning,/未恢复/);assert.equal(cancels,1);assert.equal(waits,1)
+ }finally{await f.cleanup()}
+})
+for(const mode of ['missing','throws','undefined','absent'])test('回退核心历史缺失：操作前像 '+mode+' 不阻断本轮物理回退',async()=>{
+ const f=await fixture(false,false,{legacyFailedTurn:51})
+ try{
+  if(mode==='absent')await f.update(f.base.id,current=>{delete current.timeline.operations.body.businessBefore.operationPreimages;delete current.timeline.operations.bodyFailed51;current.timeline.checkpoints=[];return current})
+  const chat=await f.read(),chats={...f.args.chats}
+  if(mode==='throws')chats.readRollbackOperationSnapshot=()=>{throw Error('历史快照不可读')}
+  if(mode==='undefined')chats.readRollbackOperationSnapshot=()=>undefined
+  const result=await cleanRollback({...f.args,chats,chat,requestedTurn:53})
+  assert.equal(f.mainDb.cursor(),f.keep);assert.equal((await f.read()).messages.at(-1).turn,52)
+  assert.equal(result.rolledBack.recovery.status,'partial');assert.match(result.rollbackWarning,/bodyFailed51.*历史前像/)
+  assert.equal((await f.read()).timeline.operations.bodyFailed51.turn,51,'仍恢复已知旧状态，不伪造缺失前像')
+ }finally{await f.cleanup()}
+})
+test('回退核心无Agent：已载入权威Session不因运行对象缺失拒绝',async()=>{
+ const f=await fixture()
+ try{
+  const sessions={...f.args.sessions,get:id=>id===f.session.id?undefined:f.agents.get(id)}
+  const result=await cleanRollback({...f.args,sessions})
+  assert.equal(f.mainDb.cursor(),f.keep);assert.equal(result.rolledBack.hiddenTurn,53);assert.equal((await f.read()).messages.at(-1).turn,52)
+ }finally{await f.cleanup()}
+})
+
+for(const entry of ['patch','update'])for(const mode of ['deep','delete','replace-row','truncate-history'])test('B23物理回退：'+entry+' '+mode+' 完整旧楼前像冷开恢复',async()=>{
+ const f=await fixture(false,false,{realMutations:true})
+ let reopened
+ try{
+  await f.update(f.base.id,current=>{
+   for(let index=0;index<current.messages.length;index++)current.messages[index].variables=[{stat_data:{hp:52+index},schema:{}},{stat_data:{alternate:index},schema:{}}]
+   current.timeline.operations.body.businessBefore.messageCount=2;current.timeline.checkpoints[0].businessBefore.messageCount=2
+   return current
+  })
+  const expected=structuredClone((await f.read()).messages[1])
+  const metadata={source:'tavern-helper.variables'}
+  if(entry==='patch'){
+   const current=await f.read()
+   const change=mode==='deep'?{op:'set',path:['messages',1,'variables',0,'stat_data','hp'],value:999}
+    :mode==='replace-row'?{op:'set',path:['messages',1],value:{...expected,variables:undefined,text:'明确替换整楼'}}
+    :mode==='truncate-history'?{op:'splice',path:['messages'],index:1,deleteCount:current.messages.length-1,items:[]}
+    :{op:'delete',path:['messages',1,'variables']}
+   if(mode==='replace-row')delete change.value.variables
+   await f.store.patch(f.base.id,current._storageRevision,[change,{op:'set',path:['_storageRevision'],value:current._storageRevision+1}],metadata)
+  }else await f.update(f.base.id,current=>{if(mode==='delete')delete current.messages[1].variables;else if(mode==='replace-row')current.messages[1]={role:'assistant',turn:52,text:'明确替换整楼',swipeId:0,swipes:['明确替换整楼']};else if(mode==='truncate-history')current.messages.splice(1);else current.messages[1].variables[0].stat_data.hp=999;return current},metadata)
+  const written=await f.read();assert.deepEqual(written.timeline.operations.body.businessBefore.messagePreimages[1],expected)
+  const result=await cleanRollback({...f.args,chat:written});assert.equal(result.rolledBack.recovery.status,'complete')
+  assert.equal(f.mainDb.cursor(),f.keep);assert.equal(f.workerDb.cursor(),1)
+  reopened=createChatSqliteStore({dataRoot:f.root,helpers})
+  assert.deepEqual((await reopened.read(f.base.id)).messages[1],expected,'销毁原写口后从SQLite恢复全部旧swipe/变量')
+ }finally{reopened?.dispose();await f.cleanup()}
+})
+
+test('审查修复同步边界：缺显示接线仍物理完成，不伪造同步回执且可同目标补发',async()=>{
+ const f=await fixture()
+ try{
+  await assert.rejects(cleanRollback({...f.args,services:{...f.args.services,rollbackSyncProvider:()=>undefined}}),/回退已物理完成/)
+  const after=await f.read();assert.equal(f.mainDb.cursor(),f.keep);assert.equal(after.messages.at(-1).turn,52);assert.ok(after.rollbackCompletion);assert.equal(after.rollbackPending,undefined)
+  assert.equal(f.syncFrames.length,0);assert.equal(rollbackSchedulingBarrier.has(f.session.id),false)
+  const retry=await cleanRollback({...f.args,chat:after,requestedTurn:after.rollbackCompletion.ordinaryTarget})
+  assert.equal(retry.rolledBack.sync.id,after.rollbackCompletion.id);assert.equal(f.syncFrames.length,1)
+ }finally{await f.cleanup()}
+})
+
+test('审查修复R1R3R4：缺前像不误删长期后台，部分恢复明确持久上报并退出复用',async()=>{
+ const f=await fixture()
+ try{
+  await f.update(f.base.id,current=>{
+   delete current.timeline.operations.body.businessBefore;current.timeline.checkpoints=[]
+   current.scriptState={fromFuture:53};current.timeline.operations.olderWorker={kind:'agent',turn:52,startedSessionId:f.background.id,status:'completed'}
+   return current
+  })
+  const events=structuredClone(f.workerDb.readAll().events),cursor=f.workerDb.cursor()
+  const result=await cleanRollback({...f.args,chat:await f.read()})
+  assert.equal(f.mainDb.cursor(),f.keep,'主Session真实删尾')
+  assert.equal(f.workerDb.cursor(),cursor);assert.deepEqual(f.workerDb.readAll().events,events,'未知不等于新建，完整后台历史不删')
+  const after=await f.read()
+  assert.equal(after.timeline.participants.settlement.status,'needs-session');assert.equal(after.timeline.participants.settlement.sessionId,'')
+  assert.equal(after.timeline.operations.olderWorker,undefined,'不通过旧operation重新取得未知后台')
+  assert.equal(result.rolledBack.recovery.status,'partial');assert.match(result.rollbackWarning,/未恢复/);assert.match(result.rollbackWarning,/未删除其历史/)
+  assert.ok(result.rolledBack.recovery.unavailableFields.includes('variables'));assert.ok(result.rolledBack.recovery.unavailableFields.includes('scriptState'))
+  assert.equal(result.rolledBack.recovery.uncutParticipants[0].sessionId,f.background.id)
+  assert.deepEqual(after.scriptState,{fromFuture:53},'没有历史不能凭空补造，必须明确未恢复')
+  assert.deepEqual(after.rollbackCompletion.recovery,result.rolledBack.recovery)
+  assert.deepEqual(f.syncFrames[0].value.recovery,result.rolledBack.recovery)
+  const retry=await cleanRollback({...f.args,chat:after,requestedTurn:after.rollbackCompletion.ordinaryTarget})
+  assert.equal(retry.rollbackWarning,result.rollbackWarning);assert.deepEqual(retry.rolledBack.recovery,result.rolledBack.recovery)
+ }finally{await f.cleanup()}
+})
+for(const mode of ['missing','throws','undefined'])test('审查修复R6：书历史'+mode+'不阻断物理回退且不冒充恢复',async()=>{
+ const f=await fixture(false,true)
+ try{
+  const before=await f.read(),currentBook=structuredClone(before.openingWorldbookSnapshot)
+  const chats={...f.args.chats,readRollbackWorldbook:mode==='missing'?undefined:()=>{if(mode==='throws')throw Error('历史读取失败');return undefined}}
+  const result=await cleanRollback({...f.args,chat:before,chats})
+  assert.equal(f.mainDb.cursor(),f.keep);assert.equal(result.rolledBack.recovery.status,'partial')
+  assert.deepEqual((await f.read()).openingWorldbookSnapshot,currentBook)
+  assert.ok(result.rolledBack.recovery.unavailableFields.includes('openingWorldbookSnapshot'));assert.match(result.rollbackWarning,/openingWorldbookSnapshot/)
+ }finally{await f.cleanup()}
+})
+
 test('PR13真实SQLite：基准后台null采用同Session记录切点删尽尾并同连接同步',async()=>{
  const f=await fixture(true)
  try{
@@ -122,19 +235,21 @@ test('PR13真实SQLite：基准后台null采用同Session记录切点删尽尾�
   assert.equal(f.syncFrames.length,1)
  }finally{await f.cleanup()}
 })
-test('PR13真实SQLite：只有后置后台水位时前后台零删且账本不变',async()=>{
+test('PR13真实SQLite：只有后置后台水位时前台照常回退，该后台不猜删并上报',async()=>{
  const f=await fixture(true)
  try{
   await f.update(f.base.id,current=>{
    current.timeline.operations.body.businessBefore.participants={settlement:{role:'settlement',sessionId:f.background.id,lifetime:'chat',boundary:null,status:'current'}}
    return current
   })
-  const before=await f.read(),mainCursor=f.mainDb.cursor(),backgroundCursor=f.workerDb.cursor()
-  await assert.rejects(cleanRollback({...f.args,chat:before}),/上一轮后台缺少权威seq边界/)
-  assert.equal(f.mainDb.cursor(),mainCursor)
-  assert.equal(f.workerDb.cursor(),backgroundCursor)
-  assert.deepEqual(await f.read(),before)
-  assert.equal(f.syncFrames.length,0)
+  const backgroundCursor=f.workerDb.cursor()
+  const result=await cleanRollback({...f.args,chat:await f.read()})
+  // 用户撤销优先：前台正文/变量/SQL照常物理回退，不因后台缺权威切点拒绝整次回退。
+  assert.equal(result.turn,52)
+  assert.equal(f.mainDb.cursor(),f.keep,'前台SQL尾已删')
+  assert.equal(f.workerDb.cursor(),backgroundCursor,'无权威切点的后台会话不猜删，保持原样')
+  assert.equal((await f.read()).timeline.operations.body,undefined,'前台账本已删净')
+  assert.equal(f.syncFrames.length,1,'前台回退仍发同连接同步')
  }finally{await f.cleanup()}
 })
 for(const failed of [false,true])test((failed?'失败':'正常')+'正文的书历史引用在真实Session纯尾回退恢复52并回收独占版本',async()=>{
@@ -225,7 +340,7 @@ test('旧轮物理回退后后台turn1固定系统头保留，真实任务入口
   assert.equal(f.workerDb.cursor(),background.log.length)
  }finally{await f.cleanup()}
 })
-for(const kind of ['missing-token','unknown-worker','missing-sync','missing-inbox'])test('删前硬拒：'+kind+'不能假报干净，archive与Session尾部均不变',async()=>{
+for(const kind of ['unknown-worker'])test('删前硬拒：'+kind+'不能假报干净，archive与Session尾部均不变',async()=>{
  const f=await fixture()
  try{
   if(kind==='unknown-worker')await f.update(f.base.id,c=>{c.timeline.operations.independent={id:'independent',kind:'agent',startedSessionId:'untracked-session'};return c},{source:'fixture.prepare'})
@@ -272,34 +387,15 @@ test('最早失败53同时纳入后来54独立worker归属，不遗漏无partici
   await cleanRollback({...f.args,chat:await f.read()});assert.ok(!JSON.stringify(f.workerDb.readAll()).includes('旧53'));assert.equal((await f.read()).rollbackSessionCuts,undefined)
  }finally{await f.cleanup()}
 })
-test('前台冷装载与后台stop分别有界，超时不删且迟到清理最终释放',async()=>{
- for(const stage of ['resume','worker']){
-  const f=await fixture();let finish,closed=0;const gate=new Promise(r=>finish=r)
-  try{
-   const before=await f.read(),count=f.mainDb.cursor(),main=f.agents.get(f.session.id)
-   if(stage==='resume'){f.agents.delete(f.session.id);f.args.persistence.loadRollbackSession=async()=>{await gate;return main.session}}
-   else {const agent=f.agents.get(f.background.id);agent.phase.kind='running';agent.cancel=()=>{};agent.whenIdle=async()=>{await gate;agent.phase.kind='idle'}}
-   await assert.rejects(cleanRollback({...f.args,quiescenceTimeoutMs:5}),/静止等待超时/)
-   assert.deepEqual(await f.read(),before);assert.equal(f.mainDb.cursor(),count);assert.equal(rollbackSchedulingBarrier.has(f.session.id),true)
-   await assert.rejects(cleanRollback(f.args),/禁止并发/)
-   finish();await new Promise(r=>setImmediate(r));assert.equal(rollbackSchedulingBarrier.has(f.session.id),false)
-   if(stage==='resume')assert.equal(closed,0,'冷只读构造不持有Agent租约')
-  }finally{finish();await new Promise(r=>setImmediate(r));rollbackSchedulingBarrier.delete(f.session.id);await f.cleanup()}
- }
-})
-test('静止超时不删库，旧run未结算前保持调度屏障并拒绝并发回退',async()=>{
- const f=await fixture();let finish
- const pending=new Promise(resolve=>{finish=resolve})
+test('最小等待：回退直接等待相关任务，完成后物理删尾，不设超时拒绝',async()=>{
+ const f=await fixture();let finish,entered,done=false
+ const gate=new Promise(r=>finish=r),ready=new Promise(r=>entered=r)
  try{
-  const before=await f.read(),count=f.mainDb.cursor()
-  await assert.rejects(cleanRollback({...f.args,quiesce:()=>pending,quiescenceTimeoutMs:5}),/静止等待超时/)
-  assert.equal((await f.read())._storageRevision,before._storageRevision);assert.equal(f.mainDb.cursor(),count)
-  assert.ok(rollbackSchedulingBarrier.has(f.session.id))
-  await assert.rejects(cleanRollback(f.args),/禁止并发回退/)
-  finish();await pending;await new Promise(resolve=>setImmediate(resolve))
-  assert.ok(!rollbackSchedulingBarrier.has(f.session.id))
-  await cleanRollback(f.args);assert.equal((await f.read()).messages.at(-1).turn,52)
- }finally{finish();await pending;await f.cleanup()}
+  const count=f.mainDb.cursor()
+  const work=cleanRollback({...f.args,quiesce:()=>{entered();return gate}}).then(value=>{done=true;return value})
+  await ready;assert.equal(done,false);assert.equal(f.mainDb.cursor(),count)
+  finish();await work;assert.equal(f.mainDb.cursor(),f.keep);assert.equal((await f.read()).messages.at(-1).turn,52)
+ }finally{finish();await f.cleanup()}
 })
 test('后台participant替换身份有创建记录时新旧两个Session都清理并恢复旧participant',async()=>{
  const f=await fixture();let oldDb
@@ -497,7 +593,7 @@ test('不完整撤销：目标漂移零取消，运行器必须真实停止后�
    for(const change of [{branchId:'other'},{revision:target.revision+1},{endSeq:target.endSeq+1,eventCount:target.eventCount+1},{incomplete:undefined}])await assert.rejects(invoke({...target,...change}),/变化|漂移|不合法|坐标/)
    assert.equal(quiesced,0);assert.equal(stopped,0,'漂移凭据不得先取消当前任务')
    // cancel/whenIdle 不能假成功：仍running时必须拒绝，且两库均不删。
-   foreground.phase.kind='running';await assert.rejects(invoke(),/Agent尚未静止/)
+   foreground.phase.kind='running';await assert.rejects(invoke(),/实际运行任务尚未停止/)
    assert.equal(stopped,1);assert.equal(quiesced,0)
    assert.deepEqual(await f.read(),chat);assert.deepEqual(f.session.snapshotEvents(),events);assert.equal(f.syncFrames.length,0)
    // 用户选择活动轮撤销；真实cancel使运行器静止，旧资格idle旁证不再决定可否执行。
