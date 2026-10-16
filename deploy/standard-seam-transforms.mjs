@@ -7,6 +7,7 @@ import { applyHostTransform, applyBudgetTransform, applyHelperCurrentTransform }
 import { applyDisplayRuntimeTransform } from './display-runtime-transform.mjs'
 import { applyUpstreamExecutor, applyUpstreamWorker, applyUpstreamGenerationTasks } from './upstream-compute-transform.mjs'
 import { applyOpeningRuntimeTransform } from './opening-runtime-transform.mjs'
+import { applyOpeningCommitHostTransform, applyOpeningCommitTransform } from './opening-commit-transform.mjs'
 import { applyRollbackTransform } from './core-rollback-transform.mjs'
 import { applyModelErrorTransform } from './model-error-transform.mjs'
 import { applyCompactionWarningTransform } from './compaction-warning-transform.mjs'
@@ -103,7 +104,8 @@ export function buildCore(appDir, sourceFiles) {
     write.set(DOMAIN + 'storage-db-save.js', shim("import { storagePackage } from './storage-package.js'\nexport const { createDbSaveExchange, createDbSaveRegistration, createDbSaveResourceTransfer } = await storagePackage('db-save-exchange')\n"))
   }
   write.set(DOMAIN + 'tavern-conversation-registry.js', transformLegacyRegistry(text(appDir, DOMAIN + 'tavern-conversation-registry.js')))
-  write.set(DOMAIN + 'conversation-initialization.js', transformLegacyInitialization(text(appDir, DOMAIN + 'conversation-initialization.js')))
+  write.set(DOMAIN + 'conversation-initialization.js', applyOpeningCommitTransform(transformLegacyInitialization(text(appDir, DOMAIN + 'conversation-initialization.js'))))
+  write.set('tavern-plugin/lib/index.js', applyOpeningCommitHostTransform(write.get('tavern-plugin/lib/index.js')))
   write.set(DOMAIN + 'session-view-reader.js', transformLegacyViewReader(text(appDir, DOMAIN + 'session-view-reader.js')))
   write.set(DOMAIN + 'legacy-view-seams.js', LEGACY_VIEW_SHIM)
   write.set(DOMAIN + 'session-resource-access.js', applyCurrentResourceAccessTransform(text(appDir, DOMAIN + 'session-resource-access.js')))
