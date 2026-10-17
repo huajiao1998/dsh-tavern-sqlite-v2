@@ -1,8 +1,8 @@
 # DSH Tavern SQLite V2
 
-**服务端 MVU 与卡脚本、SQLite 增量存档、历史按需读取，以及正文和状态一起回退。**
+**始终启用酒馆服务端计算、SQLite 增量存档、历史按需读取，以及正文和状态一起回退。**
 
-这是面向 [DSH Tavern](https://github.com/flizzywine/dsh-tavern) 的存储与服务端执行插件。保留酒馆界面，把聊天、会话事件和 MVU 变量历史交给 SQLite 管理；计算类脚本由服务端执行，浏览器保留界面职责。
+这是面向 [DSH Tavern](https://github.com/flizzywine/dsh-tavern) 的存储与服务端计算接线插件。保留酒馆界面，把聊天、会话事件和 MVU 变量历史交给 SQLite 管理；计算调用酒馆自身的服务端执行链，浏览器只保留界面职责。插件不自带 MVU、卡脚本、Helper 或 VM 实现。
 
 [下载最新版](https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest) · [一键安装](#一键安装) · [原档继续使用](#原档怎么继续使用) · [详细安装说明](deploy/INSTALL.md) · [更新日志](CHANGELOG.md)
 
@@ -10,7 +10,7 @@
 
 | 特点 | 为你解决什么问题 |
 |---|---|
-| **服务端 MVU 与卡脚本执行** | MVU 结算、卡脚本 VM / ESM 与 Helper 计算在服务端执行，减少对浏览器作为执行端的依赖；Windows 桌面版采用 Worker 适配，Linux CLI 保留原进程内执行路径。 |
+| **始终使用酒馆服务端计算** | MVU 结算、卡脚本与 Helper 计算统一调用酒馆自身的服务端执行链；插件不自带计算引擎，也不把页面作为备用执行端。服务端不可用时保留并明确失败/等待，不回落客户端。 |
 | **SQLite 增量存档** | 聊天头字段、消息楼层分开存储，局部更新只处理变化部分，避免为了追加或修改一楼反复重写全部历史。会话事件由 SQLite 事务与 WAL 管理。 |
 | **历史按需读取** | 消息窗口、指定楼层、结算检查点按范围读取；显示、后台配置与场景各取所需字段，不为取少量信息先复制整档。 |
 | **MVU 变量历史瘦身** | 正文与变量归档使用同库、同连接事务；旧变量树先归档再退出热状态，近期楼层保留热窗口，查看旧楼按楼层和 swipe 补回并复用缓存。 |
@@ -92,7 +92,7 @@ Windows 使用新包菜单的卸载/更新功能。**卸载保留原档与 SQLit
 - UI 脚本仍保留浏览器职责；不承诺所有 DOM 脚本、所有卡或所有 SillyTavern API 都兼容。
 - 这是对作者存储与执行链的修改版，升级作者程序需要核适配；未知布局不无条件覆盖。
 - 自动化、源码检查与基础健康不替代现场页面、连续回退或 Linux 实机全链验收。
-- **计算唯一由上游服务端运行时执行，客户端不参与**：本包不再自带 MVU / 卡脚本 / Helper / VM 实现，也不保留旧引擎或浏览器回落分支。卡脚本在上游 `server-script-worker` 的 jsdom 子进程内运行，其结果经上游 Host 事务草稿与 effect/CAS 落我方 SQLite；服务端不可用时任务保留并明确失败/等待，不转交页面、不切旧引擎。因此本包**不宣称也不提供**对不可信代码的安全隔离——jsdom 与 Node 子进程仍与宿主同机同用户权限，请只运行你信任的人物卡与脚本。
+- **始终调用酒馆服务端计算，插件不自建计算引擎**：本包不提供 MVU / 卡脚本 / Helper / VM 实现，只接入酒馆自身的服务端执行链。插件取消页面优先级和客户端回落路径，让酒馆服务端成为唯一计算端；卡脚本由酒馆的 `server-script-worker` 及其 jsdom 子进程执行，结果经酒馆 Host 事务草稿与 effect/CAS 落入本包 SQLite。服务端进程不可用、容量不足或任务失败时，任务保留并明确失败/等待，不转交浏览器、不切旧引擎。这里的“始终启用”指执行策略不回落客户端，不代表服务端进程永远在线。本包**不宣称也不提供**对不可信代码的安全隔离——jsdom 与 Node 子进程仍与宿主同机同用户权限，请只运行你信任的人物卡与脚本。
 - 公开导出（`package.json` 的 `exports`，46 项）的兼容与退役策略见 [PUBLIC-API-COMPATIBILITY.md](PUBLIC-API-COMPATIBILITY.md)：默认保留、标注 deprecated 只做注记不改运行时行为；**例外**是计算重构按用户明确授权彻底删除的自有计算导出（`./sandbox-policy`、`./mvu-card-runtime`、`./mvu-script-sandbox`、`./mvu-update-core`、`./card-script-dispatch-store`、`./server-execution`、`./server-dependencies`、`./opening-server-init`、`./esm-module-loader`、`./tavern-helper-api`、`./tavern-regex-api`），不留垫片、不留兼容分支。
 
 ## 源码与构建
