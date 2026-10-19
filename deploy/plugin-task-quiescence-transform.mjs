@@ -38,11 +38,10 @@ export function applyPluginTaskHostTransform(source){
         controller.signal.throwIfAborted()
         await pluginApi.manualTaskFor(chat.sessionId, key, input)
         controller.signal.throwIfAborted()
-        if (rollbackSchedulingBarrier.has(chat.sessionId)) throw new Error('会话正在物理回退，禁止新插件任务')
         taskRun = await backgroundTasks.begin(chat, 'plugin-task')
         controller.signal.throwIfAborted()
         admitted()
-        await pluginApi.runManualTask({ gameId: chat.sessionId, key, input, signal: controller.signal,
+        await pluginApi.runManualTask({ gameId: chat.sessionId, key, input, operationId: taskRun.operationId, signal: controller.signal,
           onStart: label => pluginSettlementProgress.begin(chat.sessionId, label) })
       } catch (error) {
         rejectAdmission(error)
@@ -70,11 +69,18 @@ export function applyPluginTaskApiTransform(source){
   if(!source.includes('await taskWork.catch(() => {})')||!source.includes('pluginTaskWrites.run(taskScope'))throw Error('插件任务API实际静止接线不完整')
   return source
  }
- source="import { AsyncLocalStorage } from 'node:async_hooks'\n"+API+'\n'+source
+ // 新作者已有任务上下文；保留其operationId身份，不重复声明AsyncLocalStorage导入。
+ source=(source.includes("import { AsyncLocalStorage } from 'node:async_hooks'")?'':"import { AsyncLocalStorage } from 'node:async_hooks'\n")+API+'\n'+source
  source=once(source,'  const taskRuns = new Map()','  const taskRuns = new Map()\n  const pluginTaskWrites = new AsyncLocalStorage()\n  function assertPluginTaskWritable() { pluginTaskWrites.getStore()?.signal.throwIfAborted() }')
  source=once(source,'    const finish = onStart?.(entry.owner + \' · \' + entry.title)',"    const taskScope = { signal: combined, pending: new Set() }\n    let taskWork\n    const finish = onStart?.(entry.owner + ' · ' + entry.title)")
- const old="      await bounded(untilAborted(entry.run({ ...structuredClone(context), signal: combined, runAgent }), combined), stage,"
- source=once(source,old,"      taskWork = Promise.resolve().then(() => { combined.throwIfAborted(); return pluginTaskWrites.run(taskScope, () => entry.run({ ...structuredClone(context), signal: combined, runAgent })) })\n      await bounded(untilAborted(taskWork, combined), stage,")
+ const contextual = '      const work = taskContext.run(scope, () => entry.run({ ...structuredClone(context), signal: combined, runAgent }))'
+ if (source.includes('  const taskContext = new AsyncLocalStorage()')) {
+  source=once(source,contextual,'      taskWork = Promise.resolve().then(() => { combined.throwIfAborted(); return pluginTaskWrites.run(taskScope, () => taskContext.run(scope, () => entry.run({ ...structuredClone(context), signal: combined, runAgent }))) })')
+  source=once(source,'      await bounded(untilAborted(work, combined), stage,','      await bounded(untilAborted(taskWork, combined), stage,')
+ } else {
+  const old="      await bounded(untilAborted(entry.run({ ...structuredClone(context), signal: combined, runAgent }), combined), stage,"
+  source=once(source,old,"      taskWork = Promise.resolve().then(() => { combined.throwIfAborted(); return pluginTaskWrites.run(taskScope, () => entry.run({ ...structuredClone(context), signal: combined, runAgent })) })\n      await bounded(untilAborted(taskWork, combined), stage,")
+ }
  source=once(source,'      controller.abort()\n      if (taskRuns.get(context.gameId) === run)', '      controller.abort()\n      if (taskWork) await taskWork.catch(() => {})\n      while (taskScope.pending.size) await Promise.allSettled([...taskScope.pending])\n      if (taskRuns.get(context.gameId) === run)')
  // 仅任务可调用的作者写API：记录在途调用，取消后拒绝新的及跨await迟到写入。
  const writes=['saveTurnData','saveGameData','setVariables','editTurn','attach','update','remove']
@@ -89,7 +95,6 @@ export function applyPluginTaskApiTransform(source){
     service[name] = function (...args) {
       const scope = pluginTaskWrites.getStore()
       if (!scope) return write.apply(this, args)
-      scope.signal.throwIfAborted()
       const pending = Promise.resolve().then(() => { scope.signal.throwIfAborted(); return write.apply(this, args) })
       scope.pending.add(pending)
       pending.finally(() => scope.pending.delete(pending)).catch(() => {})

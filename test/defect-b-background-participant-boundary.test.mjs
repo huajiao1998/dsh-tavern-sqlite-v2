@@ -261,6 +261,6 @@ test('回归：新建 participant（基准里没有该会话）⇒ -1 哨兵语�
   const f = await harness({ currentBoundary: null, currentSyncedRevision: null, sessionCut: undefined, baselineBoundary: undefined })
   // 把基准快照里的 participant 也清掉 ⇒ old 没有 sessionId，走"新建 participant"的 -1 路径。
   f.businessBefore.participants = {}
-  await assert.rejects(cleanRollback(f.args), /回退预检|没有安全回退目标/)
+  const result=await cleanRollback(f.args);assert.equal(result.rolledBack.recovery.status,'partial');assert.ok(result.rolledBack.recovery.uncutParticipants.some(item=>item.sessionId===BACKGROUND_ID))
   assert.equal(f.truncated.filter(([id]) => id === BACKGROUND_ID).length, 0)
 })

@@ -81,15 +81,16 @@ function writeStorageRollbackShim(root){
  const target=new URL('../lib/failure-cleanup-target.js',import.meta.url).href
  const business=new URL('../lib/rollback-business-state.js',import.meta.url).href
  const file=path.join(root,'storage-rollback.mjs')
- writeFileSync(file,`export { inspectNativeFailureTail } from ${JSON.stringify(target)}\nexport { captureRollbackBusinessState, restoreRollbackBusinessState, resolveRollbackBusinessState } from ${JSON.stringify(business)}\n`,'utf8')
+ writeFileSync(file,`export { inspectNativeFailureTail } from ${JSON.stringify(target)}\nexport {latestSendTarget} from ${JSON.stringify(new URL('../lib/latest-send.js',import.meta.url).href)}\nexport { captureRollbackBusinessState, restoreRollbackBusinessState, resolveRollbackBusinessState } from ${JSON.stringify(business)}\n`,'utf8')
  return pathToFileURL(file).href
 }
 /** 真施缝：作者 chat-session-state 先施 pending 缝（本 transform 的前置要求），再施最新失败视图缝（含 R1 节点行）。 */
 async function loadSeamedSessionState(root,buildSessionEventRecords){
  const pending=applyRollbackPendingViewTransform(readFileSync(new URL('chat-session-state.js',AUTHOR),'utf8'))
- const source=applyLatestFailureViewTransform(pending)
+ const {applyLatestSendViewTransform}=await import('../deploy/latest-send-view-transform.mjs')
+ const source=applyLatestSendViewTransform(applyLatestFailureViewTransform(pending))
  assert.equal(applyLatestFailureViewTransform(source),source,'视图缝必须幂等（接线在位）')
- assert.ok(source.includes('const nodes = session?.surface?.nodes ?? evidence.nodes'),'R1：作者节点推导必须已改走证据节点')
+ assert.ok(source.includes('latestSendTarget(chat, evidence)'),'新作者最终视图直接消费真实事件目标，不复活旧节点资格')
  const file=path.join(root,'chat-session-state.mjs')
  // 作者模块自身的相对依赖照作者目录解析；域内 storage-rollback 垫片接到本包**真产品**检查器/业务基准。
  const rewritten=source.replace(/from '(.+?)'/g,(all,spec)=>spec.startsWith('./')?'from '+JSON.stringify(new URL(spec,AUTHOR).href):all)

@@ -194,7 +194,7 @@ test('回归：最新发送没有真实前像仍响亮拒绝且零删库', async
   const f = await harness({ ledgerFailedTurn: null, eventStreamHasTurn53: false })
   f.args.availability = () => ({ failedTurns: [], canRollback: false, reason: '当前没有可回退的已提交轮次' })
   f.args.requestedTurn = 53
-  await assert.rejects(cleanRollback(f.args), /回退目标已经变化/)
+  const result=await cleanRollback(f.args);assert.equal(result.alreadyClean,true,'旧53请求不连删当前52')
   assert.deepEqual(f.truncated, [], '拒绝时不得碰库')
 })
 

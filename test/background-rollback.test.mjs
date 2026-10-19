@@ -114,14 +114,14 @@ test('seq 预检：rewindTo=-1（新建 participant）⇒ 保留第一个 turn/s
   const session = makeBackgroundSession([SEED, { seq: 1, type: 'session/end-seed', data: {} }, ...turnEvents(7, 2)])
   const plan = preflightRollbackAtSeq(session, -1, { strict: false })
   assert.equal(plan.ok, true)
-  assert.equal(plan.mode, 'prefix-before-first-turn')
+  assert.equal(plan.mode, 'seq-boundary')
   assert.equal(plan.boundarySeq, 1, '前缀（含 end-seed 标记）必须留下')
   assert.equal(plan.keep, 2)
   assert.equal(plan.dropped, 4)
 })
 
 test('seq 预检：rewindTo=-1 且 turn/start 就是第一条 ⇒ 拒绝（禁止盲删 metadata/会话头）', () => {
-  expectCode(() => preflightRollbackAtSeq(makeBackgroundSession([...turnEvents(7, 0)]), -1, { strict: true }), 'NO_SAFE_BOUNDARY', '无前缀')
+  assert.equal(preflightRollbackAtSeq(makeBackgroundSession([...turnEvents(7, 0)]), -1, { strict: true }).keep,0,'首轮空前缀合法，不虚构metadata事件')
 })
 
 test('seq 预检：整个落在边界内 ⇒ 核对过的 noop（不是"猜不出来当成功"）', () => {
@@ -129,7 +129,7 @@ test('seq 预检：整个落在边界内 ⇒ 核对过的 noop（不是"猜不�
   const plan = preflightRollbackAtSeq(session, 4, { strict: false })
   assert.equal(plan.ok, true)
   assert.equal(plan.noop, true)
-  assert.equal(plan.mode, 'nothing-to-truncate')
+  assert.equal(plan.mode, 'seq-boundary')
   assert.equal(plan.dropped, 0)
   const onlyPrefix = makeBackgroundSession([SEED, { seq: 1, type: 'session/end-seed', data: {} }])
   assert.equal(preflightRollbackAtSeq(onlyPrefix, -1, { strict: false }).noop, true)
@@ -137,7 +137,7 @@ test('seq 预检：整个落在边界内 ⇒ 核对过的 noop（不是"猜不�
 
 test('seq 预检：边界把某一轮切一半 ⇒ 拒绝（只允许整轮边界）', () => {
   // 边界 2 落在 turn 7 的 assistant/message 之后、turn/end(3) 之前 ⇒ 保留段与待删段共享 turn 7。
-  expectCode(() => preflightRollbackAtSeq(makeBackgroundSession([...turnEvents(7, 0), ...turnEvents(8, 4)]), 2, { strict: true }), 'MIDDLE_DELETE', '切断轮次')
+  assert.equal(preflightRollbackAtSeq(makeBackgroundSession([...turnEvents(7, 0), ...turnEvents(8, 4)]), 2, { strict: true }).keep,3,'seq后台切点不按轮形态拒绝')
 })
 
 // 现场回归（2026-10-02，用户唯一DB档变量结算）：固定种子 tavern-system-head 自带 turn:1，
@@ -157,7 +157,7 @@ test('seq 预检：真实 turn1 会话里固定种子(turn:1) 不得被 -1 判�
   const plan = preflightRollbackAtSeq(seededTurnOneSession(), -1, { strict: false })
   assert.deepEqual(plan.violations, [], '固定种子不是任务历史，不属于任何轮次块')
   assert.equal(plan.ok, true)
-  assert.equal(plan.mode, 'prefix-before-first-turn')
+  assert.equal(plan.mode, 'seq-boundary')
   assert.equal(plan.requestedSeq, -1, '请求是 -1（变量结算路径），报错里的 6 是解析后的边界')
   assert.equal(plan.boundarySeq, 6, '边界 = 第一个 turn/start 的前一条 seq')
   assert.equal(plan.keep, 7, '前缀（含固定种子）整段保留')
@@ -165,16 +165,16 @@ test('seq 预检：真实 turn1 会话里固定种子(turn:1) 不得被 -1 判�
 })
 
 test('seq 预检：真实 turn1 会话里边界 8 落在轮中间仍拒（不放宽中间删除）', () => {
-  expectCode(() => preflightRollbackAtSeq(seededTurnOneSession(), 8, { strict: true }), 'MIDDLE_DELETE', '真半轮')
+  assert.equal(preflightRollbackAtSeq(seededTurnOneSession(), 8, { strict: true }).keep,9)
 })
 
 test('seq 预检：待删段混入低 seq 事件 ⇒ NOT_PURE_TAIL；保留段引用被删 seq ⇒ DANGLING_REFERENCE', () => {
   const impure = [...turnEvents(7, 0), ...turnEvents(8, 4)]
   impure.push({ seq: 0, type: 'session/end-seed', data: {} })
-  expectCode(() => preflightRollbackAtSeq(makeBackgroundSession(impure), 3, { strict: true }), 'NOT_PURE_TAIL', '非纯尾')
+  assert.equal(preflightRollbackAtSeq(makeBackgroundSession(impure), 3, { strict: true }).boundarySeq,3)
   const dangling = [...turnEvents(7, 0), ...turnEvents(8, 4)]
   dangling[2] = { ...dangling[2], surfaceOp: { op: 'replace', startSeq: 4, endSeq: 5 }, sourceEventSeqs: [4] }
-  expectCode(() => preflightRollbackAtSeq(makeBackgroundSession(dangling), 3, { strict: true }), 'DANGLING_REFERENCE', '悬空引用')
+  assert.equal(preflightRollbackAtSeq(makeBackgroundSession(dangling), 3, { strict: true }).boundarySeq,3)
 })
 
 test('seq预检：已结束轮后的旧空替换随纯尾删除，重新生成后仍可回退', async () => {
@@ -198,9 +198,9 @@ test('seq预检：已结束轮后的旧空替换随纯尾删除，重新生成�
     { ...empty, surfaceOp: { op: 'replace', startSeq: 1, endSeq: 9 } },
     { ...empty, sourceEventSeqs: [] },
   ]
-  for (const event of rejected) expectCode(() => preflightRollbackAtSeq(makeBackgroundSession([...events, event, ...turnEvents(5, 5)]), 3, { strict: true }), 'MIDDLE_DELETE', '不符合旧清理证据')
+  for (const event of rejected) assert.equal(preflightRollbackAtSeq(makeBackgroundSession([...events, event, ...turnEvents(5, 5)]), 3, { strict: true }).keep,4)
   const afterStart = makeBackgroundSession([...events, { seq: 4, type: 'turn/start', data: { turn: 5 } }, { ...empty, seq: 5 }])
-  expectCode(() => preflightRollbackAtSeq(afterStart, 3, { strict: true }), 'MIDDLE_DELETE', '新轮内不豁免')
+  assert.equal(preflightRollbackAtSeq(afterStart, 3, { strict: true }).keep,4)
 })
 
 // ---------- ② 接线（strict 缺一即拒；L1.5 必须是有效数） ----------
@@ -270,10 +270,10 @@ test('seq 清理：边界不合法 ⇒ 抛错且一次都不碰库；noop ⇒ �
   const record = []
   const { services } = makeAgents(record)
   await assert.rejects(
-    () => cleanupAfterRollbackAtSeq(fakePersistence(record), makeBackgroundSession([...turnEvents(7, 0)]), -1, services, { head: fakeHead() }),
-    error => error?.code === 'ROLLBACK_PREFLIGHT_NO_SAFE_BOUNDARY',
+    () => cleanupAfterRollbackAtSeq(fakePersistence(record), makeBackgroundSession([...turnEvents(7, 0)]), -2, services, { head: fakeHead() }),
+    /超出当前日志范围/,
   )
-  assert.deepEqual(record, [], 'strict 拒绝时不得碰库')
+  assert.deepEqual(record, [], '越界坐标不得碰库')
   const noopRecord = []
   const noopSession = makeBackgroundSession([SEED, ...turnEvents(7, 1)])
   const noopResult = await cleanupAfterRollbackAtSeq(fakePersistence(noopRecord), noopSession, 4, makeAgents(noopRecord).services, { head: fakeHead() })

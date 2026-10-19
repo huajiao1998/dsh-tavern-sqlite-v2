@@ -8,6 +8,7 @@ import path from 'node:path'
 import os from 'node:os'
 import {applyRollbackPendingViewTransform} from '../deploy/rollback-pending-view-transform.mjs'
 import {applyLatestFailureViewTransform} from '../deploy/latest-failure-transform.mjs'
+import {applyLatestSendViewTransform} from '../deploy/latest-send-view-transform.mjs'
 const AUTHOR=new URL('../../../tmp/upstream-a2008-review-20261010/author-tree/dsh-tavern-a2008bf932031616fd80ec265cbdba5d0b559312/tavern-plugin/lib/domain/',import.meta.url)
 registerHooks({resolve(spec,context,next){
  if(spec==='./tavern-macro-engine.js')return {url:'target-view-unused:macro',shortCircuit:true}
@@ -22,8 +23,8 @@ test('R2普通目标视图：真作者cold与window签原凭据，pending保留�
  const root=mkdtempSync(path.join(os.tmpdir(),'rollback-ordinary-target-'))
  try{
   const inspector=new URL('../lib/failure-cleanup-target.js',import.meta.url).href
-  const shim=path.join(root,'storage-rollback.mjs');writeFileSync(shim,`export {inspectNativeFailureTail} from ${JSON.stringify(inspector)}\n`,'utf8')
-  const source=applyLatestFailureViewTransform(applyRollbackPendingViewTransform(readFileSync(new URL('chat-session-state.js',AUTHOR),'utf8')))
+  const shim=path.join(root,'storage-rollback.mjs');writeFileSync(shim,`export {inspectNativeFailureTail} from ${JSON.stringify(inspector)}\nexport {latestSendTarget} from ${JSON.stringify(new URL('../lib/latest-send.js',import.meta.url).href)}\n`,'utf8')
+  const source=applyLatestSendViewTransform(applyLatestFailureViewTransform(applyRollbackPendingViewTransform(readFileSync(new URL('chat-session-state.js',AUTHOR),'utf8'))))
   const output=source.replace(/from '(.+?)'/g,(_all,spec)=>'from '+JSON.stringify(spec==='./storage-rollback.js'?pathToFileURL(shim).href:new URL(spec,AUTHOR).href))
   const file=path.join(root,'session-view.mjs');writeFileSync(file,output,'utf8')
   const {createSessionStateView}=await import(pathToFileURL(file).href)
@@ -37,17 +38,17 @@ test('R2普通目标视图：真作者cold与window签原凭据，pending保留�
   session.append('turn/end',{turn:52,reason:{kind:'completed'}})
   const evidence={sessionId:chat.sessionId,loaded:true,session:null,header:session.header,events:session.snapshotEvents(),nodes:[...session.surface.nodes]}
   const view=createSessionStateView({activity:()=>undefined,evidence:()=>evidence})
-  const target={kind:'rollback',turn:52,chatId:chat.id,sessionId:chat.sessionId,branchId:'branch-view',revision:7}
+  const target={kind:'rollback',turn:52,chatId:chat.id,sessionId:chat.sessionId,branchId:'branch-view',revision:7,nativeAnchor:{turn:52,input:1,reply:null}}
   assert.deepEqual(view.rollback(chat,evidence).rollbackTarget,target)
   const window={...chat,_storageRevision:undefined,windowRevision:9}
   assert.deepEqual(view.rollback(window,evidence).rollbackTarget,{...target,revision:9})
   const pending={...chat,_storageRevision:10,messages:[],rollbackPending:{version:1,id:'rollback-owned',turn:52,cuts:[],ordinaryTarget:target}}
   const fields=view.rollback(pending,evidence)
   assert.equal(fields.canRollback,true);assert.equal(fields.rollbackPending,true);assert.equal(fields.canClearIncompleteReply,false)
-  assert.deepEqual(fields.rollbackTarget,target,'pending必须保持发起版本，而非缩短视图的新轮')
+  assert.deepEqual(fields.rollbackTarget,{...target,rollbackId:'rollback-owned'},'pending沿原turn及持久id')
   const failureTarget={chatId:chat.id,sessionId:chat.sessionId,turn:53,operationId:'failed-body',branchId:'branch-view',revision:10}
   const failure={...pending,rollbackPending:{...pending.rollbackPending,ordinaryTarget:undefined,turn:53,failureTarget}}
   const failed=view.rollback(failure,evidence)
-  assert.equal(failed.canClearIncompleteReply,true);assert.equal(failed.rollbackTarget,null,'失败清理不得兼签普通回退')
+  assert.equal(failed.canClearIncompleteReply,false);assert.equal(failed.rollbackTarget.turn,53,'失败pending也只签统一目标');assert.equal(failed.rollbackTarget.rollbackId,'rollback-owned')
  }finally{assert.ok(path.basename(root).startsWith('rollback-ordinary-target-'));rmSync(root,{recursive:true,force:true})}
 })

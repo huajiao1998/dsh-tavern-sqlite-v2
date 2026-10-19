@@ -44,7 +44,8 @@ export function applyRollbackCharacterHostTransform(source){
 `+next.slice(end)
  next=once(next,'save: async function (cardPath, variables, sessionId) {','save: async function (cardPath, variables, sessionId, owner) {')
  next=once(next,'const saved = await replaceCardVariables(cardPath, variables)','const saved = await replaceCardVariables(cardPath, variables, owner)')
- next=once(next,"    await fileResources.writeWorking(normalizeResourcePath(cardPath, 'card'), JSON.stringify(savedWorkspace, null, 2))",`    // 定义编辑显式变量改动也进SQL；运行值不能随无关卡编辑重新落文件。
+ const definitionWrite="    await fileResources.writeWorking(normalizeResourcePath(cardPath, 'card'), JSON.stringify(savedWorkspace, null, 2))"
+ if(next.includes(definitionWrite)) next=once(next,definitionWrite,`    // 定义编辑显式变量改动也进SQL；运行值不能随无关卡编辑重新落文件。
     const previousVariables=cardPreparation.present({card:workspace,as:'card-extensions'}).variables || {}
     const nextVariables=cardPreparation.present({card:savedWorkspace,as:'card-extensions'}).variables || {}
     await characterVariableStore.save(normalizeResourcePath(cardPath,'card'),nextVariables,undefined,previousVariables)

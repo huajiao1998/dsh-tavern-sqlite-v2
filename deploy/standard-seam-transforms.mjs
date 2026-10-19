@@ -48,6 +48,7 @@ import { applyLatestFailureHostTransform, applyLatestFailureViewTransform } from
 import { applyActivityStateTransform } from './activity-state-transform.mjs'
 import { viewAssemblerSource } from './view-assembler-source.mjs'
 import { applyWorkbenchTurnTransform } from './workbench-mode-transform.mjs'
+import { applyMvuRedeliveryTransform } from './mvu-redelivery-transform.mjs'
 import { needsPluginTaskSeams, applyPluginTaskHostTransform, applyPluginTaskApiTransform } from './plugin-task-quiescence-transform.mjs'
 
 
@@ -88,7 +89,7 @@ export function buildCore(appDir, sourceFiles) {
   const present = rel => sourceFiles.has(rel)
   const write = new Map()
   // V2也需从裸S1/S2布局首装预检；纯转换保留服务端执行线，不复用V1浏览器转换。
-  const legacyIndex = transformLegacyIndex(transformStorageIndex(text(appDir, 'tavern-plugin/lib/index.js')))
+  const legacyIndex = transformLegacyIndex(transformStorageIndex(applyMvuRedeliveryTransform(text(appDir, 'tavern-plugin/lib/index.js'))))
   const indexSource = nativeDataCapable(legacyIndex) ? applyNativeMessageHostTransform(legacyIndex) : legacyIndex
   write.set('tavern-plugin/lib/index.js', applyRollbackBodyCommitHostTransform(applyRollbackBodySignalHostTransform(applyRollbackSharedBranchHostTransform(applyRollbackWorldbookBindingsHostTransform(applyRollbackWorldbookHostTransform(applyRollbackCharacterHostTransform(applyRollbackBackgroundOwnerHostTransform(applyRollbackGlobalHostTransform(applyRollbackHostTransform(applyBackgroundHostRollbackTransform(applyCompactionWarningTransform(applyHostTransform(indexSource)))))))))))))
   write.set('tavern-plugin/lib/index.js', applyLatestFailureHostTransform(applyRollbackWorldbookHistoryHostTransform(applyRollbackSyncHostTransform(write.get('tavern-plugin/lib/index.js')))))

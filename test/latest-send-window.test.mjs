@@ -108,7 +108,7 @@ test('窄窗口真实摘要：completed body+checkpoint 的 latest 轮 cleanable
   } finally { await f.cleanup() }
 })
 
-test('窄窗口真实摘要：cp-only 最新轮签 kind rollback 无 operationId；最新原生无基准不签也不选旧轮', async () => {
+test('窄窗口真实摘要：cp-only签统一目标，最新原生无基准仍签且不选旧轮', async () => {
   const chat = {
     id: 'chat-latest-cp', sessionId: 'session-latest-cp', _storageRevision: 1, mode: 'story',
     backgroundConfigVersion: 1, conversationFeaturesVersion: 1,   // store:1500 窗口资格（否则 not-applicable: unsupported-mode）
@@ -135,7 +135,7 @@ test('窄窗口真实摘要：cp-only 最新轮签 kind rollback 无 operationId
     assert.equal(target?.kind, 'rollback', 'cp-only 最新轮必须能签出 kind rollback')
     assert.equal(target.turn, 6)
     assert.equal(target.operationId, undefined, 'cp-only 目标不得虚构 op 身份')
-    // 最新原生轮（7）没有基准：必须阻签，且不得回落到更早的 6/5。
+    // 最新原生轮7没有基准：仍签7，不回落更早的6/5。
     const drifted = withNarrow(structuredClone(full), win.failureCleanup)
     assert.equal(latestSendTarget(drifted, { events: eventsOf(5, 7) }, drifted._storageRevision).turn, 7, '最新原生无前像仍可回退，不选旧轮')
   } finally { await f.cleanup() }

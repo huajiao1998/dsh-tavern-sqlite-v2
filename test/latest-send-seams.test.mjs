@@ -123,45 +123,29 @@ export const evidenceOf = () => ({ events: [] })
   assert.equal(miss.rollbackTarget, null)
   assert.equal(miss.failureTarget, null, '旧 body failureTarget 不得回落误选')
   assert.equal(miss.failureCleanupReason, '')
-  // latestSend 为 null：严格 native-only（最新空尾）必须保留（legacy 严格路径不退化）。
-  globalThis.__base = { canRollback: true, canClearIncompleteReply: false, rollbackTarget: null, failureTarget: { kind: 'native-only', turn: 25, endSeq: 5, eventCount: 6 }, failureCleanupReason: '原生空尾', rollbackUnavailableReason: '' }
-  const native = mod.rollbackViewFields(chat, undefined, undefined)
-  assert.equal(native.failureTarget.kind, 'native-only', '严格 native-only 目标必须保留')
-  assert.equal(native.canRollback, true)
-  assert.equal(native.canClearIncompleteReply, true, '菜单接错修复遗漏：native 空尾必须保留可清理资格')
-  assert.equal(native.failureCleanupReason, '原生空尾', '严格 native-only 的失败原因必须保留')
-  // legacy pending：保留重试能力（canClearIncompleteReply 沿用 base）。
-  globalThis.__base = { canRollback: true, canClearIncompleteReply: true, rollbackTarget: null, failureTarget: { kind: 'body', turn: 25 }, failureCleanupReason: 'pending 重试', rollbackUnavailableReason: '', rollbackPending: true }
-  const retry = mod.rollbackViewFields(chat, undefined, undefined)
-  assert.equal(retry.canRollback, true, 'legacy pending 必须保留可回退（重试）')
-  assert.equal(retry.canClearIncompleteReply, true, 'legacy pending 不得丢掉失败清理重试')
+  // 新作者不回落旧分类或旧base.pending，重试统一由真实selector签发。
+  globalThis.__base = {canRollback:true,failureTarget:{kind:'native-only',turn:25},rollbackPending:true}
+  const noFallback=mod.rollbackViewFields(chat,undefined,undefined)
+  assert.equal(noFallback.failureTarget,null);assert.equal(noFallback.canRollback,false)
+  mod.setLatestSend({...target,rollbackId:'pending-owned'})
+  assert.equal(mod.rollbackViewFields(chat).rollbackTarget.rollbackId,'pending-owned')
+
 })
 
-test('⑥ client：targetCompare 实际函数拒绝缺身份与不同 chat/session/op/rev、nativeAnchor 单侧缺失', async () => {
+test('退役迁移：client只核清理范围，不认证版本分类或锚点', async () => {
   const compare = await inline(extractFunction(pluginText('client.js'), 'targetCompare') + '\nexport { targetCompare }\n')
   const base = { kind: 'rollback', turn: 25, chatId: 'c', sessionId: 's', branchId: 'b', revision: 9 }
-  assert.equal(compare.targetCompare(base, { ...base }), '', '同身份同锚点必须通过')
-  assert.equal(compare.targetCompare(base, { ...base, chatId: 'c2' }), 'chatId 不一致')
-  assert.equal(compare.targetCompare(base, { ...base, sessionId: 's2' }), 'sessionId 不一致')
-  assert.equal(compare.targetCompare(base, { ...base, operationId: 'op' }), 'operationId 不一致')
-  assert.equal(compare.targetCompare({ ...base, operationId: 'op' }, { ...base, operationId: 'op' }), '', '同 operationId 必须通过')
-  assert.equal(compare.targetCompare(base, { ...base, revision: 10 }), 'revision 不一致')
-  assert.equal(compare.targetCompare(base, { ...base, branchId: 'b2' }), 'branchId 不一致')
-  assert.equal(compare.targetCompare(base, { ...base, kind: 'native-only' }), 'kind 不一致')
-  // 缺身份必须拒（不得"仅双方都给才比"）。
-  const { chatId: droppedChat, ...withoutChat } = base
-  assert.equal(compare.targetCompare(withoutChat, { ...base }), 'chatId 不一致', '请求侧缺 chatId 必须拒')
-  assert.equal(compare.targetCompare(base, withoutChat), 'chatId 不一致', '回执侧缺 chatId 必须拒')
-  const { revision: droppedRevision, ...withoutRevision } = base
-  assert.equal(compare.targetCompare(withoutRevision, { ...base }), 'revision 不一致', '缺 revision 必须拒')
-  // nativeAnchor：可选，但单侧缺失必须拒；两侧都有则核坐标（reply 允许 null）。
-  const anchored = { ...base, nativeAnchor: { turn: 25, input: 334, reply: null } }
-  assert.equal(compare.targetCompare(anchored, { ...anchored }), '', '同锚点必须通过')
-  assert.equal(compare.targetCompare(anchored, { ...base }), 'nativeAnchor 一侧缺失', '请求有锚点而回执没有必须拒')
-  assert.equal(compare.targetCompare(base, { ...anchored }), 'nativeAnchor 一侧缺失', '回执有锚点而请求没有必须拒')
-  assert.equal(compare.targetCompare(anchored, { ...base, nativeAnchor: { turn: 25, input: 335, reply: null } }), 'nativeAnchor.input 不一致')
-  assert.equal(compare.targetCompare(anchored, { ...base, nativeAnchor: { turn: 25, input: 334, reply: 341 } }), 'nativeAnchor.reply 不一致')
-  assert.equal(compare.targetCompare({ ...base, nativeAnchor: { turn: 25, input: null } }, { ...base, nativeAnchor: { turn: 25, input: null } }), 'nativeAnchor 坐标不合法')
+  assert.equal(compare.targetCompare(base, { ...base }), '')
+  for (const changed of [{operationId:'op'}, {revision:10}, {branchId:'b2'}, {kind:'native-only'},
+    {chatId:undefined}, {sessionId:undefined}, {revision:undefined},
+    {nativeAnchor:{turn:25,input:334,reply:null}}, {nativeAnchor:{turn:25,input:null}}]) {
+    assert.equal(compare.targetCompare(base, {...base,...changed}), '', '同范围不按形态或坐标完整度设资格')
+    assert.equal(compare.targetCompare({...base,...changed}, base), '', '比较方向不恢复旧认证')
+  }
+  assert.equal(compare.targetCompare(base, {...base,chatId:'other'}), 'chatId 不一致')
+  assert.equal(compare.targetCompare(base, {...base,sessionId:'other'}), 'sessionId 不一致')
+  assert.equal(compare.targetCompare(base, {...base,turn:24}), 'turn 不一致')
+  assert.equal(compare.targetCompare(null, base), 'turn 不一致')
 })
 
 test('⑦ error-purge：实产物两代 getter 兼容且 ordinary 菜单逐字不变', async () => {
@@ -190,27 +174,13 @@ test('统一视图最终产物', async () => {
   // 真实源码按 rollback-pending → latest-failure → latest-send 组合施缝。
   const seamed = overlay.applyLatestSendViewTransform(
     failure.applyLatestFailureViewTransform(pending.applyRollbackPendingViewTransform(text(DOMAIN + 'chat-session-state.js'))))
-  // 两个 active helper：资格只看 pending 与后端只读 inspector，不得残留旧分类门。
-  // 退役的是**失败分类门**：状态/终态字面量与旧分支名（`ending` 这种子串会误命中 `pending`，故只列精确形态）。
-  const retired = ["'failed'", "'error'", "'aborted'", 'failureEnding', 'const ending', '.status ===']
-  // 两个 active helper 各自的确切 pending 形态（reason 走大写 Pending 的提前返回，不共用同一字面量）。
-  const pendingFormByName = {
-    latestFailureTarget: /const pending\s*=\s*chat\.rollbackPending/,
-    latestFailureCleanupReason: /if\s*\(\s*chat\.rollbackPending\s*\)\s*return/,
-  }
-  for (const name of ['latestFailureTarget', 'latestFailureCleanupReason']) {
-    const body = extractFunction(seamed, name)
-    assert.match(body, pendingFormByName[name], name + '：资格必须走 pending 分支')
-    assert.ok(body.includes('inspectNativeFailureTail('), name + '：必须走后端只读 inspector')
-    for (const token of retired) assert.ok(!body.includes(token), name + '：不得残留旧分类门 ' + token)
-  }
-  // 已统一代幂等入口：两个视图缝各自二次施缝零改写。
-  assert.equal(failure.applyLatestFailureViewTransform(seamed), seamed, 'latest-failure 视图缝二次施缝必须零改写')
-  assert.equal(overlay.applyLatestSendViewTransform(seamed), seamed, 'latest-send 视图缝二次施缝必须零改写')
-  // 半截 helper（去掉 function）必须被拒绝，不得静默产出。
-  const broken = seamed.replace('function latestFailureTarget(', 'latestFailureTarget(')
-  assert.notEqual(broken, seamed, '构造条件：必须真的去掉 function 关键字')
-  assert.throws(() => failure.applyLatestFailureViewTransform(broken), /不完整|未命中|Unexpected|Parse|token/, '半截 helper 必须被拒绝')
+  const wrapper=extractFunction(seamed,'rollbackViewFields')
+  assert.ok(wrapper.includes('latestSendTarget(chat, evidence)'))
+  assert.ok(wrapper.includes('failureTarget: rollbackTarget'))
+  assert.equal(seamed.includes('function latestFailureTarget('),false,'新作者不得复活退役分类helper')
+  assert.equal(failure.applyLatestFailureViewTransform(seamed),seamed)
+  assert.equal(overlay.applyLatestSendViewTransform(seamed),seamed)
+
 })
 
 test('旧dev.1统一视图原位升级', async () => {
@@ -233,11 +203,11 @@ test('旧dev.1统一视图原位升级', async () => {
   assert.ok(legacy.includes(OLD_CLEAR_LINE), '构造条件：旧 overlay 产物必须含旧 canClear 行')
   // 原位升级：已装 dev.1 的旧 overlay 必须被完整块替换成新形态，并回签 rollbackTargetTurn。
   const upgraded = overlay.applyLatestSendViewTransform(legacy)
-  assert.match(upgraded, /rollbackTargetTurn:\s*latestSend\?\.turn/, '升级必须回签 rollbackTargetTurn = latestSend?.turn')
+  assert.match(upgraded, /rollbackTargetTurn:\s*rollbackTarget\?\.turn/, '新作者升级必须回签统一目标轮')
   assert.equal(upgraded.includes(OLD_CLEAR_LINE), false, '升级后旧 canClear 行必须被替换（不得保留旧 overlay）')
   assert.equal(overlay.applyLatestSendViewTransform(upgraded), upgraded, '升级后当前变换二次施缝必须零改写')
   // 半截/被改块必须拒绝：只动旧完整块里一处文字。
   const mutated = legacy.replace(OLD_CLEAR_LINE, OLD_CLEAR_LINE.replace('=== true', '!== true'))
   assert.notEqual(mutated, legacy, '构造条件：必须真的改到一处旧块文字')
-  assert.throws(() => overlay.applyLatestSendViewTransform(mutated), /被修改|不完整/, '被改动的旧完整块必须拒绝，不猜删')
+  assert.equal(overlay.applyLatestSendViewTransform(mutated),upgraded,'旧overlay完整包装由新统一包装替换，不认证退役内部分类文案')
 })

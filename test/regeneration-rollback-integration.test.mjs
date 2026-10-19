@@ -14,7 +14,7 @@ import {createChatSqliteStore} from '../chat-sqlite-store.js'
 import {cleanRollback} from '../lib/clean-rollback.js'
 import {configureRollbackCleanup} from '../lib/rollback-cleanup.js'
 import {rewindRollbackHandles} from '../lib/rollback-handles.js'
-import {rollbackBarrier,rollbackSchedulingBarrier} from '../lib/rollback-barrier.js'
+import {rollbackBarrier,rollbackSchedulingBarrier,rollbackCancellationBarrier} from '../lib/rollback-barrier.js'
 import {applyRollbackTransform} from '../deploy/core-rollback-transform.mjs'
 import {applyRowTimelineTransform,applyRowHistoryTransform} from '../deploy/row-rollback-transform.mjs'
 import {applyRollbackBusinessTimelineTransform} from '../deploy/rollback-business-transform.mjs'
@@ -179,14 +179,15 @@ export async function fixture({withContext=false,physical=false}={}){
 
 for(const pause of ['readCard','native-adoption','generation','prepare'])test('审查修复R2真实作者：回退取消等待 '+pause+' 不复活正文或晚结算',async()=>{
  const f=await fixture({physical:true})
- let resume,entered
+ let resume,entered,cancelEntered
+  const cancelReady=new Promise(r=>cancelEntered=r)
  const gate=new Promise(r=>resume=r),ready=new Promise(r=>entered=r)
  let followups=0,settlements=0,reads=0
  const followup=f.agent.followup;f.agent.followup=message=>{followups++;return followup(message)}
  if(pause==='generation'){const idle=f.agent.whenIdle;f.agent.whenIdle=async()=>{await idle();entered();await gate}}
  const persistencePort={...f.persistencePort,replaceRegeneratedTail:async(...args)=>{if(pause==='native-adoption'){entered();await gate}return f.persistencePort.replaceRegeneratedTail(...args)}}
  const chats={...f.chats,readCard:async(...args)=>{if(pause==='readCard' && ++reads===1){entered();await gate}return f.chats.readCard(...args)}}
- const history=f.createHistory({chats,sessions:f.sessions,scripts:{read:async()=>undefined,continuity:{}},timeline:f.storyTimeline,queueSettlement:async()=>{settlements++},cancelSettlement:async()=>{},present:async value=>value,
+ const history=f.createHistory({chats,sessions:{...f.sessions,get:id=>{if(rollbackCancellationBarrier.has(id))cancelEntered();return f.sessions.get(id)}},scripts:{read:async()=>undefined,continuity:{}},timeline:f.storyTimeline,queueSettlement:async()=>{settlements++},cancelSettlement:async()=>{},present:async value=>value,
   persistenceProvider:()=>persistencePort,projectionsProvider:()=>f.projections,projectionCacheProvider:()=>({write:async()=>{}}),tokenMeterProvider:()=>({states:new WeakMap()}),rollbackSyncProvider:f.rollbackSync,quiesceRollback:async()=>{if(pause==='prepare' && ++reads===1){entered();await gate}},cleanupRollbackSides:async()=>{},
   sessionPatch:{replacementAllowed:()=>true,blockReason:()=>'',restoreStoredSession:stored=>f.Session.fromRestore(stored.header.id,structuredClone(stored.events),structuredClone(stored.header),stored.inheritedEventCount,'detached')}})
  try{
@@ -196,7 +197,7 @@ for(const pause of ['readCard','native-adoption','generation','prepare'])test('�
   const {latestSendTarget}=await import('../lib/latest-send.js')
   const signed=latestSendTarget(await f.read(),{events:f.session.snapshotEvents()});assert.equal(signed.turn,53,'临时生成不可签成新的用户轮')
   const rollback=history.rollback(SESSION_ID,CHAT_ID,signed).then(result=>{finished=true;return result})
-  await new Promise(r=>setImmediate(r));assert.equal(finished,false,'旧Promise没结束不能先报告回退完成')
+  await cancelReady;assert.equal(finished,false,'实际取消已进入且旧Promise没结束，不能先报告回退完成')
   resume();const generated=await observed,done=await rollback
   assert.match(generated.error?.message || '',/取消/);assert.equal(done.rolledBack.hiddenTurn,53)
   assert.equal(followups,['readCard','prepare'].includes(pause)?0:1);assert.equal(settlements,0,'取消后不得继续排新结算')
@@ -281,7 +282,7 @@ test('R3 连续两次 regen 后回退仍删净全部合成替换；后继普通�
   await successor.roundHistory.regenerate(CHAT_ID,'前置重生成')
   await successor.commitTurn(55,'后继普通输入')
   const before=await successor.read(),events=structuredClone(successor.session.snapshotEvents()),mainCount=successor.mainDb.cursor(),workerCount=successor.workerDb.cursor()
-  await assert.rejects(cleanRollback({...successor.args(),chat:before,requestedTurn:53}),/目标已经变化|会话已推进|独立输入/)
+  const stale=await cleanRollback({...successor.args(),chat:before,requestedTurn:53});assert.equal(stale.alreadyClean,true,'旧53目标不删除55新发送')
   assert.deepEqual(await successor.read(),before);assert.deepEqual(successor.session.snapshotEvents(),events)
   assert.equal(successor.mainDb.cursor(),mainCount);assert.equal(successor.workerDb.cursor(),workerCount)
  }finally{await successor.cleanup()}

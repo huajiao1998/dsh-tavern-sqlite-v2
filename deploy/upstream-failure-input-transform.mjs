@@ -72,6 +72,18 @@ export function applyTemplateRollbackInputOrderTransform(source) {
 // 供定向测试构造「旧代 v1 产物」与「原始作者源」（形态常量本身即接缝合同的一部分）。
 export const FAILURE_INPUT_FORMS = Object.freeze({ MARKER, ORIGINAL, REPLACEMENT, V1_MARKER, V1_REPLACEMENT })
 export function applyUpstreamFailureInputTransform(source) {
+  // 作者负责失败状态与保留上下文自愈；本包物理删除只经显式统一回退，不自动软隐藏。
+  if(source.includes('function repairNativeStory(')) {
+    const marker='// [dsh-tavern-native-failure-physical-only:v1]'
+    if(source.includes(marker))return source
+    for(const name of ['clearFailedTurns','cleanupFailedTurn']) {
+      const start=source.indexOf('    '+name+': async function (')
+      const end=source.indexOf('\n    },',start)
+      if(start<0 || end<start)throw Error('新版失败尾回调接缝未命中：'+name)
+      source=source.slice(0,start)+'    '+name+': async function () {\n      '+marker+' '+name+'\n      return 0'+source.slice(end)
+    }
+    return source
+  }
   if(source.includes(LEGACY_V2_REPLACEMENT))source=source.replace(LEGACY_V2_REPLACEMENT,REPLACEMENT)
   if(source.includes(LEGACY_INPUT_IMPORT))source=source.replace(LEGACY_INPUT_IMPORT,INPUT_IMPORT)
  if(source.includes(MARKER)){

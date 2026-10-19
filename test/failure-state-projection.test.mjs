@@ -173,8 +173,8 @@ test('inspectNativeFailureTail：有前轮失败 body ⇒ 越过触发条件判�
   const ledger = ledgerFailureState(chat)
   assert.deepEqual([...ledger.ledgerFailed], [112], '前提：账本里确有前轮失败操作')
   const result = inspectNativeFailureTail(chat, { session: { header: { id: 'session-1' } }, events: guardNativeTail })
-  assert.equal(result?.target ? true : false, true, '必须给出 native-only target；reason=' + String(result?.reason))
-  assert.equal(result.target.kind, 'native-only')
+  assert.equal(result?.target ? true : false, true, '必须给出 统一rollback target；reason=' + String(result?.reason))
+  assert.equal(result.target.kind, 'rollback')
   assert.equal(result.target.turn, 113)
 })
 
@@ -182,7 +182,7 @@ test('inspectNativeFailureTail：前轮 completed body 不决定最新无业务�
   const chat = chatForNativeTail({ body112Status: 'completed' })
   assert.deepEqual([...ledgerFailureState(chat).ledgerFailed], [], '前提：账本里没有任何失败 body')
   const result = inspectNativeFailureTail(chat, { session: { header: { id: 'session-1' } }, events: guardNativeTail })
-  assert.equal(result?.target?.kind, 'native-only', '前轮 completed 不构成挡签资格；reason=' + String(result?.reason))
+  assert.equal(result?.target?.kind, 'rollback', '前轮 completed 不构成挡签资格；reason=' + String(result?.reason))
   assert.equal(result.target.turn, 113)
   assert.equal(result.target.chatId, chat.id)
   assert.equal(result.target.sessionId, chat.sessionId)
@@ -195,7 +195,7 @@ test('inspectNativeFailureTail：前轮失败 body 属其它分支不决定最�
   chat.timeline.branchId = 'branch-new'
   assert.deepEqual([...ledgerFailureState(chat).ledgerFailed], [], '旧分支的失败不属于新分支')
   const result = inspectNativeFailureTail(chat, { session: { header: { id: 'session-1' } }, events: guardNativeTail })
-  assert.equal(result?.target?.kind, 'native-only', '旧分支失败 body 不得成为挡签资格；reason=' + String(result?.reason))
+  assert.equal(result?.target?.kind, 'rollback', '旧分支失败 body 不得成为挡签资格；reason=' + String(result?.reason))
   assert.equal(result.target.turn, 113)
   assert.equal(result.target.branchId, 'branch-new', '签的必须是当前最新分支，而不是旧 body 的 branch-old 归属')
   assert.equal(result.target.revision, chat._storageRevision)

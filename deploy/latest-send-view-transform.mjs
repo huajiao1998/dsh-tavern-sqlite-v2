@@ -58,6 +58,31 @@ const SIGNATURE_NEW='  function rollbackViewFields(chat, evidence = evidenceOf(c
 const VALUE_LINE='    const value = rollbackViewFieldsBase(chat, evidence, changes)\n'
 const RETURN_LINE='    return { ...value, rollbackTarget }\n'
 export function applyLatestSendViewTransform(source){
+  const nativeMarker='// [dsh-tavern-native-repair-rollback-view:v1]'
+  if(source.includes(nativeMarker))return source
+  if(source.includes('const hasRound = hasRollbackMessages(chat.messages)')) {
+    let start=source.indexOf('  function rollbackViewFields(chat, evidence, changes) {')
+    // 已装旧overlay也沿同一真实作者包装升级，不再要求旧签名。
+    if(start<0)start=source.indexOf('  function rollbackViewFields(chat, evidence = evidenceOf(chat.sessionId), changes) {')
+    const end=source.indexOf('  function rollbackViewFieldsBase(',start)
+    if(start<0 || end<start)throw Error('新版统一回退视图包装缺失')
+    const body=`  ${nativeMarker}
+  function rollbackViewFields(chat, evidence = evidenceOf(chat.sessionId), changes) {
+    const value = rollbackViewFieldsBase(chat, evidence, changes)
+    const rollbackTarget = latestSendTarget(chat, evidence)
+    return { ...value, rollbackTarget, failureTarget: rollbackTarget,
+      canRollback: rollbackTarget !== null, canClearIncompleteReply: false,
+      rollbackTargetTurn: rollbackTarget?.turn ?? null,
+      failureCleanupReason: '', rollbackUnavailableReason: '' }
+  }
+`
+    let next=source.slice(0,start)+body+source.slice(end)
+    // 原生是否可定位不再参与回退资格；重新生成/错误显示等其余能力仍由作者计算。
+    const from=next.indexOf('    const rollbackState = Array.isArray(nodes) ? rollbackAvailability(')
+    const to=next.indexOf('    const replayTarget = ',from)
+    if(from>=0 && to>from)next=next.slice(0,from)+"    const rollbackState = {canRollback: false, canClearIncompleteReply: false, reason: ''}\n"+next.slice(to)
+    return next.includes(IMPORT)?next:IMPORT+next
+  }
   if(source.includes(MARKER)){
     if(!source.includes('latestSendTarget(chat, evidence,')||!source.includes('withLatestSend({ ...value, rollbackTarget })')||!source.includes(SIGNATURE_NEW))throw Error('最新发送撤销标记存在但消费者不完整')
     if(!source.includes('rollbackTargetTurn: latestSend?.turn ?? keepLegacyTarget?.turn')) {

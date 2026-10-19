@@ -39,7 +39,7 @@ const CHAT_ID = 'fixture-failed-body-tail'
 const PREFIX_TURN = 41
 const TARGET_TURN = 42
 const NAME_POSITIVE = '失败正文物理尾识别：跨轮替换来源不妨碍清42并保留41纯前缀'
-const NAME_NEGATIVE = '失败正文物理尾识别：无原生失败结束或坐标漂移时拒绝且两库零删'
+const NAME_NEGATIVE = '退役迁移：终态缺前像旧版本不阻止删42，旧42请求不连删后继43'
 const FOREGROUND_MARKER = 'dsh-tavern/required-session-patch-v1'
 // 57 行正文形状：首 1 条 greeting assistant + **27 对普通 user/assistant** + 末 41 对 2 行 = 57 总（41 对含在末两行，不再另加）。
 // 关键证据：作者 `hasRollbackMessages`（rollback-surface.js:466-473）要求「最新非 greeting assistant 的前一条必须是 user」；
@@ -186,43 +186,30 @@ test(NAME_POSITIVE, async t => {
   assert.equal(f.synced[0]?.value?.revision, after._storageRevision, '同步帧 revision 必须等于最终 SQL 版本')
 })
 
-test(NAME_NEGATIVE, async t => {
-  // 通用撤销（不看终态与产物）：completed / 缺 turn/end / running 三种都是"最新一次发送可撤销"⇒走成功分支；
-  // 只有坐标漂移、后继推进、缺真实基准三类仍拒（精确文案 + 两库零增删）。
-  const allowed = [
-    ['原生 42 以 completed 结束（仍是最新一次发送）', { ending42: 'completed' }],
-    ['原生 42 缺 turn/end（仍是最新一次发送）', { missingEnd42: true }],
-    ['原生 42 仍 running（仍是最新一次发送）', { ending42: 'running' }],
-    ['缺业务回退基准仍实际删尾', { noBaseline: true }],
-  ]
-  for (const [label, options] of allowed) {
-    const f = await fixture(options)
-    try {
-      const target = await f.liveTarget()
-      const result = await cleanRollback({ ...f.args, requestedTurn: target })
-      assert.equal(result.turn, PREFIX_TURN, label + '：通用撤销最新发送后回到 41')
-      assert.equal(f.synced.length, 1, label + '：只发一次同步帧')
-      assert.equal(f.synced[0]?.value?.hiddenTurn, TARGET_TURN, label + '：同步帧必须指向被撤轮 42')
-      assert.equal(f.synced[0]?.value?.revision, (await f.read())._storageRevision, label + '：同步帧 revision 必须等于最终 SQL 版本')
-    } finally { await f.cleanup() }
-  }
-  // 每条负例：精确拒绝文案（与 lib/clean-rollback.js 实际 throw 对齐）+ 两库零改。
-  const cases = [
-    ['目标坐标漂移（送入 revision+1）', { targetRevisionDelta: 1 }, /撤销目标分支或版本已变化/],
-    ['43 后继已推进', { push43: true }, /撤销目标不是当前最新发送或缺少发轮前基准/],
-  ]
-  const seen = []
-  for (const [label, options, pattern] of cases) {
-    const f = await fixture(options)
-    try {
-      const beforeEvents = f.eventCount()
-      const beforeChat = structuredClone(await f.read())
-      const target = await f.liveTarget()
-      await assert.rejects(() => cleanRollback({ ...f.args, requestedTurn: target }), pattern, label + '：必须拒绝且不降级为普通回退')
-      assert.equal(f.eventCount(), beforeEvents, label + '：原生库零删')
-      assert.deepStrictEqual(await f.read(), beforeChat, label + '：业务档零改')
-      seen.push(label)
-    } finally { await f.cleanup() }
-  }
-  assert.equal(seen.length, cases.length, '全部负例必须走到断言（registry 未过滤也一次断言）')
+test(NAME_NEGATIVE, async () => {
+ const allowed=[
+  ['completed',{ending42:'completed'}],['无end',{missingEnd42:true}],
+  ['running',{ending42:'running'}],['缺前像',{noBaseline:true}],['旧版本',{targetRevisionDelta:1}],
+ ]
+ for(const [label,options] of allowed){
+  const f=await fixture(options)
+  try{
+   const prefix=f.prefixEvents(),before=await f.read()
+   await cleanRollback({...f.args,requestedTurn:await f.liveTarget()})
+   assert.deepEqual(f.listEvents(),prefix,label+'：只删42原生尾')
+   const after=await f.read()
+   assert.deepEqual(after.messages,before.messages,label+'：41正文不变')
+   assert.deepEqual(after.variables,before.variables,label+'：已有41值保留')
+   assert.equal(after.timeline.operations.op42,undefined)
+   assert.equal(f.synced.length,1)
+  }finally{await f.cleanup()}
+ }
+ const f=await fixture({push43:true})
+ try{
+  const before=await f.read(),events=f.listEvents()
+  const result=await cleanRollback({...f.args,requestedTurn:await f.liveTarget()})
+  assert.equal(result.changed,false);assert.equal(result.rolledBack.alreadyClean,true)
+  assert.deepEqual(await f.read(),before);assert.deepEqual(f.listEvents(),events)
+  assert.equal(f.synced.length,0,'旧42请求不得清43或广播假完成')
+ }finally{await f.cleanup()}
 })

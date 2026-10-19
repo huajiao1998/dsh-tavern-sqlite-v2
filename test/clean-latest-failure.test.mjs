@@ -1,5 +1,5 @@
-// 失败清理协议（failureTarget）：只清当前**最新**失败尾（Math.max），历史失败一律不动；
-// 普通回退（不传参）保持原语义；不降级、不冒认、漂移拒绝、无基准拒清、已清理无写。
+// 新旧RPC均只撤最新发送；旧请求不连删上一轮，在途物理失败复用原边界。
+// 不以失败分类、旧坐标或缺基准设资格；明确异档仍零写。
 // 夹具＝真实 Session（projection-baseline-1001 的 rc.2 Session）+ SqliteSessionDb + chat sqlite store；不读用户档、不请求模型。
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -139,138 +139,86 @@ test('最新发送成功且原生已完成：同真实 baseline 可撤 latest，
  }finally{await f.cleanup()}
 })
 
-test('失败清理拒绝历史失败：目标指向旧失败轮（非 Math.max）⇒ 明确拒绝且零改',async()=>{
+test('退役迁移：旧历史轮请求不删当前尾且返回无变化',async()=>{
  const f=await fixture()
  try{
-  const before=snapshot(await f.read())
-  await assert.rejects(cleanRollback({...f.args,requestedTurn:2,failureTarget:{...f.target(),turn:2,operationId:'op2'}}),/撤销目标不是当前最新发送或缺少发轮前基准/)
-  assert.equal(snapshot(await f.read()),before)
+  const before=await f.read(),events=f.mainDb.cursor()
+  const result=await cleanRollback({...f.args,failureTarget:{...f.target(),turn:2,operationId:'op2'}})
+  assert.equal(result.changed,false);assert.equal(result.rolledBack.alreadyClean,true)
+  assert.deepEqual(await f.read(),before);assert.equal(f.mainDb.cursor(),events)
  }finally{await f.cleanup()}
 })
 
-test('失败清理拒绝漂移与后继推进：revision/branch 变更或目标轮之后已有完成轮 ⇒ 零改',async()=>{
+test('退役迁移：同范围旧分支版本不阻止真实删24，后继25不被旧请求连删',async()=>{
  const f=await fixture()
  try{
-  const before=snapshot(await f.read())
-  await assert.rejects(cleanRollback({...f.args,failureTarget:{...f.target(),revision:f.current._storageRevision+1}}),/撤销目标分支或版本已变化/)
-  await assert.rejects(cleanRollback({...f.args,failureTarget:{...f.target(),branchId:'branch-other'}}),/撤销目标分支或版本已变化/)
-  assert.equal(snapshot(await f.read()),before,'两种漂移拒绝后业务零改')
-  await f.update(f.base.id,async chat=>{chat.messages=[...chat.messages,{role:'assistant',turn:TARGET_TURN+1,text:'轮25',swipeId:0,swipes:['轮25']}];return chat},{source:'fixture.turn25'})
-  const pushed=snapshot(await f.read())
-  await assert.rejects(cleanRollback({...f.args,chat:await f.read(),failureTarget:await f.liveTarget()}),/之后仍有正文行|之后仍有成功正文检查点|之后仍有任务推进|撤销目标不是当前最新发送或缺少发轮前基准/)
-  assert.equal(snapshot(await f.read()),pushed,'后继推进拒绝后业务零改')
+  const request={...f.target(),revision:-1,branchId:'旧坐标',operationId:'旧操作'}
+  await cleanRollback({...f.args,failureTarget:request})
+  assert.equal(f.mainDb.cursor(),f.boundary24)
+  assert.deepEqual((await f.read()).messages,f.base.messages)
+  f.appendTurn(25,'轮25')
+  const before=await f.read(),events=f.mainDb.cursor()
+  const result=await cleanRollback({...f.args,chat:before,failureTarget:request})
+  assert.equal(result.changed,false);assert.equal(result.rolledBack.alreadyClean,true)
+  assert.deepEqual(await f.read(),before);assert.equal(f.mainDb.cursor(),events)
  }finally{await f.cleanup()}
 })
 
+test('退役迁移：物理失败后旧凭据或普通入口都续同一pending边界，不连删',async()=>{
+ for(const entry of ['legacy','ordinary','rollbackId']){
+  const f=await fixture()
+  try{
+   f.setFault(true)
+   await assert.rejects(cleanRollback({...f.args,failureTarget:f.target()}),/夹具故障点/)
+   f.setFault(false)
+   const pending=(await f.read()).rollbackPending
+   assert.equal(pending.turn,TARGET_TURN)
+   const options=entry==='ordinary'?{requestedTurn:TARGET_TURN,failureTarget:null}
+     :{failureTarget:{...f.target(),...(entry==='rollbackId'?{rollbackId:pending.id}:{})}}
+   const result=await cleanRollback({...f.args,...options})
+   assert.equal(result.turn,23);assert.equal(result.rolledBack.sync.id,pending.id)
+   assert.equal((await f.read()).rollbackPending,undefined)
+   assert.deepEqual((await f.read()).messages,f.base.messages)
+   assert.equal(f.mainDb.cursor(),f.boundary24)
+   const revision=(await f.read())._storageRevision
+   await cleanRollback({...f.args,failureTarget:{...f.target(),rollbackId:pending.id}})
+   assert.equal(f.mainDb.cursor(),f.boundary24,'重传不得再删23')
+   assert.equal((await f.read())._storageRevision,revision,'补发同步不改业务版本')
+  }finally{await f.cleanup()}
+ }
+})
 
-
-test('失败清理重试：pending 记录 failureTarget，同目标带 rollbackId 可续跑，异目标冒认被拒',async()=>{
+test('退役迁移：同一清理重传只补同步，继续游玩后也不连删新轮',async()=>{
  const f=await fixture()
  try{
-  f.setFault(true)
-  await assert.rejects(cleanRollback({...f.args,failureTarget:f.target()}),/夹具故障点/)
-  f.setFault(false)
-  const pending=(await f.read()).rollbackPending
-  assert.ok(pending, '失败层保留完成意图')
-  assert.equal(pending.failureTarget.operationId,'body')
-  assert.equal(pending.failureTarget.turn,TARGET_TURN)
-  assert.equal(pending.turn,TARGET_TURN)
-  // 四项同值但缺 retry id ⇒ 不得凭旧 op/turn 冒认
-  await assert.rejects(cleanRollback({...f.args,failureTarget:f.target()}),/拒绝冒认/)
-  // 异目标（含带 rollbackId）冒认 ⇒ 拒
-  await assert.rejects(cleanRollback({...f.args,failureTarget:{...f.target(),operationId:'op2',turn:2,rollbackId:pending.id}}),/拒绝冒认/)
-  // 四项 exact + rollbackId===pending.id 方可续跑（原 branch/revision 取 pending 里的发起时快照）
-  const result=await cleanRollback({...f.args,requestedTurn:TARGET_TURN,failureTarget:{...f.target(),rollbackId:pending.id}})
-  assert.equal(result.turn,23,'revision 已推进仍须可按身份重试')
-  const after=await f.read()
-  assert.equal(after.rollbackPending,undefined)
-  assert.deepEqual(after.hiddenDshErrorTurns,OLD_FAILED_TURNS)
-  assert.equal(f.mainDb.db.prepare('SELECT count(*) n FROM events WHERE seq >= ?').get(f.boundary24).n,0)
+  const request=f.target()
+  const first=await cleanRollback({...f.args,requestedTurn:request})
+  const before=await f.read(),events=f.mainDb.cursor()
+  const again=await cleanRollback({...f.args,requestedTurn:request})
+  assert.equal(again.rolledBack.sync.id,first.rolledBack.sync.id,'补发同一清理同步')
+  assert.deepEqual(await f.read(),before);assert.equal(f.mainDb.cursor(),events)
+  f.appendTurn(25,'轮25')
+  const pushed=await f.read(),cursor=f.mainDb.cursor()
+  const replay=await cleanRollback({...f.args,requestedTurn:request})
+  assert.equal(replay.changed,false);assert.equal(replay.rolledBack.alreadyClean,true)
+  assert.deepEqual(await f.read(),pushed);assert.equal(f.mainDb.cursor(),cursor)
  }finally{await f.cleanup()}
 })
 
-test('失败清理已清且历史失败仍在：重复同目标 changed 无写，目标已变明确拒绝',async()=>{
+test('退役迁移：foreign身份在正常pending完成重传三路均拒且两库零写',async()=>{
  const f=await fixture()
  try{
-  await cleanRollback({...f.args,requestedTurn:f.target()})
-  const cleaned=await f.read(),revision=cleaned._storageRevision,events=f.mainDb.db.prepare('SELECT count(*) n FROM events').get().n,cleanTarget=f.target()
-  // 关键：重复时 availability 仍带 21 个历史 failed（不是 failed=[]），且入口走 requestedTurn 对象（宿主真实 wiring）。
-  const historicalFailed=()=>({failedTurns:OLD_FAILED_TURNS,canRollback:true})
-  const again=await cleanRollback({...f.args,requestedTurn:cleanTarget,availability:historicalFailed})
-  assert.equal(again.changed,false,'历史 failed 仍在也必须 changed 无写，不得 reject')
-  assert.equal(again.alreadyClean,true)
-  assert.equal(again.turn,23,'alreadyClean 返回同形完整 view（最新视图）')
-  assert.deepEqual(again.variables,{hp:23},'完整 view 载荷在场')
-  assert.deepEqual((await f.read()).hiddenDshErrorTurns,OLD_FAILED_TURNS,'21 个历史失败保持，正是它证明不是靠 failed=[] 判已清')
-  assert.equal(again.rolledBack.alreadyClean,true)
-  assert.equal(again.rolledBack.sync,undefined,'alreadyClean 不带 sync')
-  assert.equal(again.rolledBack.cleanedFailureTarget.turn,TARGET_TURN)
-  assert.equal(again.rolledBack.cleanedFailureTarget.operationId,'body')
-  assert.equal(again.rolledBack.cleanedFailureTarget.branchId,cleanTarget.branchId)
-  assert.equal(again.rolledBack.cleanedFailureTarget.revision,cleanTarget.revision)
-  assert.equal(f.syncFrames.length,1,'已清理重入不得再发同步帧（仅首清一次）')
-  const after=await f.read()
-  assert.equal(after._storageRevision,revision,'已清理重入不得写业务（revision 不变）')
-  assert.equal(f.mainDb.db.prepare('SELECT count(*) n FROM events').get().n,events)
-  assert.equal(after.rollbackPending,undefined)
-  // 目标 op 缺 且 事件尾已推进（玩家继续玩）：目标已变 ⇒ 明确拒绝且一条不删，不得误报 alreadyClean。
-  f.appendTurn(TARGET_TURN+1,'轮25')
-  const pushed=snapshot(await f.read()),eventsPushed=f.mainDb.db.prepare('SELECT count(*) n FROM events').get().n
-  await assert.rejects(cleanRollback({...f.args,chat:await f.read(),requestedTurn:await f.liveTarget(),availability:historicalFailed}),/目标已变化|状态不明确|撤销目标不是当前最新发送或缺少发轮前基准/)
-  assert.equal(snapshot(await f.read()),pushed,'目标已变拒绝路径不得删任何正文')
-  assert.equal(f.mainDb.db.prepare('SELECT count(*) n FROM events').get().n,eventsPushed)
- }finally{await f.cleanup()}
-})
-
-test('失败清理foreign身份拒绝：foreign目标在alreadyClean与pending两路都拒且零写',async()=>{
- const f=await fixture()
- try{
-  const before=snapshot(await f.read()),events=f.mainDb.db.prepare('SELECT count(*) n FROM events').get().n
-  // 1) 目标 op 仍在（正常清理路）：foreign chatId/sessionId 先拒，不得进入任何清理分支。
-  await assert.rejects(cleanRollback({...f.args,failureTarget:{...f.target(),chatId:'other-chat'}}),/与本档身份不一致：chatId/)
-  await assert.rejects(cleanRollback({...f.args,failureTarget:{...f.target(),sessionId:'other-session'}}),/与会话身份不一致：sessionId/)
-  assert.equal(snapshot(await f.read()),before,'foreign 目标不得写业务')
-  assert.equal(f.mainDb.db.prepare('SELECT count(*) n FROM events').get().n,events)
-  // 2) pending 现场：先造 pending（夹具故障点），再以 foreign 目标重试 ⇒ 身份先拒（不给冒认判定放行机会）。
-  f.setFault(true)
-  await assert.rejects(cleanRollback({...f.args,failureTarget:f.target()}),/夹具故障点/)
-  f.setFault(false)
-  const withPending=await f.read(),pendingId=withPending.rollbackPending.id,revisionPending=withPending._storageRevision
-  assert.ok(pendingId,'必须有 pending 现场')
-  await assert.rejects(cleanRollback({...f.args,failureTarget:{...f.target(),chatId:'other-chat',rollbackId:pendingId}}),/与本档身份不一致：chatId/)
-  await assert.rejects(cleanRollback({...f.args,failureTarget:{...f.target(),sessionId:'other-session',rollbackId:pendingId}}),/与会话身份不一致：sessionId/)
-  const stillPending=await f.read()
-  assert.equal(stillPending.rollbackPending.id,pendingId,'pending 必须原样保留')
-  assert.equal(stillPending._storageRevision,revisionPending,'pending 路上的 foreign 目标不得写业务')
-  // 3) 同目标带 rollbackId 仍可续跑（foreign 拒绝不影响合法重试），随后进入 alreadyClean 现场。
-  const resumed=await cleanRollback({...f.args,requestedTurn:TARGET_TURN,failureTarget:{...f.target(),rollbackId:pendingId}})
-  assert.equal(resumed.turn,23)
-  const cleaned=await f.read(),revisionCleaned=cleaned._storageRevision,eventsCleaned=f.mainDb.db.prepare('SELECT count(*) n FROM events').get().n
-  assert.equal(cleaned.rollbackPending,undefined)
-  // 4) alreadyClean 路：foreign 目标必须先拒，不得误报 changed/alreadyClean。
-  await assert.rejects(cleanRollback({...f.args,requestedTurn:{...f.target(),chatId:'other-chat'},availability:()=>({failedTurns:OLD_FAILED_TURNS,canRollback:true})}),/与本档身份不一致：chatId/)
-  const afterClean=await f.read()
-  assert.equal(afterClean._storageRevision,revisionCleaned,'alreadyClean 路上的 foreign 目标不得写业务')
-  assert.equal(f.mainDb.db.prepare('SELECT count(*) n FROM events').get().n,eventsCleaned)
- }finally{await f.cleanup()}
-})
-
-test('失败清理无目标重试拒绝：pending带failureTarget时不得以普通回退自动完成',async()=>{
- const f=await fixture()
- try{
-  f.setFault(true)
-  await assert.rejects(cleanRollback({...f.args,failureTarget:f.target()}),/夹具故障点/)
-  f.setFault(false)
-  const pending=(await f.read()).rollbackPending
-  assert.ok(pending?.failureTarget,'pending 必须记录 failureTarget')
-  const before=snapshot(await f.read()),revision=(await f.read())._storageRevision,events=f.mainDb.db.prepare('SELECT count(*) n FROM events').get().n
-  // 不带失败目标的普通回退入口：必须拒，不得替失败清理意图自动收尾（也不能静默降级）。
-  await assert.rejects(cleanRollback({...f.args,requestedTurn:TARGET_TURN,failureTarget:null}),/请用同一失败目标重试/)
-  const after=await f.read()
-  assert.equal(after.rollbackPending.id,pending.id,'pending 必须保留，不得被普通回退自动完成')
-  assert.equal(after._storageRevision,revision,'拒绝路径不得写业务')
-  assert.equal(snapshot(after),before)
-  assert.equal(f.mainDb.db.prepare('SELECT count(*) n FROM events').get().n,events)
+  const rejectForeign=async()=>{
+   const before=await f.read(),cursor=f.mainDb.cursor()
+   for(const changed of [{chatId:'other'},{sessionId:'other'}])
+    await assert.rejects(cleanRollback({...f.args,failureTarget:{...f.target(),...changed}}),/回退请求不属于当前存档/)
+   assert.deepEqual(await f.read(),before);assert.equal(f.mainDb.cursor(),cursor)
+  }
+  await rejectForeign()
+  f.setFault(true);await assert.rejects(cleanRollback({...f.args,failureTarget:f.target()}),/夹具故障点/);f.setFault(false)
+  await rejectForeign()
+  await cleanRollback({...f.args,failureTarget:f.target()})
+  await rejectForeign()
  }finally{await f.cleanup()}
 })
 

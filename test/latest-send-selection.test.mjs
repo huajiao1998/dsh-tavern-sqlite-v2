@@ -1,6 +1,6 @@
 // 最新发送选择（latestSendRecord / latestSendTarget）独占新叶：
 //   ① 四个操作状态共用同一 max turn；历史 failed 早轮不抢；新原生轮没基准不得误回前一轮；narrow 与完整坐标一致。
-//   ② narrow 摘要（no anchor）与完整目标坐标一致；无基准的新原生轮一律不签（不依赖 failed 列表）。
+//   ② narrow 摘要（no anchor）与完整目标坐标一致；无基准的新原生轮仍可签最新范围（不依赖failed列表）。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { latestSendRecord, latestSendTarget } from '../lib/latest-send.js'
@@ -60,7 +60,7 @@ test('最新发送选择：无 target 时 baseline 只认 body/checkpoint 现有
   const fromCheckpoint = latestSendTarget(checkpointChat, { events }, checkpointChat._storageRevision)
   assert.equal(fromCheckpoint.turn, 53, 'checkpoint 有基准时必须可签（不依赖 failed 列表）')
   assert.equal(fromCheckpoint.operationId, 'bodyLatest', 'op 存在时仍以 op 身份优先')
-  // body 与 checkpoint 都无基准：不签（也不回落更早轮）。
+  // body与checkpoint都无基准：仍签最新轮，不回落更早轮。
   const bare = chatOf({ latestBaseline: null, olderFailed: true, nativeOnly: false })
   bare.timeline.operations.bodyLatest = { kind: 'body', role: 'body', status: 'running', turn: 53, userText: '最新输入' }
   assert.equal(latestSendTarget(bare, { events }, bare._storageRevision).turn, 53, '无前像仍可回退最新轮')

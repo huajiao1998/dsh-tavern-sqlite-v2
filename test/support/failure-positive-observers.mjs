@@ -7,18 +7,7 @@ const INDEX_REL = 'tavern-plugin/lib/index.js'
 const VIEW_REL = 'tavern-plugin/lib/domain/chat-session-state.js'
 const DI_KEYS = ['appendMessages: appendMessagesNarrow,', 'setMessageFloor: setMessageFloorNarrow,']
 const FAILURE_RPC = 'args.failureTarget || args.expectedTurn'
-const FAILURE_FIELDS = [
-  'failureTarget: latestFailureTarget(chat, replayTarget, evidence),',
-  'failureCleanupReason: latestFailureCleanupReason(chat, replayTarget, evidence),',
-  'canClearIncompleteReply: latestFailureTarget(chat, replayTarget, evidence) !== null,',
-  'failureTarget: latestFailureTarget(chat, previous.value.replayFailedTurn === null ? null : {turn: previous.value.replayFailedTurn}, evidence),',
-]
-/** 最终视图必须共用统一目标路径（窄摘要消费已迁 `lib/latest-send.js`：视图不再持有旧的 narrow 状态门）。
- *  此处只核 **ACTIVE 视图产物**里真实存在的接线，不用 lib 源码文本冒称产物内容。 */
-const FINAL_VIEW_NEEDLES = [
-  'latestSendTarget(chat, evidence,',
-  'rollbackTargetTurn: latestSend?.turn',
-]
+const FINAL_VIEW_NEEDLES = ['latestSendTarget(chat, evidence)', 'rollbackTargetTurn: rollbackTarget?.turn', 'failureTarget: rollbackTarget', 'canClearIncompleteReply: false']
 
 export function registerFailureTests(test, lifecycle) {
   test('最新失败接线：标准完整施缝真作者树含DI与failureTarget并ready', async () => {
@@ -40,14 +29,8 @@ export function registerFailureTests(test, lifecycle) {
     assert.equal(index.includes('async function setMessageFloorNarrow('), true, 'DI 闭包必须在位（setMessageFloor）')
     assert.equal(index.includes(FAILURE_RPC), true, 'RPC 必须带 failureTarget 参数接线')
     const view = activeSource(installed.installed[VIEW_REL], VIEW_REL)
-    assert.equal(view.includes('function latestFailureTarget(chat, replayTarget, evidence) {'), true, '视图必须带 latestFailureTarget 助手（含 evidence）')
-    assert.equal(view.includes('function latestFailureCleanupReason(chat, replayTarget, evidence) {'), true, '视图必须带 latestFailureCleanupReason 助手（含 evidence）')
-    for (const needle of FINAL_VIEW_NEEDLES) assert.equal(view.includes(needle), true, '最终视图统一目标接线缺失：' + needle)
-    assert.equal(view.includes('failureEnding'), false, '退役分类 helper failureEnding 不得残留在最终视图产物')
-    for (const field of FAILURE_FIELDS) assert.equal(view.includes(field), true, '视图字段接线缺失：' + field)
-    // 缺基准原因已改由后端只读 inspector 提供：视图不再持有旧文案字面量（只核真实路径）。
-    assert.equal(view.includes('inspectNativeFailureTail(chat,evidence,'), true, '缺基准原因必须由后端只读 inspector 提供')
-    assert.equal(view.includes("?.reason || ''"), true, 'inspector 的原因文本必须如实接线（不猜删）')
+    for(const needle of FINAL_VIEW_NEEDLES)assert.ok(view.includes(needle),'最终统一视图缺失：'+needle)
+    assert.equal(view.includes('function latestFailureTarget('),false,'新作者不复活退役分类助手')
     // owned 垫片：applyStandardSeams 必须**真渲染**出 native-only/RPC 依赖的导出（不只 ready）
     const shimDomain = installed.installed['tavern-plugin/lib/domain/storage-rollback.js']
     assert.equal(shimDomain.includes("import { storagePackage } from './storage-package.js'"), true, 'domain 垫片必须走 storagePackage 转出')
@@ -57,7 +40,7 @@ export function registerFailureTests(test, lifecycle) {
     assert.equal(shimDomain.includes('cleanupRollbackHeadIndex'), false, '退役L4不应再由垫片转出')
     // 视图就在 lib/domain，`./storage-rollback.js` 相对解析即该 domain 垫片；必须真 import（不是只写在常量里）
     assert.equal(VIEW_REL.includes('lib/domain/'), true, '被接线的视图必须位于 domain（相对 import 才指到该垫片）')
-    assert.equal(view.includes("import { inspectNativeFailureTail } from './storage-rollback.js'"), true, '视图必须真的 import 该导出')
+    assert.equal(view.includes("import { latestSendTarget } from './storage-rollback.js'"), true, '最终视图直接import统一目标')
     // 该 evidence import 属于 index.js（沿用 :93 的 index）；视图侧只需下一句的 inspectNativeFailureTail
     assert.equal(index.includes("import { readFailureEvidence as readFailureEvidenceFromQuery } from './domain/storage-rollback.js'"), true, 'index 证据读口必须由 domain 垫片转出')
     // owned 导出必须是**真 runtime 函数类型**（presence 不等 type），与 core 实际实现对照

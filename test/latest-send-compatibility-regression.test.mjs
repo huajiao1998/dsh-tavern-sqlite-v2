@@ -1,6 +1,6 @@
 // 最新发送兼容回归（独占新文件；真实 latestSendRecord/latestSendTarget，**不 mock selector**）。
 // 只用小对象，无任何用户数据。四叶各自独立：
-//   ① rollbackPending.failureTarget 在途（无 ordinaryTarget）⇒ 必须 null（不得回落签 52 基准）
+//   ① 在途清理回放同一turn/id（不得回落签52）
 //   ② cp-only 的 row-v1（rowBefore+participants）形态可签最新 53
 //   ③ 同轮 body 无基准而 cp 有 businessBefore ⇒ 仍签 body 的 operationId，source 是 cp
 //   ④ 操作终态/状态名不改变 target
@@ -21,17 +21,16 @@ const base = overrides => ({
   ...overrides,
 })
 
-test('兼容回归①：rollbackPending.failureTarget 在途且已回到52基准时 latestSendTarget 必须 null', () => {
-  const chat = base({ rollbackPending: { id: 'pending-1', failureTarget: { kind: 'native-only', turn: 53 }, requestedTurn: 53 } })
-  assert.equal(latestSendTarget(chat, { events: [] }, chat._storageRevision), null, '在途回退（无 ordinaryTarget）不得签任何目标，尤其不得回落签 52')
-  assert.equal(latestSendRecord(chat, { events: [] })?.turn, 52, '记录层仍看得到 52 基准（证明 null 来自 pending 分支而非无目标）')
-  const plain = base()
-  assert.equal(latestSendTarget(plain, { events: [] }, plain._storageRevision)?.turn, 52, '对照：同一对象去掉 pending 后 52 是可签的 ⇒ null 由 pending 分支造成')
-  // ordinaryTarget 已在 pending 里时按其身份回放（overlay 凭据重试路径），不重新计算。
-  const ordinaryTarget = { kind: 'rollback', chatId: 'chat-compat', sessionId: 'session-compat', branchId: 'branch-compat', revision: 9, turn: 52 }
-  const withOrdinary = base({ rollbackPending: { id: 'pending-1', failureTarget: { kind: 'native-only', turn: 53 }, ordinaryTarget } })
-  const replayed = latestSendTarget(withOrdinary, { events: [] }, withOrdinary._storageRevision)
-  assert.deepEqual(replayed, ordinaryTarget, 'pending.ordinaryTarget 存在时必须原样回放该身份')
+test('退役迁移：pending回放同一次清理目标，不回落已恢复的上一轮', () => {
+  const target = {kind:'native-only',turn:53,chatId:'chat-compat',sessionId:'session-compat'}
+  const pending = {id:'pending-1',turn:53,failureTarget:target}
+  const chat = base({rollbackPending:pending})
+  assert.equal(latestSendRecord(chat,{events:[]}).turn,52,'记录层是恢复后的52')
+  assert.deepEqual(latestSendTarget(chat,{events:[]}),{...target,kind:'rollback',turn:53,rollbackId:'pending-1'})
+  assert.equal(latestSendTarget(base(),{events:[]}).turn,52,'无在途意图才选择当前52')
+  const ordinaryTarget = {...target,kind:'rollback',revision:9,branchId:'branch-compat'}
+  const ordinary = base({rollbackPending:{...pending,ordinaryTarget}})
+  assert.deepEqual(latestSendTarget(ordinary,{events:[]}),{...ordinaryTarget,rollbackId:'pending-1'})
 })
 
 test('兼容回归②：cp-only 的 row-v1（rowBefore+participants）可签最新53', () => {

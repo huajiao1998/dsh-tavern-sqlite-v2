@@ -406,13 +406,16 @@ export function applyRollbackTransform(source) {
     throw new Error('作者 round-history.js 已存在他人的回退清理接线（' + foreign.join('、') + '）—— 拒绝叠加，请先还原作者原样')
   }
   const anchors = ROLLBACK_ANCHORS
+  const repairSignature = anchors.signature.replace('sessionPatch })', 'sessionPatch, repairNative })')
+  const signature = source.includes(repairSignature) ? repairSignature : anchors.signature
+  const signatureNext = signature === repairSignature ? SIGNATURE_NEXT.replace('sessionPatch,\n', 'sessionPatch, repairNative,\n') : SIGNATURE_NEXT
   if (source.includes('  async function rollbackRecent(') || source.includes('  async function regenRecent(')) {
     let latest = replaceOnce(source, anchors.import, anchors.import + '\n' + IMPORT_LINE.trimEnd() + '\n' + ROLLBACK_MARKER, '新布局import锚点')
-    latest = replaceOnce(latest, anchors.signature, SIGNATURE_NEXT, '新布局createRoundHistory参数表')
+    latest = replaceOnce(latest, signature, signatureNext, '新布局createRoundHistory参数表')
     return { text: applyLatestCleanRollbackTransform(latest), changed: true, version: ROLLBACK_TRANSFORM_VERSION, markers: [] }
   }
   let out = replaceOnce(source, anchors.import, anchors.import + '\n' + IMPORT_LINE.trimEnd(), 'import 锚点')
-  out = replaceOnce(out, anchors.signature, SIGNATURE_NEXT, 'createRoundHistory 参数表')
+  out = replaceOnce(out, signature, signatureNext, 'createRoundHistory 参数表')
   out = replaceOnce(out, anchors.suppressed, SUPPRESSED_NEXT, 'suppressedDshTurns 累积')
   out = replaceOnce(out, anchors.prepareFallback, PREPARE_NEXT, 'prepareRollbackIntent 的 catch fallback')
   out = replaceOnce(out, anchors.cancelSettlementCatch, CANCEL_SETTLEMENT_NEXT, 'cancelSettlement 的 catch-warn')

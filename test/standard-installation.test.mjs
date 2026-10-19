@@ -606,10 +606,12 @@ test('标准装配：真实请求扩展对 bootstrap 缺 version 拒绝、补 ve
   inventory.apply(fakeCtx, { enabled: true })
   assert.equal(typeof provider?.prepare, 'function', '真实 apply 必须注册 dsh_plugin_packages 的 prepare')
   const prepare = () => provider.prepare({ body: {}, signal: new AbortController().signal })
-  // 缺 version 一次：真实 resolver 不缓存失败，恢复字节后同一 provider 再调即可成功。
+  // 当前本机SDK接受缺version清单（identityFromManifest返回name-only），并缓存身份。
   writeFileSync(bootstrapFile, JSON.stringify({ name: bootstrap.name, private: true, type: 'module' }, null, 2) + '\n', 'utf8')
-  await assert.rejects(prepare(), /must declare non-empty name and version/, '缺 version 的 bootstrap 清单必须让真实请求扩展 prepare 拒绝')
+  const missing=await prepare()
+  assert.ok(missing.value.packages.some(item=>item.name===bootstrap.name && item.version===undefined),'当前SDK真实name-only合同')
   writeFileSync(bootstrapFile, sourceBootstrap, 'utf8')
+  inventory.apply(fakeCtx,{enabled:true}) // 新resolver读取恢复后的实际安装代，不误用已缓存name-only。
   const prepared = await prepare()
   const packages = prepared.value.packages
   assert.equal(prepared.value.version, 1)

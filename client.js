@@ -91,61 +91,10 @@ window.__ModuleLoader__.load({
     const isOriginal = result => result?.legacy === true && result.migrated === false
       && result.readonly === true && /^legacy:\d+:\d+$/.test(result.stamp || '')
 
-    /**
-     * 目标身份比较的**唯一实现**（浏览器侧）：kind（body/native-only 二者之一）/ turn / branchId / revision
-     * 必须 exact；body 认非空 operationId；native-only 不得带 operationId 且 endSeq/eventCount === endSeq+1；
-     * chatId/sessionId 仅在两边都是字符串时比；另加 incomplete 与不完整轮末尾坐标一致性校验。
-     * 返回 "" 表示同一身份，否则返回不一致原因（用于拒绝清理与拒绝接受回执）。
-     *
-     * 与 deploy/error-purge-transform.mjs 的 TARGET_COMPARE_LINES **不是**逐字同规则（2026-10-13 核对）：
-     * 那份自述"仅用于严格识别旧 marked 菜单的升级输入"，且缺 incomplete/endSeq 校验 ⇒ 是更旧的子集。
-     * 两者运行时分处浏览器 bundle 与 host transform，本轮不合并、不猜共享机制；改任一份都需同时核另一份语义。
-     */
-    function targetCompare(ft, cft) {
-      if (!ft || !cft || typeof ft !== 'object' || typeof cft !== 'object') return '目标缺失'
-      const kindOf = value => (value === 'rollback' ? 'rollback' : (value === 'native-only' ? 'native-only' : (value === undefined || value === 'body' ? 'body' : null)))
-      const ftKind = kindOf(ft.kind)
-      const cftKind = kindOf(cft.kind)
-      if (ftKind === null || cftKind === null || ftKind !== cftKind) return 'kind 不一致'
-      if (!Number.isSafeInteger(cft.turn) || Number(cft.turn) !== Number(ft.turn)) return 'turn 不一致'
-      if (ftKind === 'rollback') {
-        // 统一目标（kind: 'rollback'）：身份必须齐备且一致（缺字段即拒，绝不"仅双方都给才比"）；
-        // nativeAnchor 可选，但一侧有另一侧无必须拒；reply 允许 null。
-        for (const field of ['chatId', 'sessionId', 'branchId']) {
-          if (typeof ft[field] !== 'string' || ft[field] === '' || cft[field] !== ft[field]) return field + ' 不一致'
-        }
-        if (!Number.isSafeInteger(ft.revision) || !Number.isSafeInteger(cft.revision) || Number(cft.revision) !== Number(ft.revision)) return 'revision 不一致'
-        const ftOp = ft.operationId === undefined ? null : ft.operationId
-        const cftOp = cft.operationId === undefined ? null : cft.operationId
-        if (ftOp !== cftOp) return 'operationId 不一致'
-        if (ftOp !== null && (typeof ftOp !== 'string' || ftOp === '')) return 'operationId 不合法'
-        const ftAnchor = ft.nativeAnchor === undefined ? null : ft.nativeAnchor
-        const cftAnchor = cft.nativeAnchor === undefined ? null : cft.nativeAnchor
-        if ((ftAnchor === null) !== (cftAnchor === null)) return 'nativeAnchor 一侧缺失'
-        if (ftAnchor !== null) {
-          if (typeof ftAnchor !== 'object' || typeof cftAnchor !== 'object') return 'nativeAnchor 形状不合法'
-          if (!Number.isSafeInteger(ftAnchor.turn) || !Number.isSafeInteger(ftAnchor.input)
-            || !Number.isSafeInteger(cftAnchor.turn) || !Number.isSafeInteger(cftAnchor.input)) return 'nativeAnchor 坐标不合法'
-          for (const field of ['turn', 'input', 'reply']) {
-            const left = ftAnchor[field] === undefined ? null : ftAnchor[field]
-            const right = cftAnchor[field] === undefined ? null : cftAnchor[field]
-            if (left !== right) return 'nativeAnchor.' + field + ' 不一致'
-          }
-        }
-        return ''
-      }
-      if (typeof ft.branchId !== 'string' || ft.branchId === '' || cft.branchId !== ft.branchId) return 'branchId 不一致'
-      if (!Number.isSafeInteger(cft.revision) || !Number.isSafeInteger(ft.revision) || Number(cft.revision) !== Number(ft.revision)) return 'revision 不一致'
-      if ((ft.incomplete === true) !== (cft.incomplete === true)) return 'incomplete 不一致'
-      if (ft.incomplete === true && (!Number.isSafeInteger(ft.endSeq) || ft.eventCount !== ft.endSeq + 1 || cft.endSeq !== ft.endSeq || cft.eventCount !== ft.eventCount)) return '不完整轮末尾坐标不一致'
-      if (ftKind === 'native-only') {
-        if (ft.operationId !== undefined || cft.operationId !== undefined) return 'native 不得带 operationId'
-        if (!Number.isSafeInteger(ft.endSeq) || ft.endSeq <= 0 || !Number.isSafeInteger(ft.eventCount) || ft.eventCount !== ft.endSeq + 1) return 'native 目标形状不合法'
-        if (!Number.isSafeInteger(cft.endSeq) || cft.endSeq <= 0 || !Number.isSafeInteger(cft.eventCount) || cft.eventCount !== cft.endSeq + 1) return 'native 回执形状不合法'
-        if (Number(cft.endSeq) !== Number(ft.endSeq) || Number(cft.eventCount) !== Number(ft.eventCount)) return 'native 身份不一致'
-      } else if (typeof cft.operationId !== 'string' || cft.operationId === '' || cft.operationId !== ft.operationId) return 'operationId 不一致'
-      if (typeof ft.chatId === 'string' && typeof cft.chatId === 'string' && cft.chatId !== ft.chatId) return 'chatId 不一致'
-      if (typeof ft.sessionId === 'string' && typeof cft.sessionId === 'string' && cft.sessionId !== ft.sessionId) return 'sessionId 不一致'
+    // 只比较用户选中的清理范围；原生对象形态/版本/锚点交给作者自愈。
+    function targetCompare(request, actual) {
+      if (!request || !actual || Number(request.turn) !== Number(actual.turn)) return 'turn 不一致'
+      for (const key of ['chatId', 'sessionId']) if (request[key] && actual[key] && request[key] !== actual[key]) return key + ' 不一致'
       return ''
     }
 
@@ -463,7 +412,7 @@ window.__ModuleLoader__.load({
           },
           /**
            * 失败清理的**唯一实现**（页头/dock/作者错误行都调它）：后端身份与同连接 wait、定向 refresh 全在此。
-           * 步骤：取当前 canonical failureTarget → 校验请求目标身份（含 rollbackId 过期）→ 经桥 rpc("rollbackTurn")
+           * 步骤：取当前最新清理范围 → 经桥rpc("rollbackTurn") → 核对清理回执范围。
            * → 回执核 cleanedFailureTarget 与请求 same 身份 → alreadyClean 只 refresh 不 wait → 否则等
            * sessions.waitForTavernRollbackSync(rb.sync) 后定向 refresh。不安装旧 view、不 global notify。
            * 返回后端回执原文（调用方据此判断）。抛错＝未清理/未确认，绝不静默成功。
@@ -486,15 +435,12 @@ window.__ModuleLoader__.load({
               throw new Error('清理目标不是当前最新失败轮，拒绝清理')
             }
             const liveTarget = current.target
-            // 无论是否同一引用都必须过一遍 targetCompare（形状/身份/新鲜度统一判定），再过 rollbackId。
+            // 只限制选中范围；不按kind、终态、revision或nativeAnchor给清理对象设资格。
             const ft = failureTarget || liveTarget
             const staleReason = targetCompare(ft, liveTarget)
             if (staleReason !== '') throw new Error('清理目标已过期（与当前视图不一致），拒绝清理：' + staleReason)
-            if ((ft.rollbackId || null) !== (liveTarget.rollbackId || null)) throw new Error('清理目标已过期（重试身份不一致），拒绝清理')
             // 新旧凭据都由执行端取消收口，不在视图侧按活动或错误分类阻止用户选择。
             const unifiedTarget = !!(ft && ft.kind === 'rollback')
-            const liveActivity = handle.getSnapshot && handle.getSnapshot() && handle.getSnapshot().view
-              ? handle.getSnapshot().view.activity : null
             // 统一目标按 expectedTurn=ft 发送且**不带** failureTarget（否则与 clean 入口身份冲突）；legacy 保持原样。
             const resp = unifiedTarget
               ? await view.request('rollbackTurn', { expectedTurn: ft }, owner)
@@ -506,11 +452,11 @@ window.__ModuleLoader__.load({
             if (unifiedTarget) {
               if (!rb) throw new Error('统一回退未返回同步凭据，不更新本地状态')
               // 同步凭据硬必须：缺 rb.sync 一律拒绝（绝不静默跳过等待，避免"库已删、页面未知"）。
-              if (rb.sync === undefined || rb.sync === null) throw new Error('统一回退缺少同步凭据（rolledBack.sync），拒绝更新本地状态')
+              if (rb.alreadyClean !== true && (rb.sync === undefined || rb.sync === null)) throw new Error('统一回退缺少同步凭据（rolledBack.sync），拒绝更新本地状态')
               if (rb.alreadyClean !== true) await sessionsRef.waitForTavernRollbackSync(rb.sync)
             } else {
-              if (!rb || !rb.cleanedFailureTarget) throw new Error('清理未确认目标失败轮，不更新本地状态')
-              const targetMismatch = targetCompare(ft, rb.cleanedFailureTarget)
+              if (!rb || (!rb.alreadyClean && !rb.cleanedFailureTarget)) throw new Error('清理未确认目标失败轮，不更新本地状态')
+              const targetMismatch = rb.cleanedFailureTarget ? targetCompare(ft, rb.cleanedFailureTarget) : ''
               if (targetMismatch !== '') throw new Error('清理回执目标与请求不一致，拒绝更新：' + targetMismatch)
               if (rb.alreadyClean !== true) await sessionsRef.waitForTavernRollbackSync(rb.sync)
             }

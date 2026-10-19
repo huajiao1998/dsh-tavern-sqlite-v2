@@ -58,7 +58,7 @@ test('易变清理链：真实SQL状态经缓存和脏投影保持7目标，静�
  try {
   const full=await store.update('volatile-chat',()=>chat()),state=await store.readSessionState(full.id,{scoped:true})
   assert.equal(state.messages[0].text,undefined);assert.equal(state.messages[0].variables,undefined)
-  assert.equal(state.messages[1].text,'上轮保存编辑');assert.equal(state.messages[1].bodyEdit.id,'edit-six');assert.equal(state.messages[1].variables,undefined);assert.equal(state.messages[1].displayRuntime,undefined)
+  assert.equal(state.messages[1].text,undefined,'普通状态投影不带正文；最终目标从真实事件签发');assert.equal(state.messages[1].variables,undefined);assert.equal(state.messages[1].displayRuntime,undefined)
   let native=events(),busy=false,proofs=0
   const evidence=()=>({events:native,nodes:[1,4,7],cleanupIdle:!busy,foregroundActive:busy,backgroundActive:false})
   const stateView=context.api.createSessionStateView({activity:()=>idle,evidence:()=>({events:native,nodes:[1,4,7]}),sharedMappings:false})
@@ -95,7 +95,7 @@ test('易变清理链：真实SQL状态经缓存和脏投影保持7目标，静�
   native=events()
   await store.update(full.id,current=>({...current,_storageRevision:current._storageRevision+1,runtimeInputs:{7:{turn:7,payload:'不可随投影带出'}},foregroundError:{turn:7,payload:'不可带出'}}))
   const partial=await store.readSessionState(full.id,{scoped:true})
-  assert.equal(partial.runtimeInputs['7'].turn,7);assert.equal(partial.runtimeInputs['7'].payload,undefined);assert.equal(partial.foregroundError.payload,undefined)
+  assert.equal(partial.runtimeInputs,undefined,'新作者不将运行payload带入普通session状态投影');assert.equal(partial.foregroundError,undefined)
   const refused=await hostContext.api.projectCachedSessionView(partial,opening,idle)
   // 分层：最终 overlay 无可执行 target 时可静默（不展示旧错误分类），但这不代表签名依据消失。
   assert.equal(applyLatestFailureHostTransform(host),host);assert.equal(applyLatestSendViewTransform(view),view,'最后一层是 latest-send overlay：幂等必须用它校验，不能拿旧 failure transform 复验')

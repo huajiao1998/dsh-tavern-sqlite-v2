@@ -27,76 +27,54 @@ const idle={cleanupIdle:true,foregroundActive:false,backgroundActive:false,activ
 const evidenceOf=(events=eventsOf(),flags={})=>({session:{header:{id:'session-incomplete'}},events,...idle,...flags})
 const inspect=(chat=chatOf(),evidence=evidenceOf())=>inspectNativeFailureTail(chat,evidence,chat._storageRevision)
 const bodyFailed=()=>{const chat=chatOf();chat.messages.push({role:'assistant',turn:7,text:'a7'});chat.timeline.operations.body7={id:'body7',kind:'body',status:'completed',turn:7,committedBranchId:'branch-live',background:{phase:'failed'},businessBefore:{version:1,fields:{variables:{hp:6}},messageCount:2,participants:{},operationIds:['body6'],operationStates:{body6:chat.timeline.operations.body6}}};chat.timeline.checkpoints.push({id:'cp7',turn:7});return chat}
-test('不完整清理A：活动态不决定签出，未知事件本身不拒，错引用与坐标不连续仍拒',()=>{
- const chat=chatOf(),result=inspect(chat)
- assert.deepEqual(result.target,{kind:'native-only',incomplete:true,chatId:chat.id,sessionId:chat.sessionId,turn:7,branchId:'branch-live',revision:11,endSeq:5,eventCount:6})
- // 活动/前后台忙不再决定资格：target 仍可签（消费者自己决定是否点击），不因 busy 变 null
- for(const flags of [{cleanupIdle:false},{foregroundActive:true},{backgroundActive:true},{activity:{phase:'pending',busy:false}},{activity:{phase:'running',busy:true}}])assert.equal(inspect(chat,evidenceOf(undefined,flags)).target?.incomplete,true,'活动态不得取消签出资格')
- for(const modify of [c=>{c.messages.push({role:'assistant',turn:7})},c=>{c.timeline.checkpoints.push({turn:7})},c=>{c.timeline.participants.p={turn:7}},c=>{c.timeline.operations.partial={kind:'agent',turn:7}}]){const c=chatOf();modify(c);assert.equal(inspect(c).target,null)}
- // 未知事件类型本身不再拒（交纯尾与引用链预检）
- for(const type of ['tool/result','assistant/action','unknown/event']){const events=eventsOf();events.push({seq:6,type,data:{turn:8}});assert.equal(inspect(chat,evidenceOf(events)).target?.incomplete,true,'未知事件类型本身不得拒')}
- // 外来 source 归属不在此层校验：inspector 只判身份/连续 seq/已有业务/owned runtime（failure-cleanup-target.js），
- // source/reference 安全由下游 preflight 负责；此处不伪造"不安全引用可签＝安全删除"的期待。
- const latest=eventsOf();latest.push({seq:6,type:'turn/start',data:{turn:8}});assert.equal(inspect(chat,evidenceOf(latest)).target?.incomplete,true,'最新 turn/start 未 end 也可签')
- const broken=eventsOf();broken[3].seq=9;assert.equal(inspect(chat,evidenceOf(broken)).target,null)
- assert.equal(inspect(chat,evidenceOf(eventsOf().slice(0,-1))).target?.turn,7,'未end不改变最新发送身份')
- assert.equal(inspect(chat,{events:eventsOf()}).target?.turn,7,'签出不要求idle旁证')
- const noIdentity=chatOf();delete noIdentity.sessionId;assert.equal(inspect(noIdentity).target,null,'缺实际会话身份仍拒')
+test('兼容原生出口：活动和完整度不再设资格，始终定位实际最新轮',()=>{
+ const chat=chatOf()
+ assert.equal(inspect(chat).target.kind,'rollback')
+ assert.equal(inspect(chat).target.turn,7)
+ for(const flags of [{cleanupIdle:false},{foregroundActive:true},{backgroundActive:true},{activity:{phase:'running',busy:true}}])assert.equal(inspect(chat,evidenceOf(undefined,flags)).target.turn,7)
+ for(const modify of [c=>c.messages.push({role:'assistant',turn:7}),c=>c.timeline.checkpoints.push({turn:7}),c=>{c.timeline.participants.p={turn:7}},c=>{c.timeline.operations.partial={kind:'agent',turn:7}}]) {const c=chatOf();modify(c);assert.equal(inspect(c).target.turn,7)}
+ for(const type of ['tool/result','assistant/action','unknown/event']) {const events=eventsOf();events.push({seq:6,type,data:{turn:8}});assert.equal(inspect(chat,evidenceOf(events)).target.turn,8)}
+ const broken=eventsOf();broken[3].seq=9;assert.equal(inspect(chat,evidenceOf(broken)).target.turn,7,'旧坐标形态不是对象准入条件')
+ assert.equal(inspect(chat,evidenceOf(eventsOf().slice(0,-1))).target.turn,7)
+ const partial=chatOf();delete partial.sessionId;assert.equal(inspect(partial).target.turn,7,'视图缺字段不取消按钮；实际档由路由定位')
 })
-test('不完整清理原生尾：用户入队与旧帧精确替换可保前缀，工具块或错误引用拒绝',()=>{
- const chat=chatOf(),trace={chatId:chat.id,turn:6,operationId:'operation6',frameId:'frame6',branchId:'prior',basedOnRevision:5},source={kind:'plugin',plugin:'dsh-tavern',form:'foreground-frame',trace}
- const old={seq:0,type:'user/message',data:{id:'frame',role:'user',source,content:[{type:'text',text:'old context'}]},surfaceOp:'append'}
- const events=[old,{seq:1,type:'turn/start',data:{turn:6}},{seq:2,type:'turn/end',data:{turn:6,reason:{kind:'completed'}}},
-  {seq:3,type:'agent/inbox/spliced',data:{target:'next-turn',start:0,inserted:[{id:'queued',source:{kind:'user'}}]}},
-  {seq:4,type:'turn/start',data:{turn:7}},
-  {seq:5,type:'agent/inbox/spliced',data:{target:'next-turn',start:0,removedCount:1,inserted:[]}},
-  {seq:6,type:'user/message',data:{...old.data,content:[{type:'text',text:'retained old context'}]},sourceEventSeqs:[0],surfaceOp:{op:'replace',startSeq:0,endSeq:0}},
-  ...eventsOf().slice(3).map((event,index)=>({...event,seq:7+index}))]
- assert.equal(inspect(chat,evidenceOf(events)).target?.incomplete,true)
- // 全部被删除的事件间引用无需保留；真正危险的是保留前缀仍引用已删尾段。
- const diagnose=log=>preflightRollbackAtSeq({log,header:{id:chat.sessionId},surfaceManager:{},snapshotEvents:()=>log},2,{strict:false,foregroundExact:true})
- assert.equal(diagnose(events).ok,true,'完整尾段可删；未传运行接线仅诊断边界与引用')
- const unsafe=structuredClone(events);unsafe[0].sourceEventSeqs=[5]
- const preflight=diagnose(unsafe)
- assert.equal(preflight.ok,false,'保留前缀引用待删尾须拒')
- assert.equal(preflight.violations[0].code,'DANGLING_REFERENCE','必须命中实际引用护栏')
- // foreign source（plugin 归属）同样交下游 preflight：inspector 只判身份/连续 seq/已有业务/owned runtime。
- const tool=eventsOf();tool[4].data.message.content.push({type:'tool-call',name:'unknown'});assert.equal(inspect(chat,evidenceOf(tool)).target?.incomplete,true,'工具块本身不再拒（清单合同已退役）')
+test('兼容原生出口：工具块、未知引用和用户入队形态不参与对象资格',()=>{
+ const chat=chatOf(),events=eventsOf()
+ events[4].data.message.content.push({type:'tool-call',name:'unknown'})
+ events[3].sourceEventSeqs=[999]
+ const result=inspect(chat,evidenceOf(events))
+ assert.equal(result.cleanable,true);assert.equal(result.target.turn,7)
+ const session={log:events,header:{id:chat.sessionId},snapshotEvents:()=>events}
+ assert.equal(preflightRollbackAtSeq(session,2,{foregroundExact:true}).boundarySeq,2,'切点导出只定位范围，不认证对象')
 })
-test('正常结算轮：已登记业务在各后台phase同一前像均可撤销',()=>{
+test('正常结算轮：原生兼容出口与业务查询均不按后台phase拒绝最新轮',()=>{
  const db=new DatabaseSync(':memory:')
  try {
   db.exec('CREATE TABLE archive_timeline_nodes(node_key TEXT,value_json TEXT); CREATE TABLE archive_messages(message_json TEXT)')
   for(const phase of ['failed','completed','pending','running',undefined]) {
    const chat=bodyFailed();chat.timeline.operations.body7.background.phase=phase
-   assert.equal(inspect(chat).target,null)
+   assert.equal(inspect(chat).target.turn,7)
    db.exec('DELETE FROM archive_timeline_nodes')
    db.prepare('INSERT INTO archive_timeline_nodes VALUES (?,?)').run('operations:body7',JSON.stringify(chat.timeline.operations.body7))
-   assert.equal(queryFailureCleanup(db,{revision:11,timeline:chat.timeline}).cleanable,true,'已登记业务同一前像 ⇒ 各 phase 均可撤销')
+   assert.equal(queryFailureCleanup(db,{revision:11,timeline:chat.timeline}).cleanable,true)
   }
- } finally {db.close()}
- const rowOnly=chatOf();rowOnly.messages.push({role:'assistant',turn:7,mvu:{receipt:{status:'unchanged'}}});assert.equal(inspect(rowOnly).target,null)
+ }finally{db.close()}
+ const rowOnly=chatOf();rowOnly.messages.push({role:'assistant',turn:7,mvu:{receipt:{status:'unchanged'}}});assert.equal(inspect(rowOnly).target.turn,7)
 })
 test('不完整清理接线：真实视图helper与统一目标同用真实前像，活动及成功均可撤',async()=>{
  const source=applyLatestSendViewTransform(await composedFailureViewText())
  assert.equal(applyLatestSendViewTransform(source),source,'实际最后施缝须幂等')
- assert.throws(()=>applyLatestSendViewTransform(source.replace('function latestFailureTarget(', 'function missingTarget(')),/缺失|不唯一/)
- const nodes=parse(source,{ecmaVersion:'latest',sourceType:'module'}).body.filter(n=>n.type==='FunctionDeclaration'&&['latestFailureTarget','latestFailureCleanupReason'].includes(n.id?.name))
- assert.equal(nodes.length,2)
- const context=vm.createContext({inspectNativeFailureTail})
- vm.runInContext(nodes.map(n=>source.slice(n.start,n.end)).join('\n')+'\n globalThis.targetOf=latestFailureTarget;globalThis.reasonOf=latestFailureCleanupReason;',context)
- assert.equal(context.targetOf(chatOf(),null,evidenceOf()).incomplete,true)
- assert.equal(context.reasonOf(chatOf(),null,evidenceOf()),'')
- assert.equal(context.targetOf(chatOf(),null,undefined),null,'无实际原生证据不得猜空尾')
- assert.equal(context.targetOf(bodyFailed(),null,evidenceOf()),null,'已登记业务不得空尾清理')
- for(const flags of [{cleanupIdle:false},{foregroundActive:true},{backgroundActive:true},{activity:{phase:'pending',busy:false}},{activity:{phase:'running',busy:true}}])assert.equal(context.targetOf(chatOf(),null,evidenceOf(undefined,flags)).turn,7)
+ assert.equal(typeof source,'string','新版统一入口不再依赖旧失败资格锚点')
+ assert.match(source,/latestSendTarget\(chat, evidence\)/)
+ assert.match(source,/canRollback: rollbackTarget !== null/)
+ assert.match(source,/canClearIncompleteReply: false/)
  const normal=bodyFailed();normal.timeline.operations.body7.background.phase='completed'
  for(const chat of [bodyFailed(),normal]){
   const target=latestSendTarget(chat,evidenceOf());assert.equal(target.kind,'rollback');assert.equal(target.turn,7)
  }
- const toolEvidence=evidenceOf();toolEvidence.events[4].data.message.content.push({type:'tool-call'});assert.equal(context.targetOf(chatOf(),null,toolEvidence).turn,7)
- assert.match(source,/rollbackTargetTurn: latestSend\?\.turn \?\? keepLegacyTarget\?\.turn/)
- assert.match(source,/failureTarget: latestSend !== null \? latestSend : keepLegacyTarget/)
+ const toolEvidence=evidenceOf();toolEvidence.events[4].data.message.content.push({type:'tool-call'});assert.equal(latestSendTarget(chatOf(),toolEvidence).turn,7)
+ assert.match(source,/rollbackTargetTurn: rollbackTarget\?\.turn \?\? null/)
+ assert.match(source,/failureTarget: rollbackTarget/)
 })
 test('不完整清理接线：标准装卸真实作者树导出运行器与实时DI，保留现场源码',()=>{
  const f=prepareCommentAuthorTree();assert.ok(f)
@@ -112,7 +90,7 @@ test('不完整清理接线：标准装卸真实作者树导出运行器与实�
    for(const rel of ['tavern-plugin/lib/index.js','tavern-plugin/lib/domain/round-history.js','tavern-plugin/lib/domain/foreground-handoff.js','tavern-plugin/lib/domain/settlement-jobs.js','tavern-plugin/lib/domain/chat-session-state.js'])assert.equal(readFileSync(path.join(f.appDir,rel),'utf8'),f.original.get(rel))
  } finally {f.cleanup()}
 })
-test('不完整清理接线：菜单共享服务活动可清，目标坐标漂移零RPC',async()=>{
+test('不完整清理接线：菜单活动与残缺坐标可清，错范围零RPC',async()=>{
  const source=readFileSync(new URL('../client.js',import.meta.url),'utf8')
  let plugin,ui,snapshot={view:{failureTarget:inspect().target,activity:{phase:'idle',busy:false}}},requests=0,waited=0
  const handle={getSnapshot:()=>snapshot,subscribe:()=>()=>{}}
@@ -125,10 +103,13 @@ test('不完整清理接线：菜单共享服务活动可清，目标坐标漂�
  for(const activity of [{phase:'pending',busy:false},{phase:'running',busy:true},{phase:'failed',busy:true}]){snapshot={view:{...snapshot.view,activity}};assert.equal(ui.readFailureTarget(handle).turn,7);await ui.cleanFailure('session-incomplete',7,inspect().target)}
  requests=0;waited=0
  snapshot={view:{failureTarget:inspect().target,activity:{phase:'idle',busy:false}}}
- await assert.rejects(ui.cleanFailure('session-incomplete',7,{...inspect().target,incomplete:undefined}),/不一致/)
- await assert.rejects(ui.cleanFailure('session-incomplete',7,{...inspect().target,endSeq:6,eventCount:7}),/不一致/)
- assert.equal(requests,0);assert.equal(waited,0)
- await ui.cleanFailure('session-incomplete',7,inspect().target);assert.equal(requests,1)
+ await ui.cleanFailure('session-incomplete',7,{...inspect().target,incomplete:undefined})
+ await ui.cleanFailure('session-incomplete',7,{...inspect().target,endSeq:6,eventCount:7})
+ assert.equal(requests,2);assert.equal(waited,0,'已清理回执不等待新同步帧')
+ await assert.rejects(ui.cleanFailure('session-incomplete',7,{...inspect().target,turn:6}),/不一致|过期/)
+ await assert.rejects(ui.cleanFailure('session-incomplete',7,{...inspect().target,chatId:'other-chat'}),/不一致|过期/)
+ assert.equal(requests,2,'错轮或异档不能发送RPC')
+ await ui.cleanFailure('session-incomplete',7,inspect().target);assert.equal(requests,3)
 })
 test('不完整清理窗口：真实投影将chat身份与同快照后台活动送往唯一签名函数',async()=>{
  const deps={};for(const key of REQUIRED_FUNCTIONS){let owner=deps;const parts=key.split('.');for(const part of parts.slice(0,-1))owner=owner[part]??=( {} );owner[parts.at(-1)]=()=>null}
@@ -143,7 +124,7 @@ test('不完整清理窗口：真实投影将chat身份与同快照后台活动�
  const chat={...chatOf(),backgroundConfigVersion:1,conversationFeaturesVersion:1},window={from:0,to:1,messageCount:2,revision:11,nativeFailureCheckpointTurn:6}
  const projector=createSessionWindowProjector(deps)
  const result=await projector.project({chat,window,activity:idle.activity})
- assert.equal(result.view.target?.incomplete,true);assert.deepEqual(calls,[[chat.sessionId,chat.id]])
+ assert.equal(result.view.target?.kind,'rollback');assert.equal(result.view.target.turn,7);assert.deepEqual(calls,[[chat.sessionId,chat.id]])
  const pending={phase:'pending',busy:false};const active=await projector.project({chat,window,activity:pending});assert.equal(active.view.evidence.activity,pending);assert.equal(active.view.target?.turn,7,'实时活动证据透传，但不决定最新发送资格')
 })
 test('不完整清理接线：实际宿主闭包读取前台和后台运行器，缺证明明确拒绝',async()=>{

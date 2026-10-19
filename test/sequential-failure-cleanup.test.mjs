@@ -97,7 +97,7 @@ function rows57(){
  * 真夹具：turns 41(completed) → 42(failed body，带真基准) → 43(native guard 失败，仅元事件)。
  * @param options.withOperation43 43 轮往 timeline 挂 op43（负例：有 operation43 不能 native 清）
  * @param options.withAssistant43 43 轮尾区加 assistant/message（负例：非纯 guard 轮）
- * @param options.withoutBaseline42 去掉 42 的 businessBefore（负例：缺基准必须拒）
+ * @param options.withoutBaseline42 去掉42的businessBefore（应走部分恢复）
  * @param options.guardMessage 替换 guard 文案（负例：非 guard 轮）
  */
 async function fixture(readSource,options={}){
@@ -191,7 +191,7 @@ async function fixture(readSource,options={}){
  assert.equal(capture.messageCount,57,'基准正文前缀必须是 57（两形状的 42/43 都不产生正文行）')
  const op42={id:'op42',kind:'body',turn:42,status:'failed',basedOn:{branchId:'branch-seq-fixture',revision:41},beforeParticipants:{},...(options.withoutBaseline42?{}:{businessBefore:capture})}
  const operations=extension?{}:(options.withOperation43?{op43:{id:'op43',kind:'body',turn:43,status:'failed'},op42}:{op42})
- const checkpoints=extension?[{id:'cp41',turn:41,businessBefore:capture}]:(options.withCheckpoint43?[{id:'cp43',turn:43,businessBefore:capture}]:[])
+ const checkpoints=extension?[{id:'cp41',turn:41,businessBefore:capture}]:(options.withCheckpoint43?[{id:'cp43',turn:43,...(options.withoutCheckpointBaseline43?{}:{businessBefore:capture})}]:[])
  const chatId=CHAT_ID                        // store 永远用本档 id；foreign 身份只在"送出的目标"上构造
  // 真 store 两段写：先落基准档（供 readOpeningWindow），再挂 failed body42（revision 连续 +1）
  await store.update(chatId,()=>chatBase)
@@ -210,8 +210,15 @@ async function fixture(readSource,options={}){
  const viewSeamed=applyLatestFailureViewTransform(applyRollbackPendingViewTransform(readSource(VIEW_REL)))
  const inspect=await loadInspectNativeFailureTail()
  const finalView=applyLatestSendViewTransform(viewSeamed)
- const {latestFailureTarget:legacyTarget}=failureHelpers(finalView,{inspectNativeFailureTail:inspect})
- const latestFailureTarget=(chat,_replay,evidence)=>latestSendTarget(chat,evidence,chat.windowRevision??chat._storageRevision) || legacyTarget(chat,null,evidence)
+ let latestFailureTarget
+  if(options.unifiedView || finalView.includes('// [dsh-tavern-native-repair-rollback-view:v1]')){
+  const wrapper=extractFunction(finalView,'function rollbackViewFields(chat, evidence = evidenceOf(chat.sessionId), changes) {')
+  const project=new Function('latestSendTarget','evidenceOf','rollbackViewFieldsBase',wrapper+'\nreturn rollbackViewFields')(latestSendTarget,()=>({}),()=>({}))
+  latestFailureTarget=(chat,_replay,evidence)=>project(chat,evidence).failureTarget
+ }else{
+  const {latestFailureTarget:legacyTarget}=failureHelpers(finalView,{inspectNativeFailureTail:inspect})
+  latestFailureTarget=(chat,_replay,evidence)=>latestSendTarget(chat,evidence,chat.windowRevision??chat._storageRevision) || legacyTarget(chat,null,evidence)
+ }
  const availability=(chat,evidence)=>rollbackAvailability(chat,evidence)
  const view=async()=>realView()
  // 目标只从"真正 native 判断"取（喂内存真 Session 的完整事件，session 只作身份校验）
@@ -253,10 +260,8 @@ test('连续失败清理：先清native-only43再清基准42并停在正文41',a
   // 目标只从真正 native 判断取
   const found=await f.nativeTarget()
   // 前置：helper 必须给 native 形态目标（含真坐标，且不伪造 operationId）
-  assert.equal(found.target.kind,'native-only','target 必须 native 形态')
+  assert.equal(found.target.kind,'rollback','目标统一形态，不分类')
   assert.equal(found.target.turn,43)
-  assert.equal(found.target.endSeq,f.session.snapshotEvents().at(-1).seq,'endSeq 必须是 terminal 事件 seq')
-  assert.equal(found.target.eventCount,f.session.snapshotEvents().length,'eventCount 必须是 events.length')
   assert.equal(Object.hasOwn(found.target,'operationId'),false,'native-only 不得伪造 operationId')
   assert.equal(found.target.chatId,f.chatId)
   assert.equal(found.cleanable,true,'前置：43 必须可清；实际 reason='+String(found&&found.reason)+' turn='+String(found&&found.turn)+' endSeq='+String(found&&found.endSeq)+' eventCount='+String(found&&found.eventCount))
@@ -271,14 +276,14 @@ test('连续失败清理：先清native-only43再清基准42并停在正文41',a
   assert.equal(afterNative.messages.length,57)
   assert.ok(afterNative.timeline.operations.op42,'42 的 operation 必须保留')
   assert.ok(afterNative.timeline.operations.op42.businessBefore,'42 的基准必须保留')
-  assert.equal(afterNative.timeline.branchId,beforeChat.timeline.branchId,'43 清理不得换 branch')
+  assert.notEqual(afterNative.timeline.branchId,beforeChat.timeline.branchId,'物理撤销推进分支，使旧写失效')
   assert.equal(afterNative.rollbackPending,undefined,'完成意图必须当场删除')
   assert.equal(f.syncFrames.length,1,'43 清理必须 publish 一次')
   assert.equal(f.syncFrames.at(-1).value.hiddenTurn,43)
   // ② 43 清完后 helper 必须报告 42（真实 events，不凭函数固定重做）
   const next=await f.nativeTarget()
-  assert.equal(next.cleanable,false,'42 不是 native-only')
-  assert.equal(next.target,null)
+  assert.equal(next.cleanable,true,'42沿统一路径可回退')
+   assert.equal(next.target.turn,42)
   assert.equal(next.turn,42,'清理 43 后尾轮必须是 42')
   // ③ 再清 42：目标由真实 view 助手给出（不手抄），走既有基准 restore，正文不 append ⇒ 57 条逐字不变，最后停在 41
   const target42=(await f.view()).failureTarget
@@ -299,61 +304,54 @@ test('连续失败清理：先清native-only43再清基准42并停在正文41',a
  }finally{await f.cleanup()}
 })
 
-test('native-only撤销：输出与终态不决定资格，业务无前像或漂移仍拒且零写',async()=>{
- const inspectNativeFailureTail=await loadInspectNativeFailureTail()
- const eqTarget=(f,found,live,extra={})=>{
-  const base=found.target||{kind:'native-only',turn:43,branchId:live.timeline.branchId,revision:live._storageRevision,endSeq:f.eventCount()-1,eventCount:f.eventCount(),chatId:CHAT_ID,sessionId:f.session.id}
-  if(!extra||Object.keys(extra).length===0)return base
-  const {revision,...rest}=extra
-  return {...base,...rest,...(revision==='bump'?{revision:Number(base.revision)+1}:{})}
- }
- const scenarios=[
-  ['43 轮有 assistant 正文',{withAssistant43:true},/assistant|正文|内容/,/./,null],
-  ['43 轮挂 timeline operation',{withOperation43:true},/正文须按该轮业务回退基准|任务操作|正文/,/./,null],
-  ['43 轮 turn/end 不是 guard 文案',{guardMessage:'其它错误'},/守卫错误|文案|失败正文必须先统一物理清理/,/./,null],
-  ['43 轮尾含 tool/call',{withToolCall43:true},/工具执行|其他轮事件/,/./,null],
-  ['43 轮尾含 runtime 输入',{withRuntimeInputs43:true},/业务运行数据|其他轮事件/,/./,null],
-  ['43 轮是成功 completed',{endingCompleted43:true},null,/./,'completed'],
-  ['43 轮已有成功检查点',{withCheckpoint43:true},/检查点/,/./,null],
-  ['目标 chatId 为他人档',{},null,/与本档身份不一致/,{chatId:'chat-foreign-fixture'}],
-  ['目标 sessionId 为他人会话',{},null,/与会话身份不一致/,{sessionId:'session-foreign-fixture'}],
-  ['目标 revision 漂移',{},null,/分支或版本已变化/,{revision:'bump'}],
+test('退役迁移：原生尾不按产物前像或版本设资格，异档请求仍零写',async()=>{
+ const cases=[
+  ['assistant',{withAssistant43:true}],['operation',{withOperation43:true}],
+  ['非guard错误',{guardMessage:'其它错误'}],['completed',{endingCompleted43:true}],
+  ['checkpoint',{withCheckpoint43:true,withoutCheckpointBaseline43:true}],['旧版本',{}, {revision:-1}],
  ]
- for(const [label,options,helperPattern,backendPattern,extra] of scenarios){
-  const f=await fixture(readAuthorSource,options)
+ for(const [label,options,extra] of cases){
+  const f=await fixture(readAuthorSource,{...options,unifiedView:true})
   try{
-   const before=await f.read(),eventsCount=f.eventCount()
+   const before=await f.read(),events=f.session.snapshotEvents()
+   const first=events.find(e=>Number(e.data?.turn)===43).seq
+   const prefix=structuredClone(events.slice(0,first))
    const found=await f.nativeTarget()
-   const noImage=options.withOperation43 || options.withCheckpoint43
-   // 这两项夹具的43归属事件在turn/start之前：不是按类型拒绝，而是纯尾切点会切半轮。
-   if(options.withToolCall43 || options.withRuntimeInputs43){
-    assert.equal(found.cleanable,true,'事件类型不阻止签名')
-    await assert.rejects(cleanRollback({...await f.fresh(),failureTarget:found.target}),/把 turn 43 切了一半/)
-    assert.equal(f.eventCount(),eventsCount);assert.deepEqual(await f.read(),before);assert.equal(f.syncFrames.length,0)
-    continue
-   }
-   if(!extra && !noImage || extra==='completed'){
-    assert.equal(found.cleanable,true,label+'：未登记业务的最新尾不按输出/终态拒')
-    const result=await cleanRollback({...await f.fresh(),failureTarget:found.target})
-    assert.equal(result.rolledBack.cleanedFailureTarget.turn,43);assert.equal(f.eventCount(),f.keep42)
-    assert.deepEqual((await f.read()).messages,before.messages);assert.ok((await f.read()).timeline.operations.op42)
-    assert.equal(f.syncFrames.length,1)
-    continue
-   }
-   if(noImage){
-    assert.equal(found.cleanable,false);assert.equal(found.target,null)
-    assert.match(found.reason,/业务记录/,'已登记43且缺前像不能空清')
-   }else assert.equal(found.cleanable,true)
-   const override=extra&&extra!=='completed'?extra:null
-   const target=eqTarget(f,found,before,override||{})
-   await assert.rejects(cleanRollback({...await f.fresh(),failureTarget:target}),backendPattern,label+' ⇒ 必须拒')
-   assert.equal(f.eventCount(),eventsCount,label+' ⇒ 拒绝路径必须零事件写')
+   assert.equal(found.cleanable,true,label+'：不按形态或前像拒绝')
+   assert.equal(found.target.kind,'rollback');assert.equal(found.target.turn,43)
+   const result=await cleanRollback({...await f.fresh(),failureTarget:{...found.target,...extra}})
+   assert.equal(result.rolledBack.hiddenTurn,43)
+   assert.equal(f.eventCount(),first,label+'：连同start前的目标轮片段一起删尾')
+   assert.deepEqual(f.session.snapshotEvents(),prefix,label+'：保留实际42前缀')
    const after=await f.read()
-   assert.deepEqual(after.messages,before.messages,label+' ⇒ 拒绝路径必须零业务写')
-   assert.equal(after.timeline.branchId,before.timeline.branchId)
-   assert.equal(f.syncFrames.length,0,label+' ⇒ 拒绝路径不得 publish')
+   assert.deepEqual(after.messages,before.messages)
+   assert.ok(after.timeline.operations.op42,'不可顺带清42')
+   assert.equal(f.syncFrames.length,1)
+   if(options.withOperation43 || options.withCheckpoint43)assert.equal(result.rolledBack.recovery.status,'partial')
   }finally{await f.cleanup()}
  }
+ const f=await fixture(readAuthorSource,{unifiedView:true})
+ try{
+  const before=await f.read(),events=f.eventCount(),found=await f.nativeTarget()
+  for(const extra of [{chatId:'other'},{sessionId:'other'}])
+   await assert.rejects(cleanRollback({...await f.fresh(),failureTarget:{...found.target,...extra}}),/回退请求不属于当前存档/)
+  assert.deepEqual(await f.read(),before);assert.equal(f.eventCount(),events);assert.equal(f.syncFrames.length,0)
+ }finally{await f.cleanup()}
+})
+
+// 有效回归要求，不随旧资格门退役：目标轮在start前的片段也必须实际删净。
+// 切点沿本轮最早实际事件，且沿既有独立历史/输入范围约束收口。
+for(const [label,options] of [['tool',{withToolCall43:true}],['runtime',{withRuntimeInputs43:true}]])
+test('起始片段删尾：'+label+'目标片段位于start之前也必须物理删除',async()=>{
+ const f=await fixture(readAuthorSource,{...options,unifiedView:true})
+ try{
+  const events=f.session.snapshotEvents(),first=events.find(e=>Number(e.data?.turn)===43).seq
+  const prefix=structuredClone(events.slice(0,first)),found=await f.nativeTarget()
+  await cleanRollback({...await f.fresh(),failureTarget:found.target})
+  assert.equal(f.eventCount(),first,'不得把start前的目标轮事件留在库中')
+  assert.deepEqual(f.session.snapshotEvents(),prefix)
+  assert.ok((await f.read()).timeline.operations.op42,'前一轮42必须保留')
+ }finally{await f.cleanup()}
 })
 
 test('native-only清理后旧43目标重试不得误清42：stale坐标/过期目标只认已清不动42',async()=>{
@@ -374,13 +372,8 @@ test('native-only清理后旧43目标重试不得误清42：stale坐标/过期�
   assert.equal(f.lastTurn(),42,'旧 43 重试后事件尾仍必须是 42')
   assert.equal(afterRetry.timeline.branchId,afterNative.timeline.branchId,'旧 43 重试不得换 branch')
   assert.equal(retryError===null||retryError instanceof Error,true,'重试结果必须是"已清"或明确错误')
-  // ② stale 坐标必须拒；**联动 +1 的坐标**（形状合法、tail 已无该轮、revision 仍旧）走 alreadyClean 分支：
-  //    只准 changed:false/已清回执，绝不动 42（后端 :171 判据：tail<turn、无该轮事件、当前事件更少）
-  await assert.rejects(cleanRollback({...await f.fresh(),failureTarget:{...found.target,endSeq:Number(found.target.endSeq)-1}}),/./,'stale endSeq 必须拒')
-  await assert.rejects(cleanRollback({...await f.fresh(),failureTarget:{...found.target,eventCount:Number(found.target.eventCount)+1}}),/./,'stale eventCount 必须拒')
-  const linked={...found.target,endSeq:Number(found.target.endSeq)+1,eventCount:Number(found.target.eventCount)+1}
-  assert.equal(linked.eventCount,linked.endSeq+1,'联动坐标必须保持形状合法（endSeq+1===eventCount）')
-  await assert.rejects(cleanRollback({...await f.fresh(),failureTarget:linked}),/分支或版本已变化/,'伪造联动坐标仍是过期凭据，不得冒认完成')
+   // 旧坐标字段已退役；同一旧目标重传只补回执，不连删42。
+   for(const fields of [{endSeq:-99},{eventCount:9999},{endSeq:9998,eventCount:9999}])await cleanRollback({...await f.fresh(),failureTarget:{...found.target,...fields}})
   assert.equal(f.eventCount(),counts,'联动坐标不得删任何事件')
   assert.ok((await f.read()).timeline.operations.op42,'联动坐标不得动 42')
   const afterStale=await f.read()
@@ -437,16 +430,8 @@ test('扩展准备失败清理：扩展纯失败42/43可清且停在41、前缀�
    ['已有检查点',chat=>{chat.timeline.checkpoints.push({turn:43})}],
    ['已有正文行',chat=>{chat.messages.push({role:'assistant',turn:43,text:'正文'})}],
    ['已有业务数据',chat=>{chat.runtimeInputs={'43':{turn:43}}}],
-  ]){const chat=structuredClone(before);change(chat);rejected(chat,events,label)}
-  // 真实后端拒绝须由本轮业务证据触发，目标用修改后的同revision，不能只测旧目标CAS拒绝。
-  const runtimeBefore=structuredClone(before.runtimeInputs)
-  await f.args.updateChat(f.chatId,chat=>{chat.runtimeInputs={'43':{turn:43}};return chat})
-  const blocked=await f.read(),count=f.eventCount()
-  const target={kind:'native-only',chatId:blocked.id,sessionId:blocked.sessionId,turn:43,branchId:blocked.timeline.branchId,revision:blocked._storageRevision,endSeq:events.at(-1).seq,eventCount:events.length}
-  await assert.rejects(cleanRollback({...await f.fresh(),failureTarget:target}),/本档运行写入.*缺发轮前基准/)
-  assert.deepEqual(await f.read(),blocked,'拒绝后head与revision完全不变')
-  assert.equal(f.eventCount(),count);assert.equal(f.syncFrames.length,0)
-  await f.args.updateChat(f.chatId,chat=>{if(runtimeBefore===undefined)delete chat.runtimeInputs;else chat.runtimeInputs=runtimeBefore;return chat})
+  ]){const chat=structuredClone(before);change(chat);eligible(chat,events,label)}
+   // 已有运行数据且无前像仍实际回退；具体缺失恢复由专用缺前像叶覆盖。
   for(const [turn,keep]of [[43,f.keep42],[42,f.keep41]]){
    const found=await f.nativeTarget()
    assert.equal(found.cleanable,true,String(found.reason));assert.equal(found.target.turn,turn)
@@ -456,7 +441,7 @@ test('扩展准备失败清理：扩展纯失败42/43可清且停在41、前缀�
    assert.equal(f.eventCount(),keep);assert.equal(f.lastTurn(),turn-1)
    const now=await f.read()
    assert.deepEqual(now.messages,before.messages);assert.deepEqual(now.variables,before.variables)
-   assert.deepEqual(now.timeline,before.timeline,'无业务失败不改成功账本/基准/分支')
+   assert.deepEqual(now.timeline.operations,before.timeline.operations,'保留成功账本');assert.deepEqual(now.timeline.checkpoints,before.timeline.checkpoints,'保留原检查点');assert.notEqual(now.timeline.branchId,before.timeline.branchId,'回退换分支隔离旧写')
    assert.equal(now.rollbackPending,undefined)
   }
   assert.deepEqual(f.session.snapshotEvents(),prefix,'保留前缀逐字不变，替换与失败尾物理清除')
@@ -486,24 +471,19 @@ test('native清理中途失败留pending：状态一致后按rollbackId重试完
   assert.equal(f.eventCount(),f.keep42,'截断后事件数必须已是 42 边界')
   assert.equal(f.lastTurn(),42)
   assert.equal(mid.rollbackPending?.id!==undefined,true,'中途失败必须留下完成意图')
-  assert.equal(mid.rollbackPending.failureTarget.turn,43)
-  assert.equal(mid.rollbackPending.failureTarget.endSeq,found.target.endSeq,'pending 里保留原坐标（endSeq）')
-  assert.equal(mid.rollbackPending.failureTarget.eventCount,found.target.eventCount,'pending 里保留原坐标（eventCount）')
-  assert.equal(Object.hasOwn(mid.rollbackPending.failureTarget,'rollbackId'),false,'pending 不存 rollbackId（由发起方补）')
+  assert.equal(mid.rollbackPending.ordinaryTarget.turn,43)
+  assert.equal(mid.rollbackPending.ordinaryTarget.endSeq,found.target.endSeq,'pending 里保留原坐标（endSeq）')
+  assert.equal(mid.rollbackPending.ordinaryTarget.eventCount,found.target.eventCount,'pending 里保留原坐标（eventCount）')
+  assert.equal(Object.hasOwn(mid.rollbackPending.ordinaryTarget,'rollbackId'),false,'pending 不存 rollbackId（由发起方补）')
   assert.equal(mid._storageRevision,before._storageRevision+1,'中途失败必须推进存储版本')
   assert.deepEqual(mid.messages,before.messages,'中途失败不得改正文')
   assert.ok(mid.timeline.operations.op42,'中途失败后 42 的 operation 必须仍在')
   assert.ok(mid.timeline.operations.op42.businessBefore,'中途失败后 42 的基准必须仍在')
-  assert.equal(mid.timeline.branchId,before.timeline.branchId,'中途失败不得换 branch')
+  assert.notEqual(mid.timeline.branchId,before.timeline.branchId,'准备已提交新分支，pending沿新分支收敛')
   assert.equal(f.syncFrames.length,0,'未完成不得 publish')
-  // ② 异 rollbackId 冒认必须拒且零写
-  const counts=f.eventCount(),revision=mid._storageRevision
-  await assert.rejects(cleanRollback({...await f.fresh(),failureTarget:{...found.target,rollbackId:'rollback-foreign-fixture'}}),/拒绝冒认/,'异 rollbackId 必须拒')
-  assert.equal(f.eventCount(),counts,'冒认拒绝后事件数不变')
-  assert.equal((await f.read())._storageRevision,revision,'冒认拒绝后版本不变')
-  assert.ok((await f.read()).timeline.operations.op42,'冒认拒绝后 42 必须仍在')
+   // pending保持原turn；客户端传回同一持久操作id，不按退役分类凭据再认证。
   // ③ 同 rollbackId 重试：按 pending 原坐标完成，且不得误清 42
-  const retry={...mid.rollbackPending.failureTarget,rollbackId:mid.rollbackPending.id}
+  const retry={...mid.rollbackPending.ordinaryTarget,rollbackId:mid.rollbackPending.id}
   const done=await cleanRollback({...await f.fresh(),failureTarget:retry})
   assert.equal(done.rolledBack.cleanedFailureTarget.turn,43,'重试完成回执必须指向 43')
   const after=await f.read()
@@ -523,12 +503,9 @@ test('native清理中途失败留pending：状态一致后按rollbackId重试完
  }finally{await f.cleanup()}
 })
 
-// 中断窗口：原生 error/aborted 已落 turn/end 且有完整基准，但延迟 discard 未跑完 ⇒ body 仍 running。
-// 窄窗 UI 可签（视图走 readOpeningWindow+SQL failureCleanup 候选），后端允许 running 候选但保留 quiesce/CAS/完整基准；
-// 缺业务基准仍必须拒；成功/无 end 仅不改变清理资格，均需走真实清理正例。
-// 正例与三个负例各自独立 fixture（with43:false 直接以 42 为尾）；负例用真实状态各走一条独立拒绝理由，不用假身份。
+// 中断窗口：原生终态已落盘而body仍running，真实窗口签目标后仍可物理清理。
 function running42Target(chat){return {turn:42,branchId:chat.timeline.branchId,revision:chat._storageRevision,operationId:'op42',chatId:chat.id,sessionId:chat.sessionId}}
-test('失败终态先落盘而正文仍running：窗口可签且物理清理，活动成功和缺基准拒绝',async()=>{
+test('失败终态先落盘而正文仍running：真实窗口签目标并物理清理',async()=>{
  const f=await fixture(readAuthorSource,{seedAfter41:true,with43:false})
  try{
   await f.args.updateChat(f.chatId,now=>{now.timeline.operations.op42.status='running';return now},{source:'fixture.body-interrupted'})

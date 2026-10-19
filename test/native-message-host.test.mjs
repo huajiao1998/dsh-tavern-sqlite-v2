@@ -70,12 +70,12 @@ function markedBlock(source, marker, terminator) {
 }
 
 /** A 段：块内 `return result` 即"真值早退"；否则返回 { fellThrough:true }（＝作者会续跑 attempt）。 */
-function runAppendBlock({ source, store, before, revision, changes, metadata, result }) {
+function runAppendBlock({ source, store, before, revision, changes, metadata, result, finalHead }) {
   const block = markedBlock(source, MESSAGE_MARKER.appendMessages, '})()) return result')
   // 作者块外闭包：count 来自保存前楼数；head 是作者已应用头写集的最终头。
   const count = before.messages?.length ?? 2
-  const head = { ...before }
-  for (const change of changes) {
+  const head = finalHead ?? { ...before }
+  if (!finalHead) for (const change of changes) {
     if (change.path?.length === 1 && change.path[0] !== 'messages') {
       if (change.op === 'delete') delete head[change.path[0]]
       else if (change.op === 'set') head[change.path[0]] = change.value
@@ -142,13 +142,9 @@ test('S5追加一楼items与headerSets保序透传且不直连patchChat', async 
   // 不可表示项必须**响亮拒**（不 patchChat 兜底、不静默丢写集）
   const callsBeforeRejects = spy.calls.length
   for (const [label, bad] of [
-    ['非法深层路径', [{ op: 'set', path: ['state', '__proto__', 'value'], value: 'x' }]],
     ['保留键 timeline', [{ op: 'set', path: ['timeline'], value: {} }]],
     ['保留键 messages', [{ op: 'set', path: ['messages'], value: [] }]],
     ['命令自管键', [{ op: 'set', path: ['_storageRevision'], value: 9 }]],
-    ['非法键', [{ op: 'set', path: ['__proto__'], value: {} }]],
-    ['非法头字段深路径 splice', [{ op: 'splice', path: ['state', 'checkpoints'], index: 0, deleteCount: 0, items: [{}] }]],
-    ['未知操作', [{ op: 'move', path: ['settleStatus'], value: 'x' }]],
   ]) {
     await assert.rejects(() => runAppendBlock({ source, store, before, revision: 4, changes: [...bad, changes.at(-1)], metadata, result: {} }),
       /追加命令不接受/, label + ' 必须响亮拒（不得 patchChat 兜底）')
@@ -156,6 +152,22 @@ test('S5追加一楼items与headerSets保序透传且不直连patchChat', async 
   assert.equal(spy.calls.length, callsBeforeRejects, '被拒项不得触达出口（合法提交计数不变）')
   await runAppendBlock({ source, store, before, revision: 4, changes: [{ op: 'set', path: ['settleStatus'], value: 'a' }, { op: 'set', path: ['settleStatus'], value: 'b' }, changes.at(-1)], metadata, result: {} })
   assert.equal(spy.calls.at(-1).args[2].headerSets.settleStatus, 'b', '同根多变更按作者最终完整头归并，不丢最终值')
+  // 深数组是合法头写集：由真实作者mutation先应用，再按同一最终根提交。
+  const nestedBefore = { ...before, state: { checkpoints: [{ label: '保留' }, { label: '缩短' }], obsolete: true } }
+  const nestedChanges = [
+    { op: 'splice', path: ['state', 'checkpoints'], index: 1, deleteCount: 1, items: [{ label: '替换' }, { label: '追加' }] },
+    { op: 'delete', path: ['state', 'obsolete'] }, changes.at(-1),
+  ]
+  const finalHead = applyJsonChangesShared(nestedBefore, nestedChanges.filter(change => change.path[0] !== 'messages'))
+  await runAppendBlock({ source, store, before: nestedBefore, revision: 4, changes: nestedChanges, metadata, result: {}, finalHead })
+  assert.deepEqual(spy.calls.at(-1).args[2].headerSets, { state: { checkpoints: [{ label: '保留' }, { label: '替换' }, { label: '追加' }] } })
+  assert.deepEqual(nestedBefore.state, { checkpoints: [{ label: '保留' }, { label: '缩短' }], obsolete: true }, '作者mutation隔离原头')
+  // 非法mutation仍由真实上游应用器拒绝，不在接缝重复扫描路径/操作。
+  for (const bad of [
+    { op: 'set', path: ['state', '__proto__', 'value'], value: 'x' },
+    { op: 'set', path: ['__proto__'], value: {} },
+    { op: 'move', path: ['settleStatus'], value: 'x' },
+  ]) assert.throws(() => applyJsonChangesShared(nestedBefore, [bad]), /Invalid mutation path|未知 JSON mutation op/)
   void t
 })
 

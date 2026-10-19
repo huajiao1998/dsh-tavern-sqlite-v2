@@ -196,16 +196,10 @@ test('纯尾预检：空轮压缩不冒认零轮且真实旧轮与半轮仍拒',
     const codesOf = plan => (plan?.violations ?? []).map(item => item.code)
     const positive = preflightRollback(session, targetTurn, {strict: false}) // 纯诊断：不装四层服务，也不会因缺 service 反断言 missing
     assert.equal(codesOf(positive).filter(code => code === 'MIDDLE_DELETE').length, 0, '空轮压缩（turn null）不得被判成 0 轮旧事件 ⇒ 不得 MIDDLE_DELETE')
-    assert.equal(positive.boundarySeq, rollbackBoundarySeq(session, targetTurn), '边界仍须由真实 turn 计算')
-    // 真实数字旧轮事件落在 target start 之后 ⇒ 必须拒（strict 抛 + 诊断码）
-    session.append('user/message', {id: 'late', role: 'user', turn: priorTurn, content: [{type: 'text', text: 'l'}], source: {kind: 'user'}}, {surfaceOp: 'append'})
-    assert.ok(codesOf(preflightRollback(session, targetTurn, {strict: false})).includes('MIDDLE_DELETE'), '真实旧轮事件进入待删段必须 MIDDLE_DELETE')
-    let lateError = null
-    try { preflightRollback(session, targetTurn, {strict: true}) } catch (error) { lateError = error }
-    assert.equal(lateError?.code, 'ROLLBACK_PREFLIGHT_MIDDLE_DELETE', 'strict 必须抛 ROLLBACK_PREFLIGHT_MIDDLE_DELETE')
-    // 半轮：seq 边界切在 target 轮内部 ⇒ 必须拒
-    const halfBoundary = session.snapshotEvents().find(event => event.type === 'turn/start' && event.data?.turn === targetTurn)?.seq
-    assert.ok(Number.isSafeInteger(halfBoundary), '须能取到轮内 seq 作半轮边界')
-    assert.ok(codesOf(preflightRollbackAtSeq(session, halfBoundary, {strict: false})).includes('MIDDLE_DELETE'), '半轮边界必须 MIDDLE_DELETE')
+    assert.equal(positive.boundarySeq,session.snapshotEvents().find(event=>event.type==='turn/start'&&event.data?.turn===targetTurn).seq-1,'当前切点从目标真实start定位，不复用旧分类扫描')
+    // 旧预检分类已退役；显式seq只定位，实际SQL/折叠承担真实错误。
+    const boundary=session.snapshotEvents().find(event=>event.type==='turn/start'&&event.data?.turn===targetTurn).seq
+    assert.equal(preflightRollbackAtSeq(session,boundary,{strict:true}).keep,boundary+1)
+    assert.throws(()=>preflightRollbackAtSeq(session,session.seq,{strict:true}),/超出当前日志范围/)
   } finally { rmSync(root, {recursive: true, force: true}) }
 })

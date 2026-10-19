@@ -1,9 +1,10 @@
 {
   "name": "dsh-tavern-sqlite-v2",
-  "version": "0.4.19",
+  "version": "0.4.20",
   "private": true,
   "type": "module",
-  "description": "V2 SQLite权威存储与物理纯尾撤销；计算唯一调用上游服务端运行时，禁止客户端回落；原档只读、用户手动新ID分叉",
+  "description": "stable源码线：V2 SQLite权威存储与物理纯尾撤销；调用上游stable服务端运行时；原档只读、用户手动新ID分叉",
+  "tavernSourceChannel": "stable",
   "exports": {
     ".": "./plugin.js",
     "./session-persistence": "./index.js",

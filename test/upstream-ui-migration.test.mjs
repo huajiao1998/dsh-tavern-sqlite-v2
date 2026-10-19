@@ -411,7 +411,7 @@ test('审查修复UI同步：缺消费者仍先请求物理回退，明确报显
  }finally{h.close()}
 })
 
-test('自有UI：退役dock后共享清理服务保留目标及回执守卫', async () => {
+test('自有UI：只限制当前清理范围，版本变化不阻止请求和完成刷新', async () => {
   const h = harness()
   assert.equal(h.found('conversation.input.dock'), undefined, '正常/失败/活动状态均不应注册常驻条')
   assert.deepEqual(h.bridgeCalls.filter(call => call.kind === 'request'), [], '注册服务不能发清理请求')
@@ -421,7 +421,7 @@ test('自有UI：退役dock后共享清理服务保留目标及回执守卫', as
   const ui = h.provided.get('tavernStorageUi')
   assert.ok(ui, '共享清理服务必须在位')
   h.bridgeCalls.length = 0
-  await assert.rejects(() => ui.cleanFailure('session-child', 42, { ...failureTarget(42), revision: 8 }), /清理目标已过期/)
+  await assert.rejects(() => ui.cleanFailure('session-child', 42, { ...failureTarget(41), revision: 8 }), /清理目标已过期/)
   assert.deepEqual(h.bridgeCalls.filter(call => call.kind === 'request'), [], '过期目标不得发起清理请求（先 select 只读是合法的）')
 
   // 菜单互斥另由真实菜单叶覆盖；共享服务仍只按本次明确目标调用，不自动清下一轮。
@@ -445,7 +445,7 @@ test('自有UI：退役dock后共享清理服务保留目标及回执守卫', as
 
   // 回执身份不一致 ⇒ 拒绝且不得 refresh。
   h.bridgeCalls.length = 0
-  h.bridge.request = async (method, args) => ({ view: { rolledBack: { cleanedFailureTarget: { ...args.failureTarget, revision: 99 }, sync: 'sync-3', alreadyClean: false } } })
+  h.bridge.request = async (method, args) => ({ view: { rolledBack: { cleanedFailureTarget: { ...args.failureTarget, turn: 99 }, sync: 'sync-3', alreadyClean: false } } })
   await assert.rejects(() => ui.cleanFailure('session-child', 42, failureTarget(42)), /清理回执目标与请求不一致/)
   assert.equal(h.bridgeCalls.filter(call => call.kind === 'refresh').length, 0, '回执不一致时不得 refresh')
 
@@ -459,95 +459,47 @@ test('自有UI：退役dock后共享清理服务保留目标及回执守卫', as
   await assert.rejects(() => ui.cleanFailure('session-child', 42, failureTarget(42)), /已经卸载/)
 })
 
-test('自有UI：连续失败目标与严格回执拒绝', async () => {
-  const h = harness()
-  assert.equal(h.found('conversation.input.dock'), undefined)
-  const ui = h.provided.get('tavernStorageUi')
-  const native43 = nativeFailureTarget(43, 43, 44)
-  const body42 = failureTarget(42)
-  let receipts = []
-  const reqs = []
-  const refreshes = []
-  h.bridge.request = async (method, args) => {
-    reqs.push({ method, args: norm(args) })
-    assert.equal(method, 'rollbackTurn')
-    const next = receipts.shift()
-    assert.ok(next, '没有预置回执却发起了请求（receipts 空）')
-    const view = next.viewAfter === undefined ? null : next.viewAfter
-    h.live.setView(view)
-    return { view: { rolledBack: { cleanedFailureTarget: next.receipt, sync: next.sync || 'sync-x', alreadyClean: next.alreadyClean === true } } }
-  }
-  h.bridge.refresh = sessionId => { refreshes.push(sessionId) }
-
-  // ① native-only 43 成功：请求带 native 目标、回执同身份、wait 后 refresh；随后目标切到 body 42。
-  h.live.setView({ failureTarget: native43, failureCleanupReason: null, activity: null })
-  assert.equal(ui.readFailureTarget(ui.selectFailure('session-child')).turn, 43, 'native目标仍供菜单共享服务消费')
-  receipts.push({ receipt: native43, sync: 'sync-43', viewAfter: { failureTarget: body42, failureCleanupReason: 'provider 失败', activity: null } })
-  const refreshesBeforeNative = refreshes.length
-  await ui.cleanFailure('session-child', 43, native43)
-  assert.equal(reqs.length, 1, 'native 清理必须发起一次 request')
-  assert.equal(reqs[0].args.failureTarget.kind, 'native-only')
-  assert.equal(reqs[0].args.failureTarget.endSeq, 43)
-  assert.deepEqual(h.trace.filter(item => item.kind === 'wait').map(item => item.receipt), ['sync-43'])
-  assert.equal(refreshes.length, refreshesBeforeNative + 1, 'native 成功必须定向 refresh 一次')
-
-  // ② 下一目标body42不得自动清理；实时服务目标切到42，再由用户发起。
-  assert.equal(ui.readFailureTarget(ui.selectFailure('session-child')).turn, 42, '连续失败必须切到42且不自动清理')
-  assert.equal(reqs.length, 1, '42 只能由用户点击触发，不自动')
-  receipts.push({ receipt: body42, sync: 'sync-42', viewAfter: null })
-  await ui.cleanFailure('session-child', 42, body42)
-
-  // ③ 目标清空后共享服务不得虚构更早轮。
-  assert.equal(ui.readFailureTarget(ui.selectFailure('session-child')), null)
-
-  // ④ 严格回执拒绝（逐项）：零新请求、零 refresh。
-  const live = { failureTarget: body42, failureCleanupReason: 'x', activity: null }
-  const cases = [
-    ['回执 revision 漂移', { ...body42, revision: 99 }],
-    ['kind 由 body 反转 native', { ...body42, kind: 'native-only', operationId: undefined, endSeq: 42, eventCount: 43 }],
-    ['unknown kind', { ...body42, kind: 'weird' }],
-    ['operationId 变更', { ...body42, operationId: 'op-other' }],
-    ['branchId 变更', { ...body42, branchId: 'branch-2' }],
-  ]
-  const before = { requests: reqs.length, refreshes: refreshes.length }
-  for (const [label, receipt] of cases) {
-    h.live.setView(live)
-    h.bridge.request = async () => ({ view: { rolledBack: { cleanedFailureTarget: receipt, sync: 'sync-bad', alreadyClean: false } } })
-    await assert.rejects(() => ui.cleanFailure('session-child', 42, body42), /清理回执目标与请求不一致/, label + ' 必须拒')
-  }
-  assert.equal(reqs.length, before.requests, '拒绝路径零新请求')
-  assert.equal(refreshes.length, before.refreshes, '拒绝路径零 refresh')
-
-  // ⑤ native 回执形状不合格：缺 endSeq / eventCount 不满足 +1 ⇒ 拒。
-  const nativeLive = { failureTarget: native43, failureCleanupReason: null, activity: null }
-  for (const [label, receipt] of [
-    ['native 回执缺 endSeq', { ...native43, endSeq: undefined }],
-    ['native 回执 eventCount ≠ endSeq+1', { ...native43, endSeq: 43, eventCount: 99 }],
-  ]) {
-    h.live.setView(nativeLive)
-    h.bridge.request = async () => ({ view: { rolledBack: { cleanedFailureTarget: receipt, sync: 'sync-bad', alreadyClean: false } } })
-    await assert.rejects(() => ui.cleanFailure('session-child', 43, native43), /native 回执形状不合法/, label + ' 必须拒')
-  }
-
-  // ⑥ rollbackId 重试身份不一致（同 revision 同 target，只有 rollbackId 变）：拒且零请求。
-  h.live.setView({ failureTarget: { ...body42, rollbackId: 'rb-1' }, failureCleanupReason: 'x', activity: null })
-  const staleRetry = { ...body42, rollbackId: 'rb-2' }
-  let retryRequests = 0
-  h.bridge.request = async () => { retryRequests += 1; return { view: { rolledBack: { cleanedFailureTarget: body42, alreadyClean: false } } } }
-  await assert.rejects(() => ui.cleanFailure('session-child', 42, staleRetry), /重试身份不一致/)
-  assert.equal(retryRequests, 0, 'rollbackId 过期必须零请求')
-
-  // ⑦ alreadyClean：仍**一次** RPC 拿到 already 状态，但零 wait、一次 refresh。
-  h.live.setView({ failureTarget: body42, failureCleanupReason: 'x', activity: null })
-  let alreadyRequests = 0
-  h.bridge.request = async (method, args) => { alreadyRequests += 1; return { view: { rolledBack: { cleanedFailureTarget: args.failureTarget, sync: 'sync-already', alreadyClean: true } } } }
-  const waitsBefore = h.trace.filter(item => item.kind === 'wait').length
-  const refreshesBefore = refreshes.length
-  const resp = await ui.cleanFailure('session-child', 42, body42)
-  assert.equal(resp.view.rolledBack.alreadyClean, true)
-  assert.equal(alreadyRequests, 1, 'alreadyClean 仍需一次 RPC 取回状态')
-  assert.equal(h.trace.filter(item => item.kind === 'wait').length, waitsBefore, 'alreadyClean 零 wait')
-  assert.equal(refreshes.length, refreshesBefore + 1, 'alreadyClean 只 refresh 一次')
+test('自有UI：连续目标按用户逐次清理，不验证原生形态且错范围回执仍拒绝', async () => {
+  const h=harness(),ui=h.provided.get('tavernStorageUi')
+  try {
+    const native=nativeFailureTarget(43,43,44),body=failureTarget(42)
+    let requests=0,refreshes=0
+    h.bridge.refresh=()=>{refreshes++}
+    h.bridge.request=async (_method,args)=>{
+      requests++
+      h.live.setView({failureTarget:body})
+      return {view:{rolledBack:{cleanedFailureTarget:args.failureTarget,sync:'sync-latest'}}}
+    }
+    h.live.setView({failureTarget:native})
+    await ui.cleanFailure('session-child',43,native)
+    assert.equal(requests,1);assert.equal(refreshes,1)
+    assert.equal(ui.readFailureTarget(ui.selectFailure('session-child')).turn,42)
+    assert.equal(requests,1,'不会自动连删前轮')
+    for(const changed of [
+      {revision:99}, {kind:'native-only',operationId:undefined}, {kind:'future-kind'},
+      {operationId:'other'}, {branchId:'other'}, {incomplete:true,eventCount:99,endSeq:undefined},
+      {rollbackId:'old-retry'}
+    ]) {
+      h.live.setView({failureTarget:body})
+      h.bridge.request=async (_method,args)=>{requests++;return {view:{rolledBack:{cleanedFailureTarget:{...args.failureTarget,...changed},sync:'sync-result'}}}}
+      const count=refreshes
+      await ui.cleanFailure('session-child',42,{...body,...changed})
+      assert.equal(refreshes,count+1,'对象形态和坐标完整度不影响清理结果刷新')
+    }
+    for(const changed of [{turn:41},{chatId:'other-chat',sessionId:'other-session'}]) {
+      h.live.setView({failureTarget:body})
+      h.bridge.request=async()=>({view:{rolledBack:{cleanedFailureTarget:{...body,...changed},sync:'wrong-range'}}})
+      const count=refreshes
+      await assert.rejects(ui.cleanFailure('session-child',42,body),/清理回执目标与请求不一致/)
+      assert.equal(refreshes,count,'错轮/异档回执仍拒绝刷新')
+    }
+    const unified={kind:'rollback',turn:42}
+    h.live.setView({rollbackTarget:unified})
+    h.bridge.request=async()=>({view:{rolledBack:{alreadyClean:true}}})
+    const waits=h.trace.filter(row=>row.kind==='wait').length
+    await ui.cleanFailure('session-child',42,unified)
+    assert.equal(h.trace.filter(row=>row.kind==='wait').length,waits,'已完成回执不等不存在的同步帧')
+  } finally {h.close()}
 })
 
 test('自有UI：原错误行注册委托共享服务', async () => {

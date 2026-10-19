@@ -113,6 +113,8 @@ function addIdleSignals(source) {
   return upgradeVolatileEvidenceHost(source)
 }
 export function applyLatestFailureHostTransform(source) {
+  // 先清理最新轮，再纯修复；不能在删尾前补记或认证待清理的原生对象。
+  source=source.replace("      case 'rollbackTurn': {\n        await reconcileStory(args && args.sessionId)","      case 'rollbackTurn': {\n        // [dsh-tavern-native-repair-after-cut:v1] 作者纯修复由物理清理完成后调用。")
   // 双形态严格唯一：新版上游（42852b0/2.5.0）rollbackTurn 为多行块（save/回执后自带 notifyPluginTimeline('rollback')），旧版为单行 return。
   const before = "case 'rollbackTurn': return { view: await rollbackTurn(args && args.sessionId, args && args.chatId, args && args.expectedTurn) }"
   const after = "case 'rollbackTurn': return { view: await rollbackTurn(args && args.sessionId, args && args.chatId, args && (args.failureTarget || args.expectedTurn)) }"
@@ -144,6 +146,8 @@ export function applyLatestFailureHostTransform(source) {
   return addIdleSignals(EVIDENCE_IMPORT + EVIDENCE_FOLD_LINE + next)
 }
 export function applyLatestFailureViewTransform(source) {
+  // 作者自愈版的其他操作状态由作者管理；回退由最后一层统一最新轮视图接管。
+  if(source.includes('const hasRound = hasRollbackMessages(chat.messages)') || source.includes('// [dsh-tavern-native-repair-rollback-view:v1]'))return source
   if(source.includes('// [dsh-tavern-latest-send-undo:v1]') && source.includes('void replayTarget')) {
     // 已统一代不再复活旧分类器；仍验证唯一自有helper/字段与原生判定导入，半截块拒绝。
     const funcs=parse(source,{ecmaVersion:'latest',sourceType:'module'}).body.filter(node=>node.type==='FunctionDeclaration')

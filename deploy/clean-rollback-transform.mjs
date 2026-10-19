@@ -12,7 +12,7 @@ const BODY=`${START}
     const cleanRollback = storageRollback.cleanRollback
     if (typeof cleanRollback !== 'function') throw new Error('缺少统一物理回退消费者')
     return await cleanRollback({ chat, requestedTurn,
-      readChat, updateChat, chats, sessions, view, readCard: readChatCard, quiesce: quiesceRollback, sideCleanup: cleanupRollbackSides,
+      readChat, updateChat, chats, sessions, view, readCard: readChatCard, repairNative: typeof repairNative === 'function' ? repairNative : undefined, quiesce: quiesceRollback, sideCleanup: cleanupRollbackSides,
       persistence: typeof persistenceProvider === 'function' ? persistenceProvider() : persistenceProvider,
       services: {
         projections: typeof projectionsProvider === 'function' ? projectionsProvider() : projectionsProvider,

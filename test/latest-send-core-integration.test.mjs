@@ -76,9 +76,9 @@ test('① buildCore：537e878全代产物含最新发送新链连接、二次施
   }
   // 新链连接①：视图 overlay 注入（统一目标 + evidence 默认值 + wrapper 覆盖）。
   const view = core('tavern-plugin/lib/domain/chat-session-state.js')
-  assert.ok(view.includes('// [dsh-tavern-latest-send-undo:v1]'), '视图必须注入最新发送撤销 overlay')
-  assert.ok(view.includes('latestSendTarget(chat, evidence,') && view.includes('evidence = evidenceOf(chat.sessionId)'), 'overlay 必须取统一目标且补 evidence 默认值')
-  assert.ok(view.includes('withLatestSend({ ...value, rollbackTarget })'), 'wrapper 必须经 withLatestSend 覆盖')
+  assert.ok(view.includes('// [dsh-tavern-native-repair-rollback-view:v1]'), '新作者统一包装必须在位')
+  assert.ok(view.includes('latestSendTarget(chat, evidence)') && view.includes('evidence = evidenceOf(chat.sessionId)'), 'overlay 必须取统一目标且补 evidence 默认值')
+  assert.ok(view.includes('failureTarget: rollbackTarget') && view.includes('rollbackTargetTurn: rollbackTarget?.turn'), 'wrapper必须共用统一目标')
   // 新链连接②：发轮前锚点（prepare 捕获 + intent 传参 + op 落字段）。
   const turn = core('tavern-plugin/lib/domain/turn-orchestration.js')
   assert.ok(turn.includes('// [dsh-tavern-send-anchor-prepare:v1]') && turn.includes('nativeAnchor: rollbackSendAnchor } })'), 'prepare 必须算锚点并随 body.begin 传入')
@@ -95,7 +95,7 @@ test('① buildCore：537e878全代产物含最新发送新链连接、二次施
   // 完整 buildCore 跑通时：真集成交叉核——buildCore 产物（含其它接缝的额外变换）必须仍含本链标记。
   const MARKERS = {
     'tavern-plugin/lib/index.js': ['// [dsh-tavern-failure-input-guard:v2]', 'assertSendAfterCleanup(chat, { events: sessionEvents(session) })'],
-    'tavern-plugin/lib/domain/chat-session-state.js': ['// [dsh-tavern-latest-send-undo:v1]', 'latestSendTarget(chat, evidence,'],
+    'tavern-plugin/lib/domain/chat-session-state.js': ['// [dsh-tavern-native-repair-rollback-view:v1]', 'latestSendTarget(chat, evidence)'],
     'tavern-plugin/lib/domain/turn-orchestration.js': ['// [dsh-tavern-send-anchor-prepare:v1]', 'nativeAnchor: rollbackSendAnchor'],
     'tavern-plugin/lib/domain/story-timeline.js': ['// [dsh-tavern-body-operation-anchor:v1]'],
     'tavern-plugin/lib/domain/round-anchor.js': ['// [dsh-tavern-input-only-anchor:v1]'],

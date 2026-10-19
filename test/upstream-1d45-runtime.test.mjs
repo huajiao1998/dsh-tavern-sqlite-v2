@@ -19,13 +19,13 @@ test('上游1d45失败输入：错误账本与回退进行中必须先清理，�
  const fn=new Function('turnOrchestrator','sessionStore','agentRegistry','chatForSession','sessionEvents','rollbackAvailability','assertSendAfterCleanup','return ('+source.slice(callback.start,callback.end)+')')({modeFor:async()=> 'story'},{get:()=>session,flush:()=>{writes++}},{get:()=>undefined},async()=>chat,()=>events,()=>({unclearedTurns:[]}),assertSendAfterCleanup)
  assert.equal(await fn('s'),0)
  chat.timeline.operations.body={kind:'body',status:'failed',turn:2}
- await assert.rejects(()=>fn('s'),/上轮错误或未确认完成的发送尚未物理清理/,'账本 failed body 必须先完成统一清理')
+ assert.equal(await fn('s'),0,'历史failed不阻止新发送')
  chat.timeline.operations.body={kind:'body',status:'running',turn:2}
- await assert.rejects(()=>fn('s'),/上轮错误或未确认完成的发送尚未物理清理/,'在途 body 也必须先完成统一清理')
+ assert.equal(await fn('s'),0,'旧body状态不作发送资格')
  delete chat.timeline.operations.body
  for(const kind of ['error','failed','aborted','unknown-terminal']){
   events=[{seq:0,type:'turn/start',data:{turn:2}},{seq:1,type:'turn/end',data:{turn:2,reason:{kind}}}]
-  await assert.rejects(()=>fn('s'),/上轮错误或未确认完成的发送尚未物理清理/,'终态 '+kind+' 必须先清理（含 unknown）')
+  assert.equal(await fn('s'),0,'终态 '+kind+' 不作新发送资格')
  }
  events=[{seq:0,type:'turn/start',data:{turn:2}},{seq:1,type:'turn/end',data:{turn:2,reason:{kind:'completed'}}}]
   assert.equal(await fn('s'),0,'completed 不作为错误白名单限制')

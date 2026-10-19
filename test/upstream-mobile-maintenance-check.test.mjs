@@ -101,26 +101,21 @@ for (const host of ['cli', 'desktop']) {
     // 真实时钟下的总耗时必须是正数（该结果来自真 performance.now，不做任何相位扣除）。
     assert.ok(result.elapsedMs > 0, '检查必须报告真实耗时：' + result.elapsedMs)
   })
-  test('8480f7de ' + host + '：未知作者契约仍拒绝且目标零改', async t => {
+  test('8480f7de ' + host + '：实际变量接缝缺失仍拒绝且目标零改', async t => {
     const f = fixture(t, host), file = path.join(f.app, 'tavern-plugin', 'package.json')
     const pkg = JSON.parse(readFileSync(file, 'utf8')); pkg.version = '9.9.9'; pkg.main = './unknown-contract.js'
     writeFileSync(file, JSON.stringify(pkg) + '\n', 'utf8')
-    // 锚点-only 准入下，仅改 version/main（semver 与入口字段）不再单独拒绝——负例必须真正损坏**必需锚点**。
-    // 锚点文本取自作者真实入口（不猜空白、不用带上行号/前缀的输出猜），并先断言夹具里恰出现一次（一处 exact）。
+    // 只损坏实际要替换的变量接缝，不用无关开局声明作为接入资格门。
     const indexFile = path.join(f.app, 'tavern-plugin', 'lib', 'index.js')
     const indexText = readFileSync(indexFile, 'utf8')
-    const openingAnchor = 'createOpeningPreparation({ readCard, worldBooks, extensionSettings:'
-    assert.equal(indexText.split(openingAnchor).length, 2, '夹具作者入口必须恰含一次开局动态分类宿主锚点')
-    writeFileSync(indexFile, indexText.replace(openingAnchor, 'createOpeningPreparation({ readCard, worldBooks, extensionSettingsRenamed:'), 'utf8')
+    const variableAnchor = '  const chatPersistence = createChatPersistence('
+    writeFileSync(indexFile, indexText.replace(variableAnchor, '  const chatPersistence = createChatPersistenceRenamed('), 'utf8')
     const before = f.capture()
-    // 预演层结论：未知版本首装的隔离完整施缝预演失败，且失败原因就是这个必需锚点（不是版本号/入口字段）。
     const plan = adapter.inspectStandardSeamsPlan({ appDir: f.app, authorVersion: '9.9.9' })
     assert.equal(plan.ready, false)
-    assert.equal(plan.preflight, 'failed', '未知版本首装必须走隔离完整预演并失败')
-    assert.ok(plan.compatible.failures.some(message => /开局动态分类宿主锚点缺失\/重复/.test(message)),
-      '预演失败原因必须是必需锚点损坏：' + JSON.stringify(plan.compatible.failures))
-    // 消费者层结论：维护 check/install 预检拒绝，且目标源码与profile一字未改。
-    await assert.rejects(f.run(), host === 'cli' ? /开局动态分类宿主锚点缺失\/重复/ : /与可信基线不兼容|作者版本未适配/)
+    assert.equal(plan.preflight, 'failed')
+    assert.ok(plan.compatible.failures.some(message => /chatPersistence|变量消费者/.test(message)),JSON.stringify(plan.compatible.failures))
+    await assert.rejects(f.run(), /chatPersistence|变量消费者|与可信基线不兼容|作者版本未适配/)
     assert.deepEqual(f.capture(), before)
   })
   test('8480f7de ' + host + '：不同代（0.2.2 旧包在装）check 仍通过且目标零改（新机制允许换代，不再拒绝）', async t => {

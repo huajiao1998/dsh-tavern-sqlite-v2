@@ -124,7 +124,7 @@ export function applyRollbackWorldbookHostTransform(source){
   if(!value.includes('// [dsh-tavern-worldbook-card-projection:v1]'))value=once(value,"    data.extensions.tavern_helper.variables=await characterVariableStore.read(normalizeResourcePath(cardPath,'card'),data.extensions.tavern_helper.variables || {})",`    data.extensions.tavern_helper.variables=await characterVariableStore.read(normalizeResourcePath(cardPath,'card'),data.extensions.tavern_helper.variables || {})
     // [dsh-tavern-worldbook-card-projection:v1] 普通卡读取/导出也使用嵌入世界书SQL当前态。
     data.character_book=await rollbackWorldbookResources.read({kind:'card',cardPath:normalizeResourcePath(cardPath,'card')},data.character_book ?? null)`)
-  if(!value.includes('// [dsh-tavern-worldbook-card-edit:v1]')&&!value.includes('// [dsh-tavern-card-single-store-edit:v1]')&&!value.includes('// [dsh-tavern-card-edit:v2]'))value=once(value,"    await fileResources.writeWorking(normalizeResourcePath(cardPath, 'card'), JSON.stringify(definition, null, 2))",`    // [dsh-tavern-worldbook-card-edit:v1] 卡编辑世界书差异进SQL，不把运行条目重新写到定义文件。
+  if(!value.includes('// [dsh-tavern-worldbook-card-edit:v1]')&&!value.includes('// [dsh-tavern-card-single-store-edit:v1]')&&!value.includes('// [dsh-tavern-card-edit:v2]')&&value.includes("    await fileResources.writeWorking(normalizeResourcePath(cardPath, 'card'), JSON.stringify(definition, null, 2))"))value=once(value,"    await fileResources.writeWorking(normalizeResourcePath(cardPath, 'card'), JSON.stringify(definition, null, 2))",`    // [dsh-tavern-worldbook-card-edit:v1] 卡编辑世界书差异进SQL，不把运行条目重新写到定义文件。
     const previousBook=cardPreparation.present({card:workspace,as:'raw'})
     const nextBook=cardPreparation.present({card:savedWorkspace,as:'raw'})
     const bookOf=raw=>['chara_card_v2','chara_card_v3'].includes(raw.spec)&&raw.data?raw.data.character_book:raw.character_book
@@ -142,6 +142,7 @@ export function applyRollbackWorldbookHostTransform(source){
   if(!value.includes('// [dsh-tavern-card-name-originals:v1]'))value=once(value,'    for (const item of (idx.chats || []).filter(function (entry) { return entry.cardPath === cardPath })) {',`    for (const item of (idx.chats || []).filter(function (entry) { return entry.cardPath === cardPath })) {
       // [dsh-tavern-card-name-originals:v1] 原件仍保留不写，但不能因此中断卡片编辑。
       if (legacyViewSeams.readOnlyChat(item.id)) continue`)
+  if (!value.includes('  async function updateCard(') && !value.includes('    // [dsh-tavern-card-single-store-edit:v1]') && !value.includes('    // 定义编辑显式变量改动也进SQL')) return value
   return singleStoreEdit(value)
  }
  if(source.includes(MARKER)){if(!source.includes('const rollbackWorldbookResources=createRollbackWorldbookResources({dataRoot})'))throw Error('世界书SQL Host标记不完整');return complete(source)}

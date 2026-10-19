@@ -508,18 +508,13 @@ export const MESSAGE_REQUIRED_BLOCKS = Object.freeze({
     ].join('\n        '),
     // 头写集＝**普通对象**（store normalizeHeaderSets 只收顶层普通对象，:137-232）；不可表示项一律响亮拒（不 patchChat 兜底）。
     // 允许作者 diffJson 的**深路径**（数组数字段合法），但按 **path[0] 顶层根**归并：整根取 `head[root]` 的完整值
-    // （key 缺失 ⇒ undefined ⇒ 命令侧 delete），**不做逐 deep-apply**，同根多 depth 只归一次；重复顶层根改动异常仍拒。
+    // （key 缺失 ⇒ undefined ⇒ 命令侧 delete），不重演深路径 splice，同根只归一次。
     headerSets: [
       'const headerRoots = new Set()',
       'const timelineChanges = changes.filter(change => Array.isArray(change.path) && change.path.length >= 2 && change.path[0] === \'timeline\')',
       'for (const change of changes) {',
       "  if (change.op === 'splice' && Array.isArray(change.path) && change.path.length === 1 && change.path[0] === 'messages') continue",
       "  if (!Array.isArray(change.path) || change.path.length === 0) throw new Error('追加命令不接受空头改动路径：' + String(change.path && change.path.join('.')))",
-      "  for (const part of change.path) {",
-      "    if (part === undefined || part === null || part === '') throw new Error('追加命令不接受空头改动脉节：' + String(change.path.join('.')))",
-      "    if (typeof part !== 'string' && !(typeof part === 'number' && Number.isInteger(part) && part >= 0)) throw new Error('追加命令不接受该头改动脉节类型：' + String(change.path.join('.')))",
-      "    if (part === '__proto__' || part === 'prototype' || part === 'constructor') throw new Error('追加命令不接受非法改动脉节：' + String(change.path.join('.')))",
-      '  }',
       "  const key = change.path[0]",
       "  if (key === 'timeline') {",
       "    if (change.path.length >= 2) continue",
@@ -528,15 +523,6 @@ export const MESSAGE_REQUIRED_BLOCKS = Object.freeze({
       "  if (key === 'messages') throw new Error('追加命令不接受保留头键：' + key)",
       "  if (typeof key !== 'string') throw new Error('追加命令头根必须是字符串：' + String(change.path.join('.')))",
       "  if (key === '_storageRevision' || key === 'updatedAt') throw new Error('追加命令不接受命令自管头键：' + key)",
-      "  if (change.op === 'splice') {",
-      "    if (change.path.length !== 1) throw new Error('追加命令不接受头字段深路径 splice：' + String(change.path.join('.')))",
-      "    if (!Array.isArray(change.items)) throw new Error('追加命令头字段 splice 必须带数组 items：' + String(change.path.join('.')))",
-      "    if (!Number.isSafeInteger(change.index) || change.index < 0) throw new Error('追加命令头字段 splice index 必须是安全整数：' + String(change.path.join('.')))",
-      "    if (!Number.isSafeInteger(change.deleteCount) || change.deleteCount < 0) throw new Error('追加命令头字段 splice deleteCount 必须是安全整数：' + String(change.path.join('.')))",
-      '    headerRoots.add(key)',                        // 头数组根：仍按**顶层整值**归并（head[key]），不做逐 deep-apply
-      '    continue',
-      '  }',
-      '  if (change.op !== \'set\' && change.op !== \'delete\') throw new Error(\'追加命令不接受该头改动操作：\' + String(change.op))',
       '  headerRoots.add(key)',
       '}',
       'const headerSets = {}',

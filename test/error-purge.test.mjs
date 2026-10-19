@@ -140,67 +140,7 @@ test('干净清理3 play-controls：onPurge附参+菜单同参+幂等',()=>{
 test('干净清理4 play-controls：未知锚点fail-closed',()=>{
   assert.throws(()=>applyErrorPurgePlayControlsTransform('// 空源'), /锚点/)
 })
-// 与注入文本同义的本地比较器（测试 5/6 的镜像用；真产物断言见干净清理3/7/11/12/13）。
-function targetCompare(ft, cft) {
-  if (!ft || !cft || typeof ft !== 'object' || typeof cft !== 'object') return '目标缺失'
-  const kindOf = value => value === 'native-only' ? 'native-only' : (value === undefined || value === 'body' ? 'body' : null)
-  const ftKind = kindOf(ft.kind), cftKind = kindOf(cft.kind)
-  if (ftKind === null || cftKind === null || ftKind !== cftKind) return 'kind 不一致'
-  if (!Number.isSafeInteger(cft.turn) || Number(cft.turn) !== Number(ft.turn)) return 'turn 不一致'
-  if (typeof ft.branchId !== 'string' || ft.branchId === '' || cft.branchId !== ft.branchId) return 'branchId 不一致'
-  if (!Number.isSafeInteger(cft.revision) || !Number.isSafeInteger(ft.revision) || Number(cft.revision) !== Number(ft.revision)) return 'revision 不一致'
-  if (ftKind === 'native-only') {
-    if (ft.operationId !== undefined || cft.operationId !== undefined) return 'native 不得带 operationId'
-    if (!Number.isSafeInteger(ft.endSeq) || ft.endSeq <= 0 || !Number.isSafeInteger(ft.eventCount) || ft.eventCount !== ft.endSeq + 1) return 'native 目标形状不合法'
-    if (!Number.isSafeInteger(cft.endSeq) || cft.endSeq <= 0 || !Number.isSafeInteger(cft.eventCount) || cft.eventCount !== cft.endSeq + 1) return 'native 回执形状不合法'
-    if (Number(cft.endSeq) !== Number(ft.endSeq) || Number(cft.eventCount) !== Number(ft.eventCount)) return 'native 身份不一致'
-  } else if (typeof cft.operationId !== 'string' || cft.operationId === '' || cft.operationId !== ft.operationId) return 'operationId 不一致'
-  if (typeof ft.chatId === 'string' && typeof cft.chatId === 'string' && cft.chatId !== ft.chatId) return 'chatId 不一致'
-  if (typeof ft.sessionId === 'string' && typeof cft.sessionId === 'string' && cft.sessionId !== ft.sessionId) return 'sessionId 不一致'
-  return ''
-}
-// 真实回调执行：onPurge 附参+收据校验+同连接等待；失败保留、旧 target 零调用
-function makeOnPurge(deps) {
-  const {rpc, sessions, state, props, setCandidatePanel, setRegenPanel, setCandidateGuidePanel, liveTavernView, tavernCoordination} = deps
-  return async (turn, failureTarget)=>{
-    const ft = failureTarget || (state.view && state.view.failureTarget) || null
-    if (!ft || !Number.isSafeInteger(turn) || turn < 1 || turn !== Number(ft.turn)) throw new Error('清理目标不是当前最新失败轮，拒绝清理')
-    if (typeof sessions?.waitForTavernRollbackSync !== 'function') throw new Error('回退同步尚未接线')
-    const resp = await rpc('rollbackTurn', {expectedTurn:turn, failureTarget:ft}, props.sessionId)
-    const rb = resp && resp.view && resp.view.rolledBack
-    if (!rb || !rb.cleanedFailureTarget) throw new Error('清理未确认目标失败轮，不更新本地状态')
-    const cft = rb.cleanedFailureTarget
-    const mismatch = targetCompare(ft, cft)
-    if (mismatch !== '') throw new Error('清理回执目标与请求不一致，拒绝更新：' + mismatch)
-    if (rb.alreadyClean === true) {
-      liveTavernView.rebase(props.sessionId)
-      tavernCoordination.invalidate(props.sessionId) // 作者真接口（服务级 refresh 不存在）
-      return resp
-    }
-    await sessions.waitForTavernRollbackSync(rb.sync)
-    setCandidatePanel(null); setRegenPanel(null); setCandidateGuidePanel(null)
-    liveTavernView.rebase(props.sessionId)
-    tavernCoordination.invalidate(props.sessionId)
-    return resp
-  }
-}
-test('干净清理5 历史算法契约（synthetic 副本，非现生产证据）：附参+同连接等待+成功路径（收据核 revision 并 rebase）', async ()=>{
-  const ft = {chatId:'c1',sessionId:'s1',turn:7,branchId:'b1',revision:3,operationId:'op1'}
-  const calls = []
-  let waited = null
-  const rpc = async (method, args, sid)=>{ calls.push([method,args,sid]); return {view:{rolledBack:{sync:{id:'r1'},cleanedFailureTarget:{turn:7,operationId:'op1',branchId:'b1',revision:3}}}} }
-  const sessions = {waitForTavernRollbackSync: async (r)=>{ waited = r }}
-  let panels = 0, rebased = 0, refreshed = 0
-  const deps = {rpc, sessions, state:{view:{failureTarget:ft}}, props:{sessionId:'s1', sessions}, setCandidatePanel:()=>{panels++}, setRegenPanel:()=>{panels++}, setCandidateGuidePanel:()=>{panels++}, liveTavernView:{invalidate:()=>{throw new Error('不应invalidate')}, rebase:()=>{rebased++}}, tavernCoordination:{invalidate:()=>{refreshed++}}}
-  const onPurge = makeOnPurge(deps)
-  const ret = await onPurge(7, ft)
-  assert.deepEqual(calls[0], ['rollbackTurn', {expectedTurn:7, failureTarget:ft}, 's1'])
-  assert.deepEqual(waited, {id:'r1'})
-  assert.equal(panels, 3)
-  assert.equal(rebased, 1, '正常清理（等待同连接同步）后必须定向 rebase 重算下一目标')
-  assert.equal(refreshed, 1)
-  assert.equal(ret.view.rolledBack.cleanedFailureTarget.turn, 7, '成功路径必须回传已确认的目标')
-})
+// 已退役本地targetCompare/makeOnPurge算法副本；行为由真实共享服务消费者验证。
 test('干净清理7 built组合：clientCoreWrites built含failureTarget/handler且语法', async ()=>{
   const {mkdtempSync, mkdirSync, writeFileSync: writeFs, readFileSync: readFs} = await import('node:fs')
   const {tmpdir} = await import('node:os')
@@ -403,23 +343,6 @@ function createSupersededHarness(source, dom, run) {
   }
   return {render, captures, hookSlots, stores}
 }
-test('干净清理6 历史算法契约（synthetic 副本，非现生产证据）：alreadyClean分支+旧target零调用+失败保留', async ()=>{
-  const ft = {chatId:'c1',sessionId:'s1',turn:7,branchId:'b1',revision:3,operationId:'op1'}
-  let rpcCalls = 0, waited = 0, rebased = 0
-  const rpc = async ()=>{ rpcCalls++; return {view:{rolledBack:{alreadyClean:true,cleanedFailureTarget:{turn:7,operationId:'op1',branchId:'b1',revision:3}}}} }
-  const sessions = {waitForTavernRollbackSync: async ()=>{ waited++ }}
-  const deps = {rpc, sessions, state:{view:{failureTarget:ft}}, props:{sessionId:'s1', sessions}, setCandidatePanel:()=>{}, setRegenPanel:()=>{}, setCandidateGuidePanel:()=>{}, liveTavernView:{rebase:()=>{rebased++}}, tavernCoordination:{invalidate:()=>{rebased++}}}
-  const onPurge = makeOnPurge(deps)
-  await onPurge(7, ft)
-  assert.equal(rpcCalls, 1)
-  assert.equal(waited, 0)
-  assert.equal(rebased, 2)
-  await assert.rejects(onPurge(6, ft), /不是当前最新失败轮/)
-  assert.equal(rpcCalls, 1)
-  const badRpc = async ()=>{ throw new Error('后端拒绝：目标已变化') }
-  const onPurgeBad = makeOnPurge({...deps, rpc: badRpc})
-  await assert.rejects(onPurgeBad(7, ft), /后端拒绝/)
-})
 // 以下三条为真产物生命周期验收：真变换函数 + 稳定 hook slots + 真按钮 click。
 test('干净清理8 前端生命周期：同身份不重建且getter活取；目标revision/rollbackId/reason变化必重建', ()=>{
   const src = readFileSync(new URL(FIX + 'features/play-controls.js', import.meta.url), 'utf8')
@@ -516,7 +439,7 @@ test('干净清理10 真产物可清理资格双向：换目标再换回必须�
 })
 // native-only 43（terminal guard error、无 op/无基准）→ 物理清 → 下一目标 42（body）：
 // 真产物 harness（同 component refs/effect）+ 真 turn-error-controls 按钮，按钮必须先 43 再 42。
-test('干净清理11 native-only 43 清理链：收据核 endSeq/eventCount、sync 后 rebase+refresh、按钮 43→42', async ()=>{
+test('干净清理11 旧native目标清理链：同连接同步与刷新、按钮43→42', async ()=>{
   const play = applyErrorPurgePlayControlsTransform(readFileSync(new URL(FIX + 'features/play-controls.js', import.meta.url), 'utf8'))
   const turnControls = applyErrorPurgeTurnControlsTransform(readFileSync(new URL(FIX + 'turn-error-controls.js', import.meta.url), 'utf8'))
   const dom43 = createFakeDom(43)
@@ -561,13 +484,12 @@ test('干净清理11 native-only 43 清理链：收据核 endSeq/eventCount、sy
   assert.equal(run.refreshed, 2)
   controls43.dispose(); controls42.dispose(); stale43.dispose()
 })
-// 收据形状：body 认 operationId 非空串、native 认 endSeq/eventCount 安全整数；kind+turn+branch+revision exact；
-// 任何不合法（含 undefined 互相恒等）都必须拒更新，且零等待/零 rebase/零 refresh。
-test('干净清理12 收据形状不合格一律拒更新（native 缺 endSeq/eventCount、kind 反转、漂移、undefined 恒等）', async ()=>{
+// 真实共享服务只核错轮/异档；同范围回执不再认证分类、版本或native坐标。
+test('退役迁移：真实共享服务放行同范围回执形态差异，错轮异档仍零刷新', async ()=>{
   const play = applyErrorPurgePlayControlsTransform(readFileSync(new URL(FIX + 'features/play-controls.js', import.meta.url), 'utf8'))
   const native43 = {chatId:'c1', sessionId:'s1', kind:'native-only', turn:43, branchId:'b1', revision:91, endSeq:494, eventCount:495}
   const view = target => ({view:{failureTarget:target, failureCleanupReason:'', suppressedDshErrorTurns:['43'], hiddenDshErrorTurns:[], staleDshErrorTurns:[], filteredFailureStreak:0, canRegenerate:false, canReplayFailedTurn:false, replayFailedTurn:null}})
-  const runCase = async (label, receipt, target) => {
+  const runCase = async (label, receipt, target, rejected = false) => {
     const dom = createFakeDom(Number(target.turn))
     const waited = []
     const run = {currentState:null, listeners:[], sessions:{waitForTavernRollbackSync: async sync => { waited.push(sync) }}, created:0, invalidated:0, rebased:0, refreshed:0,
@@ -575,9 +497,15 @@ test('干净清理12 收据形状不合格一律拒更新（native 缺 endSeq/ev
     const harness = createSupersededHarness(play, dom, run)
     run.currentState = view(target)
     harness.render(run.currentState)
-    await assert.rejects(harness.captures[0].onPurge(Number(target.turn), target), /清理回执目标与请求不一致|清理未确认目标失败轮/, label)
-    assert.equal(waited.length, 0, label + '：拒更新时不得等待同连接同步')
-    assert.equal(run.rebased + run.refreshed, 0, label + '：拒更新时不得 rebase/refresh')
+    if (rejected) {
+      await assert.rejects(harness.captures[0].onPurge(Number(target.turn), target), /清理回执目标与请求不一致/, label)
+      assert.equal(waited.length, 0, label + '：错范围不得等待同步')
+      assert.equal(run.rebased + run.refreshed, 0, label + '：错范围不得刷新')
+    } else {
+      await harness.captures[0].onPurge(Number(target.turn), target)
+      assert.deepEqual(waited, [{id:'r1'}], label + '：同范围等待真实同步边界')
+      assert.equal(run.refreshed, 1, label + '：同范围刷新下一目标')
+    }
   }
   const receipt = extra => ({kind:'native-only', chatId:'c1', sessionId:'s1', turn:43, branchId:'b1', revision:91, endSeq:494, eventCount:495, ...extra})
   await runCase('缺 endSeq', receipt({endSeq:undefined}), native43)
@@ -586,13 +514,14 @@ test('干净清理12 收据形状不合格一律拒更新（native 缺 endSeq/ev
   await runCase('eventCount 漂移', receipt({eventCount:494}), native43)
   await runCase('kind 反转（body 形状且 operationId 缺失）', {turn:43, branchId:'b1', revision:91}, native43)
   await runCase('revision 漂移', receipt({revision:92}), native43)
-  await runCase('turn 漂移', receipt({turn:42}), native43)
+  await runCase('turn 漂移', receipt({turn:42}), native43, true)
   await runCase('branchId 漂移', receipt({branchId:'b2'}), native43)
-  await runCase('chatId 漂移', receipt({chatId:'c9'}), native43)
-  // body 侧：收据只回 turn/branch/revision（operationId undefined）不得因 String(undefined) 恒等而放行
+  await runCase('chatId 漂移', receipt({chatId:'c9'}), native43, true)
+  await runCase('sessionId 漂移', receipt({sessionId:'other'}), native43, true)
+  // body侧缺operationId不构成另一层准入门。
   const body42 = failureItem(42, 'op42', {revision:91})
   await runCase('body 收据 operationId 缺失', {turn:42, branchId:'b1', revision:91}, body42)
-  // kind 未知值（既非 native-only 也非 undefined/body）一律拒，不得当成 body 放行
+  // kind不是回执范围身份；含统一rollback或未来值仍正常刷新。
   await runCase('未知 kind 值（native）', {kind:'native', chatId:'c1', sessionId:'s1', turn:43, branchId:'b1', revision:91, endSeq:494, eventCount:495}, native43)
   await runCase('未知 kind 值（rollback）', receipt({kind:'rollback'}), native43)
   await runCase('body 目标收到未知 kind 收据', {kind:'foo', turn:42, operationId:'op42', branchId:'b1', revision:91}, body42)
@@ -900,8 +829,8 @@ test('干净清理18 真协调服务：清理回执后定向失效并刷新下�
     assert.equal(failed.run.rebased, 0, 'RPC 失败不得 rebase')
     assert.equal(failed.run.reported.length + (failed.thrown ? 1 : 0), 1, '失败必须恰好暴露一次')
     if (failed.run.reported.length === 1) assert.equal(failed.run.reported[0][0], '干净清理错误失败', '作者 onError 标签')
-    // ④ 收据不匹配：同③（不冒认成功、不失效）
-    const mismatch = await caseRun('收据不匹配', () => receiptOf({turn: 42, operationId: 'other-op', branchId: target.branchId, revision: target.revision}))
+    // ④ 错轮收据不匹配：同③；退役的operation/branch/revision重复认证不再作为负例。
+    const mismatch = await caseRun('收据不匹配', () => receiptOf({turn: 43, operationId: 'other-op', branchId: target.branchId, revision: target.revision}))
     assert.deepEqual(mismatch.delta, {s1: 0, s2: 0}, '收据不匹配不得失效/刷新')
     assert.equal(mismatch.run.rebased, 0, '收据不匹配不得 rebase')
     assert.equal(mismatch.run.reported.length + (mismatch.thrown ? 1 : 0), 1, '收据不匹配必须暴露一次')

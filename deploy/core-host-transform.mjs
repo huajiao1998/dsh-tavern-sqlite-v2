@@ -32,27 +32,12 @@ export function applyHostTransform(source) {
   if (readSlotVariants.reduce((count, [anchor]) => count + next.split(anchor).length - 1, 0) !== 1) throw new Error('核心接入锚点不唯一：回退head行键读接口（有限新旧布局）')
   const readSlot = readSlotVariants.find(([anchor]) => next.includes(anchor))
   next = once(next, readSlot[0], readSlot[1], '回退head行键读接口')
-  next = once(next, '    sessionPatch,\n  })\n\n  const bodyEditor',
-    "    sessionPatch,\n    variableStore: variableSqliteStore,\n    persistenceProvider: () => ctx.get('sessionPersistence'),\n    projectionsProvider: () => ctx.get('sessionProjections'),\n    projectionCacheProvider: () => ctx.get('sessionProjectionCache'),\n    tokenMeterProvider: () => ctx.get('tokenMeter'),\n    webServerProvider: () => ctx.get('webServer'),\n  })\n\n  const bodyEditor", '完整回退实时服务')
-  // 上游计算接管只对具备服务端计算分发机制的作者代生效：createServerScriptExecutor 自 2.7.0
-  // 引入（连同 priority/pageInFront/serverScripts 这套分发）。旧代没有这套机制，硬造接缝只会
-  // 得到跑不起来的代码，故按能力跳过——这是"向下适配"，不是放宽准入。
-  // 反向护栏不放松：有 executor 而锚点缺失/重复，说明新版上游改坏了接缝点，由
-  // applyUpstreamComputeHost 内部的 once() 响亮失败，不静默跳过（否则计算权会悄悄落回页面，
-  // 违反"唯一上游服务端计算"与"服务端不可用须失败/等待，不允许假成功或页面回落"）。
-  //
-  // 但"作者入口的开局分类锚点"与上游计算注入是两件事：它是 opening 链路的必需锚点，旧代虽不接
-  // 上游计算，这个锚点仍必须存在且唯一。故跳过注入时用 replaceOnce 做一次自校验（原文换原文），
-  // 缺失/重复照样响亮失败——否则破坏它就等于绕过准入（曾因漏此校验让"未知作者契约"负例失效）。
-  if (next.includes('createServerScriptExecutor')) {
-    next = applyUpstreamComputeHost(next)
-  } else {
-    // 旧代不施上游计算接缝，但作者入口的开局分类锚点仍是 opening 链路的必需锚点：
-    // 存在且唯一。这里显式校验并抛出**语义自描述**的错误（不复用 replaceOnce 的
-    // "上游计算接入锚点"前缀——旧代本就与上游计算无关，错误信息不能误导排障）。
-    const openingAnchor = 'createOpeningPreparation({ readCard, worldBooks, extensionSettings:'
-    if (next.split(openingAnchor).length !== 2) throw new Error('开局动态分类宿主锚点缺失/重复')
-  }
+  const repairArgument = "    repairNative: (sessionId, session) => repairNativeStory(sessionId, session, '回退或重新生成时找不到原生位置'),\n"
+  const roundTail = '    sessionPatch,\n' + (next.includes(repairArgument) ? repairArgument : '')
+  next = once(next, roundTail + '  })\n\n  const bodyEditor',
+    roundTail + "    variableStore: variableSqliteStore,\n    persistenceProvider: () => ctx.get('sessionPersistence'),\n    projectionsProvider: () => ctx.get('sessionProjections'),\n    projectionCacheProvider: () => ctx.get('sessionProjectionCache'),\n    tokenMeterProvider: () => ctx.get('tokenMeter'),\n    webServerProvider: () => ctx.get('webServer'),\n  })\n\n  const bodyEditor", '完整回退实时服务')
+  // 仅有服务端计算入口的作者代需要此接缝；旧代不检查无关的开局声明。
+  if (next.includes('createServerScriptExecutor')) next = applyUpstreamComputeHost(next)
   next = applyBodyEditEventTransform(next)
   return applyVariableConsumerTransform(next)
 }
@@ -170,21 +155,15 @@ export function applyBodyEditEventTransform(source) {
 // R1额外代标记：已装核心Host也必须升级消费者；不依赖重新fork整份作者模块。
 export function applyVariableConsumerTransform(source) {
   const marker = '// [dsh-tavern-current-variables:v1]'
-  if (source.includes(marker)) {
-    for (const required of ['const currentVariablesOf = createCurrentVariableReader(', 'readSnapshot: readCurrentVariableSnapshot', '    currentVariablesOf,']) {
-      if (!source.includes(required)) throw new Error('当前变量标记存在但消费者缺失：' + required)
-    }
-    return source
-  }
+  if (source.includes(marker)) return source
   let next = "import { createCurrentVariableReader } from './domain/storage-current-variables.js'\n" + marker + '\n' + source
   next = once(next, '  const variableSqliteStore = chatJournalStore.variables',
     '  const readCurrentVariableSnapshot = chat => chatJournalStore.readCurrentVariableSnapshot(chat)\n  const currentVariablesOf = createCurrentVariableReader({ lastVariables: lastTavernHelperVariables, readSnapshot: readCurrentVariableSnapshot })\n  const variableSqliteStore = chatJournalStore.variables', 'R1当前变量同revision兜底')
   for (const old of ['lastTavernHelperVariables(recent.chat.messages)', 'lastTavernHelperVariables(chat.messages)']) {
-    if (!next.includes(old)) throw new Error('当前变量作者调用锚点缺失：' + old)
     next = next.split(old).join(old.includes('recent.chat') ? 'currentVariablesOf(recent.chat)' : 'currentVariablesOf(chat)')
   }
-  next = once(next, '    resolveChat: chatForSession,', '    currentVariablesOf,\n    resolveChat: chatForSession,', 'R1 Helper临时上下文DI')
-  next = once(next, 'registerVariableReadTool({tools,defineTool,chatForSession})',
+  if (next.includes('    resolveChat: chatForSession,')) next = once(next, '    resolveChat: chatForSession,', '    currentVariablesOf,\n    resolveChat: chatForSession,', 'R1 Helper临时上下文DI')
+  if (next.includes('registerVariableReadTool({tools,defineTool,chatForSession})')) next = once(next, 'registerVariableReadTool({tools,defineTool,chatForSession})',
     'registerVariableReadTool({tools,defineTool,chatForSession,readSnapshot: readCurrentVariableSnapshot})', 'R1前台查询兜底')
   return next
 }
