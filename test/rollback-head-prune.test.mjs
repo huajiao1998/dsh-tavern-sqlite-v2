@@ -1,9 +1,9 @@
-// 定向回归：L4 在作者最后一次head写入后，四类索引/世界书/账本/undo均按被删轮清零。
+// 仅保留已公开deprecated L4导出的兼容合同，不作为当前cleanRollback主路径覆盖。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { cleanupRollbackHeadIndex } from '../lib/rollback-head-prune.js'
 
-test('L4：删除目标轮索引与终态账本，保留更早轮和在途非悬空项',async()=>{
+test('兼容导出L4：删除目标轮索引与终态账本，保留更早轮和在途非悬空项',async()=>{
   let chat={
     foregroundFrames:{'1':{turn:1},'2':{turn:2}},runtimeInputs:{'1':{x:1},'2':{x:2}},nativeCommits:{'1':{},'2':{}},
     preparedWorldBook:{turn:2},preparedWorldBookContext:'old',lastWorldBookRecall:{turn:2},worldBookReads:{old:{turn:1},new:{turn:2}},

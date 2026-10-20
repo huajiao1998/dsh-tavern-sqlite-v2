@@ -74,7 +74,7 @@ const TAKEOVER_KEYS = [
 	"findLog", "requireStoredLog", "resolveCurrentLog", "readStoredLog",
 	"stat", "list", "locate",
 	"ensureMigrated", "readStored", "truncateEvents", "replaceRegeneratedTail", "loadRollbackSession", "bindRollbackArchive", "setRollbackPending", "guardTurnStart", "assertWritable", "create", "open", "ensureRootEncoding",
-	"dbSaveSessionPath", "dbSaveDrain", "dbSaveValidate", "dbSaveInstall", "dbSaveRemove", "dbSaveFinish", "dbSaveDeleteFootprint", "dbSaveCanDeleteDeferredPath", "drainOpenHandles"
+	"dbSaveSessionPath", "dbSaveDrain", "dbSaveValidate", "dbSaveInstall", "dbSaveRemove", "dbSaveFinish", "dbSaveDeleteFootprint", "dbSaveCanDeleteDeferredPath", "drainOpenHandles", "discardRollbackBuffers", "pauseRollbackBuffers"
 ]
 
 export default class TavernSessionPersistence extends JsonlSessionPersistence {
@@ -368,9 +368,8 @@ export default class TavernSessionPersistence extends JsonlSessionPersistence {
 	/**
 	 * 物理删除 seq > boundarySeq 的事件并回拨游标（单事务），然后回卷该会话活动写句柄。
 	 * 三步顺序不可换：
-	 *   ① 先 drainLive()：把句柄里"已接受但还没落地"的路由缓冲排空，保证 DELETE 之后
-	 *      不会再有迟到批次写进新尾部（缓冲排空失败即抛，不放行半状态的截断）；
-	 *   ② store.truncateFrom(boundarySeq)：单事务 DELETE + event_count 回拨；
+	 *   ① 进入真实句柄的串行队列，等待在途旧写完成；
+	 *   ② 丢弃未落盘缓冲，store.truncateFrom只删除已落盘尾部；
 	 *   ③ rewindOpenHandles：句柄游标/观测长度回卷——不回卷则下一次 read 抛
 	 *      "stored log shrank below a previously observed prefix"、append 抛
 	 *      "append seq mismatch"（tools/truncate-live.test.mjs 实证）。
@@ -379,12 +378,13 @@ export default class TavernSessionPersistence extends JsonlSessionPersistence {
 	 */
 	async truncateEvents(header, boundarySeq, identity, retainedEvents) {
 		this.assertWritable(header.id)
-		await this.drainOpenHandles(header.id)
 		const session = this.store.openExisting(header.id)
 		if (session === undefined) throw new SessionPersistenceNotFoundError(header.id)
-		const meta = session.truncateFrom(boundarySeq, identity,retainedEvents)
+		await this.discardRollbackBuffers(header.id)
+		const storedBoundary = Math.min(boundarySeq, session.cursor() - 1)
+		const meta = session.truncateFrom(storedBoundary, identity, retainedEvents)
 		this.rewindOpenHandles(header.id, meta?.eventCount ?? 0, meta?.inheritedEventCount)
-		return {...meta,drained:true}
+		return {...meta,boundarySeq:storedBoundary,drained:true}
 	}
 
 	/** 重生成专用尾替换：真实SQL同事务，旧写先drain，全部活动句柄回拨。 */
@@ -526,7 +526,7 @@ export default class TavernSessionPersistence extends JsonlSessionPersistence {
 	/** 冷Session只读构造用于回退，不resume Agent、不附着、不追加恢复标记或任务。 */
 	async loadRollbackSession(id) {
 		this.assertWritable(id)
-		await this.drainOpenHandles(id)
+		await this.discardRollbackBuffers(id)
 		const db = this.store.openExisting(id), stored = db?.readAll()
 		if (!stored) throw new SessionPersistenceNotFoundError(id)
 		// 使用已装共享补丁的同一验证/构造器；不能绕回stock词汇，也不忽略必需扩展事件。
@@ -550,6 +550,38 @@ export default class TavernSessionPersistence extends JsonlSessionPersistence {
 		const session = this.store.openExisting(id)
 		if (!session) throw new SessionPersistenceNotFoundError(id)
 		session.setRollbackPending(pending)
+	}
+
+	/** 点击回退即停止路由接收并取消定时批写；任务退出前产生的事件也不再入待写队列。 */
+	pauseRollbackBuffers(id) {
+		const handles = [...this.tracker.openHandles].filter(handle => handle?.id === id && handle.access === 'write')
+		const releases = handles.map(handle => {
+			const key = Symbol.for('dsh-tavern.rollback-buffer-pause')
+			const state = handle[key] ??= { enqueueLive: handle.enqueueLive, users: 0 }
+			state.users++
+			handle.enqueueLive = () => {}
+			if (handle.batchTimer !== undefined) { clearTimeout(handle.batchTimer); handle.batchTimer = undefined }
+			handle.buffered.length = 0
+			handle.drainPaused = true
+			return () => {
+				handle.buffered.length = 0
+				if (--state.users === 0) { handle.drainPaused = false; handle.enqueueLive = state.enqueueLive; delete handle[key] }
+			}
+		})
+		return () => { for (const release of releases) release() }
+	}
+
+	/** 回退取消待写批次；只等已经在途的句柄操作结束，不把剩余缓冲落盘。 */
+	async discardRollbackBuffers(id) {
+		const handles = [...this.tracker.openHandles].filter(handle => handle?.id === id && handle.access === 'write')
+		for (const handle of handles) {
+			if (handle.batchTimer !== undefined) { clearTimeout(handle.batchTimer); handle.batchTimer = undefined }
+			handle.drainPaused = true
+			handle.buffered.length = 0
+		}
+		// 失败中的drain可能把取走的批次放回；等它退出后再释放，不重试旧写。
+		await Promise.allSettled(handles.flatMap(handle => [handle.chain, handle.draining]))
+		for (const handle of handles) { handle.buffered.length = 0; handle.drainPaused = false }
 	}
 
 	/** 排空该会话活动写句柄的路由缓冲（无句柄/无缓冲时零成本）。 */

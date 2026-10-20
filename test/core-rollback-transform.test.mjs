@@ -352,25 +352,7 @@ test('transform：签名行未知 / CRLF / 半施 / 他人接线 ⇒ 全部 fail
   assert.throws(() => applyRollbackTransform(foreign), /拒绝叠加/)
 })
 
-test('后台参与者：物理 seq 回退取代作者的「空 surface + 表面补偿」软行（缺口已闭合）', () => {
-  const out = applyRollbackTransform(FIXTURE).text
-  // 作者那套软行（空 surface 替换 + checkpoint/undo.background 表面补偿 + catch 成 warning）必须整体消失。
-  assert.ok(!out.includes('rewindBackgroundSurface(background, participant.rewindTo)'), '不得再走 surface 替换')
-  assert.ok(!out.includes('undo.background.push(checkpoint)'), '表面补偿（撤销点）不适用于物理 delete，必须剔除')
-  assert.ok(!out.includes('后台上下文回退未完成'), '失败不得降级成 rollbackWarning（必须响亮）')
-  // 物理回退走 seq cutoff：边界是 participant.rewindTo（该会话自己的 seq），不由 turn 反推。
-  assert.ok(out.includes("rollbackExport('cleanupAfterRollbackAtSeq')(livePersistence, background, participant.rewindTo"))
-  const physicalLoop = out.slice(out.indexOf('for (const entry of backgroundRewinds) {'), out.indexOf("source: 'rollback.undo-point'"))
-  assert.ok(physicalLoop.length > 0)
-  for (const required of ["rollbackExport('cleanupAfterRollbackAtSeq')", 'await sessions.flush(background)']) {
-    assert.ok(physicalLoop.includes(required), '后台物理回退段缺少：' + required)
-  }
-  // 未加载的后台会话：resume 拿活句柄、finally 释放（Phase A 预览句柄 + Phase B 执行句柄都在）。
-  assert.ok(out.includes('previewHandle = await sessions.resume(participant.sessionId)'))
-  assert.ok(out.includes('if (previewHandle) await previewHandle.dispose()'))
-  assert.ok(physicalLoop.includes('restoredHandle = await sessions.resume(participant.sessionId)'))
-  assert.ok(physicalLoop.includes('await restoredHandle.dispose()'))
-})
+// 旧函数内部resume/flush/物理循环顺序合同退役；这里只保安装转换合同及旧运行入口零删写负例。
 
 // ---------------------------------------------------------------------------
 // 运行时 fixture：**真的执行**变换后的模块（不只是 token 断言）

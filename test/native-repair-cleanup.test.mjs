@@ -169,7 +169,9 @@ test('已完成旧请求重传：同轮号已开始新发送时零取消零截�
  let cancels=0
  f.agent.phase={kind:'running',lastTurn:11};f.agent.cancel=()=>{cancels++};f.agent.whenIdle=async()=>{}
  const events=structuredClone(f.db.readAll().events),calls=f.counts()
- const retry=await cleanRollback({...f.args,chat:await f.read(),requestedTurn:old})
+ let pauses=0,discards=0
+ const retry=await cleanRollback({...f.args,chat:await f.read(),requestedTurn:old,persistence:{...f.args.persistence,pauseRollbackBuffers:()=>{pauses++;return ()=>{}},discardRollbackBuffers:async()=>{discards++}}})
+ assert.equal(pauses,0);assert.equal(discards,0,'旧RPC重传不触碰新发送缓冲')
  assert.equal(retry.rolledBack.alreadyClean,true);assert.equal(cancels,0);assert.equal(f.counts().cutCalls,calls.cutCalls)
  assert.deepEqual(f.db.readAll().events,events);assert.equal((await f.read()).messages.at(-1).text,'同轮号新发送')
 }}))

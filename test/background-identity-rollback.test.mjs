@@ -50,10 +50,10 @@ async function fixture(late=false,queued=false,unstarted=false){
  }
  if(late)session.append('subagent/descriptor',descriptor)
  const db=new SqliteSessionDb(path.join(root,'fixture.db'));db.materialize(session.header,0,session.snapshotEvents())
- let cursor=session.seq
+ // 身份测试只消费已经落盘的历史，不补写被撤销内存尾。
  const agent={phase:{kind:'idle',lastTurn:1}},registrations=new Map([['turnBoundary',{def:{key:'turnBoundary'},cells:new Map()}]])
  const services={agentProvider:()=>agent,projectionCache:{write:async()=>{}},projections:{registrations,hydrate(s,_input,events){for(const reg of registrations.values())reg.cells.set(s,{observedSeq:events.at(-1)?.seq??-1})},stateOf(s,key){return key==='inbox'?foldInbox(s.snapshotEvents()):{lastTurn:s.log.findLast(e=>e.type==='turn/end')?.data.turn??0}}}}
- const persistence={truncateEvents:async(h,n,identity)=>{const result=db.truncateFrom(n,identity);cursor=result.eventCount;return result},drainOpenHandles:async()=>{const tail=session.snapshotEvents(cursor);if(tail.length){db.appendBatch(tail,cursor);cursor=session.seq}},open:async()=>({read:async()=>({events:db.readAll().events}),close:async()=>{}})}
+ const persistence={truncateEvents:async(h,n,identity)=>db.truncateFrom(n,identity),readStored:()=>db.readAll(),discardRollbackBuffers:async()=>{},open:async()=>({read:async()=>({events:db.readAll().events}),close:async()=>{}})}
  const head={readSlice:async()=>({chat:{}}),update:async()=>{}}
  return {session,db,services,persistence,head,agent,taskSeq,dispose(){db.close();rmSync(root,{recursive:true,force:true})}}
 }
@@ -62,7 +62,7 @@ function checkOpening(session){
  const identity=descriptorIdentity(own[0]);assert.ok(identity)
  validateAddress({kind:'subagent',parentSessionId:'parent-original',childSessionId:session.id,mode:'continuable'},session.header,0,{values:{subagent:identity}})
 }
-test('旧创建切点在descriptor之前：连续初始化前缀保身份，真正轮内切点仍拒绝',async()=>{
+test('旧创建切点在descriptor之前：SQL身份保留且显式seq不按整轮认证',async()=>{
  const f=await fixture()
  try{
   const pre=preflightRollbackAtSeq(f.session,0,{persistence:f.persistence,services:f.services,head:f.head})

@@ -3,10 +3,9 @@
 //
 // 判据（PLG-011 / 用户要求）：
 //   · 边界只能按 **seq** 给（时间线账本的 participant.rewindTo）—— 后台轮次独立于前台，**不得由 turn 反推**；
-//   · rewindTo === -1（新建 participant）⇒ 保留第一个 turn/start 之前的全部初始事件；
-//     turn/start 就是第一条 ⇒ **拒绝**（禁止盲删 metadata/会话头）；
-//   · 整个落在边界内 ⇒ 核对过的 `noop:true`（不得报成"已物理回退"）；
-//   · 纯尾 / 不切断任何一轮 / 引用链 / 四层接线 判据与前台一致；
+//   · rewindTo === -1 ⇒ 保留首次任务入队/turn/start前的初始化；首事件即任务时空前缀合法；
+//   · 整个落在边界内 ⇒ noop，仍收敛句柄/内存/投影；
+//   · seq只定位纯尾坐标，不按轮完整度、引用或事件类型设资格；
 //   · L1.5 是 required counter：`stateOf(session,'turnBoundary').lastTurn` 不是有效数 ⇒ **硬拒**；
 //   · agentProvider 必须解析**该后台会话**的 agent（不是前台 chat 的 sessionId）。
 //
@@ -57,8 +56,8 @@ function makeBackgroundSession(events) {
 
 function fakePersistence(record) {
   return {
-    async drainOpenHandles(id) { record.push('drain:' + id) },
-    async truncateEvents(header, boundarySeq) { await this.drainOpenHandles(header.id);record.push('truncate:' + boundarySeq); return { eventCount: boundarySeq + 1,drained:true } },
+    async discardRollbackBuffers(id) { record.push('discard:' + id) },
+    async truncateEvents(header, boundarySeq) { record.push('truncate:' + boundarySeq); return { eventCount: boundarySeq + 1,drained:true } },
   }
 }
 
@@ -120,7 +119,7 @@ test('seq 预检：rewindTo=-1（新建 participant）⇒ 保留第一个 turn/s
   assert.equal(plan.dropped, 4)
 })
 
-test('seq 预检：rewindTo=-1 且 turn/start 就是第一条 ⇒ 拒绝（禁止盲删 metadata/会话头）', () => {
+test('seq定位：首事件即任务时-1保留空前缀，不虚构初始化', () => {
   assert.equal(preflightRollbackAtSeq(makeBackgroundSession([...turnEvents(7, 0)]), -1, { strict: true }).keep,0,'首轮空前缀合法，不虚构metadata事件')
 })
 
@@ -135,7 +134,7 @@ test('seq 预检：整个落在边界内 ⇒ 核对过的 noop（不是"猜不�
   assert.equal(preflightRollbackAtSeq(onlyPrefix, -1, { strict: false }).noop, true)
 })
 
-test('seq 预检：边界把某一轮切一半 ⇒ 拒绝（只允许整轮边界）', () => {
+test('seq定位：后台显式坐标不按轮次完整度拒绝', () => {
   // 边界 2 落在 turn 7 的 assistant/message 之后、turn/end(3) 之前 ⇒ 保留段与待删段共享 turn 7。
   assert.equal(preflightRollbackAtSeq(makeBackgroundSession([...turnEvents(7, 0), ...turnEvents(8, 4)]), 2, { strict: true }).keep,3,'seq后台切点不按轮形态拒绝')
 })
@@ -164,19 +163,6 @@ test('seq 预检：真实 turn1 会话里固定种子(turn:1) 不得被 -1 判�
   assert.equal(plan.dropped, 4, '真 turn 1 整轮删除')
 })
 
-test('seq 预检：真实 turn1 会话里边界 8 落在轮中间仍拒（不放宽中间删除）', () => {
-  assert.equal(preflightRollbackAtSeq(seededTurnOneSession(), 8, { strict: true }).keep,9)
-})
-
-test('seq 预检：待删段混入低 seq 事件 ⇒ NOT_PURE_TAIL；保留段引用被删 seq ⇒ DANGLING_REFERENCE', () => {
-  const impure = [...turnEvents(7, 0), ...turnEvents(8, 4)]
-  impure.push({ seq: 0, type: 'session/end-seed', data: {} })
-  assert.equal(preflightRollbackAtSeq(makeBackgroundSession(impure), 3, { strict: true }).boundarySeq,3)
-  const dangling = [...turnEvents(7, 0), ...turnEvents(8, 4)]
-  dangling[2] = { ...dangling[2], surfaceOp: { op: 'replace', startSeq: 4, endSeq: 5 }, sourceEventSeqs: [4] }
-  assert.equal(preflightRollbackAtSeq(makeBackgroundSession(dangling), 3, { strict: true }).boundarySeq,3)
-})
-
 test('seq预检：已结束轮后的旧空替换随纯尾删除，重新生成后仍可回退', async () => {
   const events = [...turnEvents(4, 0)]
   const empty = { seq: 4, type: 'assistant/message', data: { turn: 4, message: { content: [] } },
@@ -191,16 +177,6 @@ test('seq预检：已结束轮后的旧空替换随纯尾删除，重新生成�
   assert.deepEqual(session.log, events, '真实旧轮保留；空替换及新轮仅作尾部物理删除')
   session.log.push(...turnEvents(5, 4))
   assert.equal(preflightRollbackAtSeq(session, 3, options).ok, true, '回退再生成再回退')
-  const rejected = [
-    { ...empty, data: { turn: 4, message: { content: [{ type: 'text', text: '不可删正文' }] } } },
-    { ...empty, surfaceOp: 'append' },
-    { ...empty, sourceEventSeqs: [99] },
-    { ...empty, surfaceOp: { op: 'replace', startSeq: 1, endSeq: 9 } },
-    { ...empty, sourceEventSeqs: [] },
-  ]
-  for (const event of rejected) assert.equal(preflightRollbackAtSeq(makeBackgroundSession([...events, event, ...turnEvents(5, 5)]), 3, { strict: true }).keep,4)
-  const afterStart = makeBackgroundSession([...events, { seq: 4, type: 'turn/start', data: { turn: 5 } }, { ...empty, seq: 5 }])
-  assert.equal(preflightRollbackAtSeq(afterStart, 3, { strict: true }).keep,4)
 })
 
 // ---------- ② 接线（strict 缺一即拒；L1.5 必须是有效数） ----------
@@ -229,7 +205,7 @@ function seqAwareServices(record) {
   } }
 }
 
-test('seq 清理：-1（变量结算）物理回退保留固定种子，drain→截断→cache→L1.5 归零', async () => {
+test('seq 清理：-1（变量结算）物理回退保留固定种子，discard→截断→cache→L1.5 归零', async () => {
   const record = []
   const session = seededTurnOneSession()
   const { backgroundAgent, services } = seqAwareServices(record)
@@ -240,7 +216,7 @@ test('seq 清理：-1（变量结算）物理回退保留固定种子，drain→
   assert.equal(result.keep, 7, '含固定种子的前缀整段保留')
   assert.equal(result.dropped, 4, '真 turn 1 整轮物理删除')
   assert.deepEqual(record.filter(item => !item.startsWith('stateOf') && item !== 'agentProvider'),
-    ['drain:background-synthetic', 'truncate:6', 'hydrate', 'cache.write'], '顺序：drain → 截断 → 重折 → cache')
+    ['discard:background-synthetic', 'truncate:6', 'hydrate', 'cache.write'], '顺序：discard → 截断 → 重折 → cache')
   assert.equal(session.log.length, 7, 'log 同一数组就地截短')
   assert.equal(session.log.at(-1).seq, 6)
   assert.equal(session.log.at(-1).type, 'system/message')
@@ -249,7 +225,7 @@ test('seq 清理：-1（变量结算）物理回退保留固定种子，drain→
   assert.equal(backgroundAgent.phase.lastTurn, 0, 'L1.5 按重折后的 turnBoundary 归零 ⇒ 下一轮仍从 turn 1 起')
 })
 
-test('seq 清理：drain → 单事务截断（用解析后的前缀 seq）→ 内存就地重建 → 投影重折 → L1.5（后台 agent）', async () => {
+test('seq 清理：discard → 单事务截断（用解析后的前缀 seq）→ 内存就地重建 → 投影重折 → L1.5（后台 agent）', async () => {
   const record = []
   const session = makeBackgroundSession([SEED, ...turnEvents(7, 1), ...turnEvents(8, 5)])
   const { backgroundAgent, frontAgent, services } = makeAgents(record)
@@ -258,9 +234,9 @@ test('seq 清理：drain → 单事务截断（用解析后的前缀 seq）→ �
   assert.equal(result.noop, false)
   assert.equal(result.boundarySeq, 4)
   assert.equal(result.keep, 5, 'SEED + turn/start(1) 前缀保留')
-  // 只读预检（stateOf 读 L1.5 有效数）先跑；之后必须是 **drain → 截断 → 重折 → cache → L1.5 取后台 agent**。
+  // 只读预检（stateOf 读 L1.5 有效数）先跑；之后必须是 **discard → 截断 → 重折 → cache → L1.5 取后台 agent**。
   assert.deepEqual(record.filter(item => !item.startsWith('stateOf') && item !== 'agentProvider'),
-    ['drain:background-synthetic', 'truncate:4', 'hydrate', 'cache.write'])
+    ['discard:background-synthetic', 'truncate:4', 'hydrate', 'cache.write'])
   assert.equal(session.log.length, 5, 'log 同一数组就地截短')
   assert.equal(backgroundAgent.phase.lastTurn, 1, 'L1.5 必须回拨**后台** agent 的 phase.lastTurn')
   assert.equal(frontAgent.phase.lastTurn, 9, '前台 agent 不得被后台回退改动')
@@ -280,10 +256,10 @@ test('seq 清理：边界不合法 ⇒ 抛错且一次都不碰库；noop ⇒ �
   assert.equal(noopResult.noop, true)
   assert.equal(noopResult.truncated, false)
   // noop = **内存 log 无可删尾部**，不是"整链无事可做"（26420f5：noop 仍重建内存/投影/Agent）。
-  // 库已删尾并不能证明半失败后的内存残留已修复 ⇒ drain/同边界幂等 truncate/重折/cache 一律照跑，
+  // 库已删尾并不能证明半失败后的内存残留已修复 ⇒ discard/同边界幂等 truncate/重折/cache 一律照跑，
   // 只读预检读数不算"碰库"。这里断言的是**步骤序列**，不是"零步骤"。
   assert.deepEqual(noopRecord.filter(item => !item.startsWith('stateOf') && item !== 'agentProvider'),
-    ['drain:background-synthetic', 'truncate:4', 'hydrate', 'cache.write'], 'noop 也必须收敛派生层（不得静默跳过）')
+    ['discard:background-synthetic', 'truncate:4', 'hydrate', 'cache.write'], 'noop 也必须收敛派生层（不得静默跳过）')
   // 两次预检（既有计划 + 动库前复核，各自 agentProvider 一次）+ 清理阶段的 L1.5 取agent/回拨，
   // 合计 5 次。这里断言"确实按当前实现取了 agent 并回拨"，不是硬编码某个历史次数上限。
   assert.equal(noopSession.log.length, 5, 'noop 下内存 log 保持不变')

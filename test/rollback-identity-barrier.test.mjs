@@ -28,7 +28,7 @@ function method(name){
  assert.ok(begin>0 && end>begin,name)
  return new Function('assertRollbackSessionWritable','rollbackSchedulingBarrier','rewindRollbackHandles','SessionPersistenceNotFoundError','return ({'+backend.slice(begin,end)+'}).'+name)(assertRollbackSessionWritable,rollbackSchedulingBarrier,rewindRollbackHandles,Error)
 }
-const methods=Object.fromEntries(['guardTurnStart','persistBatch','truncateEvents','drainOpenHandles','rewindOpenHandles','setRollbackPending'].map(name=>[name,method(name)]))
+const methods=Object.fromEntries(['guardTurnStart','persistBatch','truncateEvents','drainOpenHandles','discardRollbackBuffers','pauseRollbackBuffers','rewindOpenHandles','setRollbackPending'].map(name=>[name,method(name)]))
 const descriptor={version:3,mode:'continuable',provider:'fixture-original',label:'原创后台身份',agentProvider:'fixture',agentModel:'fixed'}
 async function fixture(){
  const root=mkdtempSync(path.join(os.tmpdir(),'rollback-identity-barrier-'))
@@ -47,7 +47,7 @@ async function fixture(){
  for(const s of [main,child]){const db=new SqliteSessionDb(path.join(root,s.id+'.db'));db.materialize(s.header,s.inheritedEventCount,s.snapshotEvents());db.bindRollbackArchive(archiveFile);db.setRollbackPending(true);dbs.set(s.id,db)}
  archive.prepare('INSERT INTO archive_head_fields VALUES(?,?)').run('rollbackPending',JSON.stringify(pending))
  const store={openExisting:id=>dbs.get(id)}
- const persistence={...methods,assertWritable(){},store,tracker:{openHandles:handles},releaseHandle(){},bindRollbackArchive:async(id,file)=>dbs.get(id).bindRollbackArchive(file)}
+ const persistence={...methods,assertWritable(){},store,tracker:{openHandles:handles},releaseHandle(){},readStored:id=>dbs.get(id).readAll(),bindRollbackArchive:async(id,file)=>dbs.get(id).bindRollbackArchive(file)}
  const realPersist=persistence.persistBatch;persistence.persistBatch=async(...args)=>{writes++;return realPersist.apply(persistence,args)}
  for(const s of [main,child])handles.add(new Handle(persistence,s.id,s.header,'write',{cursor:s.seq,materialized:true,inheritedEventCount:0},{release:async()=>{}}))
  const agents=new Map([[main.id,{session:main,phase:{kind:'idle',lastTurn:38}}],[child.id,{session:child,phase:{kind:'idle',lastTurn:1}}]])
@@ -90,17 +90,206 @@ test('分叉继承前缀回退：SQL内存真实句柄同步计数，关闭重�
   assert.deepEqual(f.main.snapshotEvents(),parentEvents)
  }finally{await f.close()}
 })
-test('审查修复排空回执：真实后端完成drain后才返回drained，排空失败不删库',async()=>{
+test('回退丢弃缓冲：等待在途失败归还批次后释放，不重试写入或触碰其他会话',async()=>{
  const f=await fixture()
  try{
-  const id=f.main.id,db=f.dbs.get(id),before=db.cursor(),drain=f.persistence.drainOpenHandles
-  let drains=0
-  f.persistence.drainOpenHandles=async()=>{drains++;throw Error('排空失败')}
-  await assert.rejects(f.persistence.truncateEvents(f.main.header,f.mainKeep-1),/排空失败/);assert.equal(db.cursor(),before)
-  f.persistence.drainOpenHandles=async value=>{drains++;return drain.call(f.persistence,value)}
-  const meta=await f.persistence.truncateEvents(f.main.header,f.mainKeep-1)
-  assert.equal(meta.drained,true);assert.equal(drains,2);assert.equal(db.cursor(),f.mainKeep)
+  const handle=[...f.handles].find(h=>h.id===f.main.id),other=[...f.handles].find(h=>h.id===f.child.id)
+  const event={seq:f.main.seq,type:'session/end-seed',time:1,data:{}}
+  handle.enqueueLive(event,()=>{});other.buffered.push(event)
+  const returned={...event,seq:event.seq+1}
+  const gate=Promise.withResolvers();let settled=false
+  handle.draining=gate.promise.then(()=>{handle.buffered.push(returned);throw Error('在途旧写已失败')})
+  const discard=f.persistence.discardRollbackBuffers(f.main.id).then(()=>{settled=true})
+  assert.equal(handle.buffered.length,0);assert.equal(handle.batchTimer,undefined)
+  await Promise.resolve();assert.equal(settled,false)
+  gate.resolve();await discard;handle.draining=undefined
+  assert.equal(handle.buffered.length,0);assert.equal(handle.drainPaused,false)
+  assert.equal(other.buffered.length,1);assert.equal(f.writes(),0)
+  other.buffered.length=0
  }finally{await f.close()}
+})
+
+test('回退未落盘缓冲：整批丢弃不INSERT，真实句柄回卷且普通写屏障保留',async()=>{
+ const f=await fixture()
+ try{
+  const db=f.dbs.get(f.main.id),handle=[...f.handles].find(h=>h.id===f.main.id)
+  f.main.append('unknown/unfinished',{turn:38})
+  handle.enqueueLive(f.main.snapshotEvents().at(-1),()=>{})
+  db.db.exec("CREATE TRIGGER no_buffer_insert BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'禁止先写缓冲再删除'); END")
+  f.setFault(true)
+  await assert.rejects(cleanRollback(f.args),/原创收尾故障/)
+  assert.equal(handle.buffered.length,0);assert.equal(handle.batchTimer,undefined)
+  assert.equal(db.cursor(),f.mainKeep)
+  assert.deepEqual(db.readAll().events,f.main.snapshotEvents())
+  await assert.rejects(f.persistence.persistBatch(f.main.header,[{seq:f.main.seq,type:'turn/start',time:1,data:{turn:99}}],true,0),/会话正在物理回退/)
+  f.setFault(false)
+  const result=await cleanRollback(f.args)
+  assert.equal(result.turn,37);assert.equal(handle.state.cursor,db.cursor())
+ }finally{await f.close()}
+})
+
+test('回退删尾失败：缓冲仍丢弃且SQL不变，持久pending同边界重试',async()=>{
+ const f=await fixture()
+ try{
+  const db=f.dbs.get(f.main.id),handle=[...f.handles].find(h=>h.id===f.main.id),before=db.readAll()
+  f.main.append('session/end-seed',{})
+  handle.enqueueLive(f.main.snapshotEvents().at(-1),()=>{})
+  if(handle.batchTimer!==undefined){clearTimeout(handle.batchTimer);handle.batchTimer=undefined}
+  db.db.exec("CREATE TRIGGER buffered_cut_fault BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT,'原创缓冲截断故障'); END")
+  await assert.rejects(cleanRollback(f.args),/原创缓冲截断故障/)
+  assert.deepEqual(db.readAll(),before)
+  assert.equal(handle.buffered.length,0)
+  assert.equal(handle.state.cursor,before.events.length)
+  assert.ok((await f.args.readChat()).rollbackPending)
+  assert.throws(()=>db.appendBatch([{seq:before.events.length,type:'turn/start',time:1,data:{turn:99}}]),/archive禁止Session追加事件/)
+  db.db.exec('DROP TRIGGER buffered_cut_fault')
+  const result=await cleanRollback(f.args)
+  assert.equal(result.turn,37);assert.equal(db.cursor(),f.mainKeep);assert.equal(handle.buffered.length,0)
+ }finally{for(const h of f.handles)h.buffered.length=0;await f.close()}
+})
+
+test('首次回退丢弃缓冲：成功错误失败未完成未知形态均不flush不INSERT直接删尾',async()=>{
+ for(const state of ['completed','error','failed','unfinished','future-state']){
+  const f=await fixture()
+  try{
+   const db=f.dbs.get(f.main.id),handle=[...f.handles].find(h=>h.id===f.main.id)
+   rewindSessionMemory(f.main,f.mainKeep)
+   f.main.append('turn/start',{turn:38})
+   f.main.append('user/message',{id:'current',role:'user',content:[{type:'text',text:'原创待撤销输入'}],source:{kind:'user'}},{surfaceOp:'append'})
+   if(state!=='unfinished')f.main.append('turn/end',{turn:38,reason:{kind:state}})
+   db.truncateFrom(f.mainKeep-1);db.setRollbackPending(false)
+   handle.state.cursor=f.mainKeep;handle.observedLength=f.mainKeep
+   for(const e of f.main.snapshotEvents(f.mainKeep))handle.enqueueLive(e,()=>{})
+   db.db.exec("CREATE TRIGGER no_pending_insert BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'未落盘事件不得补写'); END")
+   let chat=await f.args.readChat();delete chat.rollbackPending
+   f.archive.prepare("DELETE FROM archive_head_fields WHERE key='rollbackPending'").run()
+   const args={...f.args,chat,readChat:async()=>structuredClone(chat),updateChat:async(_id,fn)=>{
+    chat=await fn(structuredClone(chat))
+    if(chat.rollbackPending)f.archive.prepare('INSERT OR REPLACE INTO archive_head_fields VALUES(?,?)').run('rollbackPending',JSON.stringify(chat.rollbackPending))
+    else f.archive.prepare("DELETE FROM archive_head_fields WHERE key='rollbackPending'").run()
+    return chat
+   },sessions:{...f.args.sessions,flush:()=>{throw Error('回退禁止flush待删除缓冲')}}}
+   const result=await cleanRollback(args)
+   assert.equal(result.turn,37,state)
+   assert.equal(handle.buffered.length,0,state);assert.equal(handle.batchTimer,undefined,state)
+   assert.equal(db.cursor(),f.mainKeep,state);assert.deepEqual(db.readAll().events,f.main.snapshotEvents(),state)
+   assert.equal(handle.state.cursor,db.cursor(),state);assert.equal(f.writes(),0,state)
+   assert.equal(chat.rollbackPending,undefined,state)
+  }finally{for(const h of f.handles)h.buffered.length=0;await f.close()}
+ }
+})
+
+test('回退收口修复：实际尾前移后收尾失败，热重试及冷恢复不被旧坐标卡住',async()=>{
+ for(const cold of [false,true]){
+  const f=await fixture()
+  try{
+   const db=f.dbs.get(f.main.id),handle=[...f.handles].find(h=>h.id===f.main.id)
+   db.truncateFrom(f.mainKeep-2);handle.state.cursor=db.cursor()
+   for(const event of f.main.snapshotEvents().slice(db.cursor()))handle.enqueueLive(event,()=>{})
+   f.setFault(true);await assert.rejects(cleanRollback(f.args),/原创收尾故障/)
+   assert.equal(f.main.seq,f.mainKeep-1);assert.equal(handle.buffered.length,0)
+   if(cold){
+    f.agents.clear()
+    f.persistence.loadRollbackSession=async id=>{const stored=f.dbs.get(id).readAll();const session=f.Session.fromRestore(id,stored.events,stored.header,stored.inheritedEventCount,'detached');rewindSessionMemory(session,stored.events.length);return session}
+   }
+   f.setFault(false);await cleanRollback(f.args)
+   assert.equal(db.cursor(),f.mainKeep-1);assert.equal((await f.args.readChat()).rollbackPending,undefined)
+  }finally{for(const h of f.handles)h.buffered.length=0;await f.close()}
+ }
+})
+test('回退收口修复：未落盘身份与任意尾整批丢弃，不补写也不要求SQL已有该身份',async()=>{
+ const f=await fixture()
+ try{
+  const db=f.dbs.get(f.child.id),handle=[...f.handles].find(h=>h.id===f.child.id)
+  db.truncateFrom(f.child.seq-2);handle.state.cursor=db.cursor()
+  handle.enqueueLive(f.child.snapshotEvents().at(-1),()=>{})
+  db.db.exec("CREATE TRIGGER no_identity_insert BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'禁止补写已丢弃身份'); END")
+  await cleanRollback(f.args)
+  assert.equal(db.cursor(),f.childKeep);assert.equal(handle.buffered.length,0)
+  assert.deepEqual(db.readAll().events,f.child.snapshotEvents())
+  assert.equal(f.child.snapshotEvents().some(e=>e.type==='subagent/descriptor'),false)
+ }finally{for(const h of f.handles)h.buffered.length=0;await f.close()}
+})
+test('回退提前取消：过期返回和prepare失败也丢待写并回卷内存，不留下序号空洞',async()=>{
+ const f=await fixture()
+ try{
+  const db=f.dbs.get(f.main.id),handle=[...f.handles].find(h=>h.id===f.main.id)
+  let chat=await f.args.readChat();delete chat.rollbackPending
+  f.archive.prepare("DELETE FROM archive_head_fields WHERE key='rollbackPending'").run();db.setRollbackPending(false)
+  const args={...f.args,chat,requestedTurn:99,readChat:async()=>structuredClone(chat)}
+  for(const failed of [false,true]){
+   f.main.append('unknown/pending',{turn:38});handle.enqueueLive(f.main.snapshotEvents().at(-1),()=>{})
+   const before=db.cursor()
+   if(failed)await assert.rejects(cleanRollback({...args,requestedTurn:38,updateChat:async()=>{throw Error('prepare写入失败')}}),/prepare写入失败/)
+   else assert.equal((await cleanRollback(args)).changed,false)
+   assert.equal(handle.buffered.length,0);assert.equal(handle.batchTimer,undefined)
+   assert.equal(f.main.seq,before);assert.equal(handle.state.cursor,before)
+  }
+  f.main.append('unknown/next',{});handle.enqueueLive(f.main.snapshotEvents().at(-1),()=>{})
+  await handle.drainLive();assert.equal(db.cursor(),f.main.seq)
+ }finally{for(const h of f.handles)h.buffered.length=0;await f.close()}
+})
+test('回退提前取消：首个异步等待前撤timer，静止期间迟到事件不入队且不写库',async()=>{
+ const f=await fixture()
+ try{
+  const handle=[...f.handles].find(h=>h.id===f.main.id),original=handle.enqueueLive
+  f.main.append('unknown/before-stop',{turn:38});handle.enqueueLive(f.main.snapshotEvents().at(-1),()=>{})
+  const gate=Promise.withResolvers(),entered=Promise.withResolvers()
+  const running=cleanRollback({...f.args,quiesce:async()=>{
+   assert.equal(handle.batchTimer,undefined);assert.equal(handle.buffered.length,0)
+   f.main.append('unknown/late-cancel',{turn:38});handle.enqueueLive(f.main.snapshotEvents().at(-1),()=>{})
+   assert.equal(handle.buffered.length,0);assert.equal(handle.batchTimer,undefined)
+   entered.resolve();await gate.promise
+  }})
+  assert.equal(handle.batchTimer,undefined)
+  await entered.promise;assert.equal(f.writes(),0);gate.resolve();await running
+  assert.equal(handle.enqueueLive,original);assert.equal(handle.buffered.length,0)
+  assert.deepEqual(f.main.snapshotEvents(),f.dbs.get(f.main.id).readAll().events)
+ }finally{for(const h of f.handles)h.buffered.length=0;await f.close()}
+})
+test('回退提前取消：无切点后台释放整批待写并回卷内存，SQL既有历史不猜删',async()=>{
+ const f=await fixture()
+ try{
+  const handle=[...f.handles].find(h=>h.id===f.child.id),db=f.dbs.get(f.child.id),before=db.readAll()
+  f.child.append('unknown/buffered-worker',{});handle.enqueueLive(f.child.snapshotEvents().at(-1),()=>{})
+  let chat=await f.args.readChat();delete chat.rollbackPending
+  chat.timeline.participants={background:{sessionId:f.child.id,role:'background'}}
+  f.archive.prepare("DELETE FROM archive_head_fields WHERE key='rollbackPending'").run()
+  for(const d of f.dbs.values())d.setRollbackPending(false)
+  const args={...f.args,chat,readChat:async()=>structuredClone(chat),updateChat:async(_id,fn)=>{
+   chat=await fn(structuredClone(chat))
+   if(chat.rollbackPending)f.archive.prepare('INSERT OR REPLACE INTO archive_head_fields VALUES(?,?)').run('rollbackPending',JSON.stringify(chat.rollbackPending))
+   else f.archive.prepare("DELETE FROM archive_head_fields WHERE key='rollbackPending'").run()
+   return chat
+  }}
+  const result=await cleanRollback(args)
+  assert.equal(result.rolledBack.recovery.uncutParticipants[0].sessionId,f.child.id)
+  assert.equal(handle.buffered.length,0);assert.equal(handle.batchTimer,undefined)
+  assert.deepEqual(f.child.snapshotEvents(),before.events);assert.equal(handle.state.cursor,before.events.length)
+  assert.deepEqual(db.readAll(),before)
+  await handle.drainLive();assert.deepEqual(db.readAll(),before)
+ }finally{for(const h of f.handles)h.buffered.length=0;await f.close()}
+})
+
+test('回退提前取消：重叠暂停按最后调用恢复，native修复新事件正常入队落盘',async()=>{
+ const f=await fixture()
+ try{
+  const handle=[...f.handles].find(h=>h.id===f.main.id),original=handle.enqueueLive
+  const first=f.persistence.pauseRollbackBuffers(f.main.id),second=f.persistence.pauseRollbackBuffers(f.main.id)
+  first();handle.enqueueLive({seq:f.main.seq,type:'unknown/drop',time:1,data:{}},()=>{})
+  assert.equal(handle.buffered.length,0);second();assert.equal(handle.enqueueLive,original)
+  const args={...f.args,updateChat:async(_id,fn,metadata)=>{
+   if(metadata.source==='rollback.complete')return f.args.updateChat(_id,fn,metadata)
+   throw Error('不应生成修复失败回执')
+  },repairNative:async(_id,session)=>{
+   assert.equal(handle.enqueueLive,original)
+   session.append('session/end-seed',{});handle.enqueueLive(session.snapshotEvents().at(-1),()=>{})
+  }}
+  await cleanRollback(args)
+  assert.equal(f.dbs.get(f.main.id).cursor(),f.main.seq)
+  assert.deepEqual(f.dbs.get(f.main.id).readAll().events,f.main.snapshotEvents())
+  assert.equal(handle.buffered.length,0);assert.equal(handle.enqueueLive,original)
+ }finally{for(const h of f.handles)h.buffered.length=0;await f.close()}
 })
 
 test('完整回退屏障＋真实写句柄：身份与DELETE同事务，保37/不触发普通追加，重试无重复',async()=>{
