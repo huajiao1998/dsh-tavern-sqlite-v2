@@ -103,10 +103,10 @@ test('最新施工：完整接入及现场卸载', t => {
     assert.ok(installed.includes('chats: chatPersistence, runtimeGeneration,'))
     for (const method of Object.keys(SAVE_HANDLERS)) assert.equal(installed.includes("case '" + method + "':"), false, method)
     assert.ok(installed.includes('lastNativeTurn'))
-    // 维护目标总数快照：HOST 8 + SOURCE 14 + DOMAINS 44 + RETIRED_OWNED 3 = 69。
+    // 维护目标总数快照：HOST 8 + SOURCE 14 + DOMAINS 44 + RETIRED_OWNED 3 = 69；0.4.20起新增5项受管目标（含准备/模板接缝）=74。
     // 0.4.17新增sidebar及conversation-lifecycle，分别承载删除/新开/放弃消费者和attempt store。
     // 上游计算4项目标仍按能力门控生成，但属于受管目标；两项新客户端目标必须可正式卸载。
-    assert.equal(maintenanceTargets.length, 69)
+    assert.equal(maintenanceTargets.length, 74)
     assert.ok(maintenanceTargets.includes('tavern-plugin/src/client/features/sidebar.js'))
     assert.ok(maintenanceTargets.includes('tavern-plugin/src/client/runtime/conversation-lifecycle.js'))
 

@@ -208,18 +208,13 @@ test('候选链遗留正文与无窗口时显式返回undefined', async t => {
   await f.store.update(f.chatId, () => chat)
   const db = reader(f)
   assert.equal(await readCandidateInput(db, { chatId: f.chatId }, session(f.store)), undefined, 'body 已前台完成 ⇒ 完整分支')
-  // 作者口径备注（实测，见本文件顶部注释与探针结论）：作者首窗也是 readWindow(fields=candidateContextFields)
-  // 数组形状，store 侧数组点路径读 `timeline.operations` 走 @meta 抽取 ⇒ 该键**缺席**，
-  // 因此作者在这一路径下 legacy-body 条件恒为假、会返回窗口 chat 而不是 readChat。
-  // 本实现读真实 operations 子行 ⇒ 同一档上更严格地判为 legacy（对同一数据给出"更保守"的分流）。
-  // 两者的差别只存在于"作者漏检"的情形；下面显式记录该事实，不做掩盖。
+  // 该夹具（release-034-20261008）已不再暴露窗口形状：无 session header 时作者直接回退 readChat，
+  // 返回注入的 {kind:'chat'} 且没有 timeline。原先“作者窗口 timeline 缺 operations”的观察已无法从
+  // 本夹具取得，故不再断言；保留此事实以免把旧快照行为当成契约。
   const authorValue = await authorReader(f.store).read(f.chatId)
-  assert.notEqual(authorValue, undefined, '作者在该路径下返回窗口 chat（数组 fields 让 operations 缺席）')
-  assert.deepEqual(Object.keys(authorValue.timeline).sort(), ['branchId', 'participants', 'revision', 'schemaVersion'],
-    '作者窗口的 timeline 只有 @meta 点读到的标量键（operations 缺席）')
-  assert.equal(Object.hasOwn(authorValue.timeline, 'operations'), false, '作者的窗口形状里 operations 真的缺席')
-  assert.equal(Object.values(authorValue.timeline).some(v => v && v.kind === 'body' && v.status === 'foreground-completed'), false,
-    '⇒ 作者在该路径下 legacy-body 条件恒为假')
+  assert.notEqual(authorValue, undefined, '作者回退路径仍返回对象')
+  assert.deepEqual(Object.keys(authorValue), ['kind'], '无 session header 时作者回退 readChat')
+  assert.equal(authorValue.timeline, undefined, '回退结果不含 timeline，本闸不再断言作者窗口形状')
   // 窄读必须能看见该 operation 的 kind/status（否则门槛会漏判）。
   // 对照值用**真全组装**（readTimelineTree），而不是 rawWindow：后者在这种数组 fields 形状下
   // 本身就是残缺的 @meta-only 形状（见本文件顶部注释，实测 operations=undefined）。

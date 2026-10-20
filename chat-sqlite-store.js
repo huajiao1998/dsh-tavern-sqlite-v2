@@ -974,6 +974,57 @@ export function createChatSqliteStore(options = {}) {
     return copyJsonTree(narrowProjectChat(written.chat))
   }
 
+  // 发轮草稿已经持有私有头部基线；同revision无需再从SQL重读同一头部。
+  // 实际并发推进返回undefined，由chat-persistence原三方合并/历史刷新处理。
+  async function patchHeader(chatId, baseline, changes, metadata = {}, proposed) {
+    return serialize(chatId, () => {
+      assertActive()
+      assertWritableChat(chatId)
+      const db = handle(chatId, { create: false })
+      if (!db) return undefined
+      const expectedRevision = revisionOf(baseline)
+      if (Number(stmt(db, 'SELECT revision FROM archive_head WHERE id=1').get()?.revision) !== expectedRevision) return undefined
+      assertRollbackChatWritable(baseline, metadata)
+      metadata.assertCurrent?.()
+      if (changes.length === 0) return baseline
+      const messageCount = Number(stmt(db, 'SELECT COUNT(*) AS n FROM archive_messages').get()?.n || 0)
+      const before = {}
+      for (const { key } of stmt(db, 'SELECT key FROM archive_head_fields ORDER BY ord').all()) {
+        if (key === 'messages') before.messages = lengthOnlyPlaceholder(messageCount)
+        else if (Object.hasOwn(baseline, key)) before[key] = baseline[key]
+      }
+      Object.assign(before, baseline)
+      before.messages ||= lengthOnlyPlaceholder(messageCount)
+      const applied = [...changes, { op: 'set', path: [STORAGE_REVISION], value: expectedRevision + 1 },
+        ...(metadata.touchUpdatedAt === false ? [] : [{ op: 'set', path: ['updatedAt'], value: now() }])]
+      let next
+      if (proposed) {
+        next = {}
+        for (const key of Object.keys(before)) {
+          if (key === 'messages') next.messages = before.messages
+          else if (Object.hasOwn(proposed, key)) next[key] = proposed[key]
+        }
+        Object.assign(next, proposed, { [STORAGE_REVISION]: expectedRevision + 1 })
+        if (metadata.touchUpdatedAt !== false) next.updatedAt = applied.at(-1).value
+      } else next = applyJsonChangesShared(before, applied)
+      const undoOperation = recordRollbackBusinessWrites(before, next, metadata, copyJsonTree)
+      if (undoOperation) {
+        applied.push({ op: 'set', path: ['timeline', 'operations', undoOperation, 'businessBefore'], value: next.timeline.operations[undoOperation].businessBefore })
+        next.timeline.checkpoints?.forEach((cp, index) => {
+          if (Number(cp.turn) === Number(next.timeline.operations[undoOperation].turn)) applied.push({ op: 'set', path: ['timeline', 'checkpoints', index, 'businessBefore'], value: cp.businessBefore })
+        })
+      }
+      const written = writeChat(db, chatId, next, expectedRevision + 1, now(), applied,
+        { expectedRevision, headOnly: true, messageCount })
+      bumpGeneration(chatId)
+      projectionReads.invalidate(chatId, written.touched)
+      evictState(chatId)
+      setChangeFrames(chatId, rememberChanges(changeFrames.get(chatId), expectedRevision + 1, written.changes))
+      const { messages: _messages, ...head } = written.chat
+      return head
+    })
+  }
+
   // ---------- 写路径（行级，无帧） ----------
   async function patch(chatId, expectedRevision, changes, metadata = {}) {
     return serialize(chatId, async () => {
@@ -1367,6 +1418,15 @@ export function createChatSqliteStore(options = {}) {
     return projected
   }
   function narrowHeader(chatId, db, fields) {
+    // 白名单读直接投影SQL路径，不先解析未被请求的大头字段/操作前像。
+    if (Array.isArray(fields)) {
+      const row = stmt(db, 'SELECT revision FROM archive_head WHERE id=1').get()
+      if (!row) return null
+      const chat = projectionReads.header(db, chatId, fields)
+      return { chat: { ...chat, messages: [] },
+        messageCount: Number(stmt(db, 'SELECT COUNT(*) AS n FROM archive_messages').get()?.n || 0),
+        denseMessages: narrowDense(db, Number(row.revision)) }
+    }
     const rows = narrowHeaderRows(chatId, db)
     return rows === null ? null
       : { chat: copyJsonTree(narrowProjectChat(rows.chat, fields)), messageCount: rows.messageCount, denseMessages: narrowDense(db, rows.revision) }
@@ -2226,7 +2286,7 @@ export function createChatSqliteStore(options = {}) {
     variables.dispose()
   }
 
-  const api = Object.freeze({ displayRuntime, dbSaveArchivePath, dbSaveNewArchivePath, rollbackArchivePath: dbFile, detachedUpdate: true, readCurrentRollbackWorldbookRef, readRollbackWorldbook, readRollbackOperationSnapshot, readCurrentVariableSnapshot, read, readWindow, readOpeningWindow, readActivitySummary, readStoryInput, readCandidateInput, readSettlementInput, readTemplateWindowReader, setStatusBarPlacement, appendMessages, setMessageFloor, readHelperContext, readSessionState, readSceneImageState, readSettlementCheckpoint, readBackgroundConfig, readDisplayRuntimeState, readSlice, readSettlementBase, readChangedSlice, readChangedIndices, readViewDelta, patch, readRevision, update, version, remove, variables: variablesApi, dispose })
+  const api = Object.freeze({ displayRuntime, dbSaveArchivePath, dbSaveNewArchivePath, rollbackArchivePath: dbFile, detachedUpdate: true, readCurrentRollbackWorldbookRef, readRollbackWorldbook, readRollbackOperationSnapshot, readCurrentVariableSnapshot, read, readWindow, readOpeningWindow, readActivitySummary, readStoryInput, readCandidateInput, readSettlementInput, readTemplateWindowReader, setStatusBarPlacement, appendMessages, setMessageFloor, readHelperContext, readSessionState, readSceneImageState, readSettlementCheckpoint, readBackgroundConfig, readDisplayRuntimeState, readSlice, readSettlementBase, readChangedSlice, readChangedIndices, readViewDelta, patchHeader, patch, readRevision, update, version, remove, variables: variablesApi, dispose })
   bindAssembleProbe(api, assembleProbe)
   return api
 }

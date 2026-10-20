@@ -2,13 +2,20 @@
 function once(source,old,next){if(source.split(old).length!==2)throw Error('正文信号归属锚点缺失/不唯一：'+old.slice(0,90));return source.replace(old,next)}
 function persistBodyBeforePreparation(source){
  const marker='// [dsh-tavern-body-before-prepare:v1]'
- const foreground="      await savePreparation({source:'foreground.body-before-prepare'})\n      publishRollbackBodySignal(options,chat,foregroundOperation.operationId)"
+ const legacyForeground="      await savePreparation({source:'foreground.body-before-prepare'})\n      publishRollbackBodySignal(options,chat,foregroundOperation.operationId)"
+ // 发送接受已落running body时不再重存（captureSend已有同一前像）；未落库路径仍先提交失败基准。
+ const foreground="      if (!rollbackBodyAlreadyDurable) await savePreparation({source:'foreground.body-before-prepare'})\n      publishRollbackBodySignal(options,chat,foregroundOperation.operationId)"
  const compatibility="    await store.writeChat(chat,{source:'foreground.body-before-prepare'})\n    publishRollbackBodySignal(options,chat,begun.value.operationId)"
+ if(source.includes(legacyForeground))source=source.replace(legacyForeground,foreground)
  if(source.includes(marker)){
   if(!source.includes(foreground)||!source.includes(compatibility))throw Error('正文准备前基准提交接线不完整')
   return source
  }
  let next=once(source,'      publishRollbackBodySignal(options,chat,foregroundOperation.operationId)',foreground)
+ // 判定必须取body.begin之前的存档态，不能看刚加入草稿的operation。
+ const began='      const begun = timeline.apply({ chat: { ...chat, messages: [] }, intent: { kind: \'body.begin\', turn, userText'
+ const durable='      const rollbackBodyAlreadyDurable = Object.values(chat.timeline?.operations || {}).some(operation => operation?.kind === \'body\' && operation.status === \'running\' && Number(operation.turn) === turn)\n'
+ next=once(next,began,durable+began)
  next=once(next,'    publishRollbackBodySignal(options,chat,begun.value.operationId)',compatibility)
  return marker+'\n'+next
 }

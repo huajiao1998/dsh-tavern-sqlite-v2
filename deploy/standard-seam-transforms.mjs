@@ -50,6 +50,7 @@ import { viewAssemblerSource } from './view-assembler-source.mjs'
 import { applyWorkbenchTurnTransform } from './workbench-mode-transform.mjs'
 import { applyMvuRedeliveryTransform } from './mvu-redelivery-transform.mjs'
 import { needsPluginTaskSeams, applyPluginTaskHostTransform, applyPluginTaskApiTransform } from './plugin-task-quiescence-transform.mjs'
+import { applyPreparePersistenceTransform, applyPrepareTurnTransform, applyPrepareHostTransform, applyTimelineInspectPerformanceTransform, applyTemplateRefreshPerformanceTransform, applyTemplateArtifactPerformanceTransform, applyForegroundProjectionPerformanceTransform } from './prepare-performance-transform.mjs'
 
 
 export const STORAGE_PACKAGE_RESOLVER = `// [dsh-tavern-standard-owned:v1]
@@ -127,6 +128,20 @@ export function buildCore(appDir, sourceFiles) {
   write.set(DOMAIN + 'story-timeline.js', applySendAnchorTimelineTransform(applyRollbackBusinessTimelineTransform(applyRowTimelineTransform(text(appDir, DOMAIN + 'story-timeline.js')))))
   if (present(DOMAIN + 'round-anchor.js')) write.set(DOMAIN + 'round-anchor.js', applyInputOnlyAnchorResolverTransform(text(appDir, DOMAIN + 'round-anchor.js')))
   write.set(DOMAIN + 'turn-orchestration.js', applyRollbackBodyCommitTurnTransform(applyRollbackBodySignalTurnTransform(applyRollbackSharedBranchTurnTransform(applyTemplateRollbackInputOrderTransform(applySendAnchorTurnTransform(applyRollbackBusinessTurnTransform(text(appDir, DOMAIN + 'turn-orchestration.js')), { hasInputModule: present(DOMAIN + 'session-turn-input.js') }))))))
+  if (present(DOMAIN + 'chat-persistence.js')) {
+    write.set(DOMAIN + 'chat-persistence.js', applyPreparePersistenceTransform(text(appDir, DOMAIN + 'chat-persistence.js')))
+    write.set(DOMAIN + 'turn-orchestration.js', applyPrepareTurnTransform(write.get(DOMAIN + 'turn-orchestration.js')))
+    write.set('tavern-plugin/lib/index.js', applyPrepareHostTransform(write.get('tavern-plugin/lib/index.js')))
+    write.set(DOMAIN + 'story-timeline.js', applyTimelineInspectPerformanceTransform(write.get(DOMAIN + 'story-timeline.js')))
+    if (present(DOMAIN + 'foreground-worldbook.js')) write.set(DOMAIN + 'foreground-worldbook.js', applyForegroundProjectionPerformanceTransform(text(appDir, DOMAIN + 'foreground-worldbook.js')))
+    const templateEntry = 'tavern-plugin/lib/vendor/st-prompt-template/host-build/server-entry.js'
+    if (present(templateEntry)) {
+      write.set(templateEntry, applyTemplateRefreshPerformanceTransform(text(appDir, templateEntry)))
+      const artifact = 'tavern-plugin/lib/vendor/st-prompt-template/server-artifact/engine.js'
+      write.set(artifact, applyTemplateArtifactPerformanceTransform(text(appDir, artifact)))
+      // worker保留逐条权威读取及cursor/delta；旧自有缓存区块由现有装卸路径撤除。
+    }
+  }
   write.set(DOMAIN + 'settlement-jobs.js', applyRollbackBodyCommitJobsTransform(applySettlementQuiescenceTransform(text(appDir, DOMAIN + 'settlement-jobs.js'))))
   write.set(DOMAIN + 'foreground-handoff.js', applyRollbackBodyCommitHandoffTransform(applyRollbackBodySignalHandoffTransform(applyForegroundQuiescenceTransform(text(appDir, DOMAIN + 'foreground-handoff.js')))))
   write.set(DOMAIN + 'server-template-sync.js', applyTemplateQuiescenceTransform(text(appDir, DOMAIN + 'server-template-sync.js')))

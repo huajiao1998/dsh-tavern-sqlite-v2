@@ -3,9 +3,9 @@
 # 包内二入口（install.sh、deploy/install.sh，URL/SHA 保持占位，避免内嵌本次 tgz 摘要自引用）与外部发行件（地址与摘要只填一次）。
 # 源码树两入口不是本模板的产物，而是只读当前 manifest/bootstrap 的本地 wrapper；三者不得各写一份实现。
 set -eu
-RELEASE_URL='https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/download/v0.4.22/dsh-tavern-sqlite-v2-0.4.22.tgz'
-RELEASE_SHA256='13177908a15236035ccced844792f675b858a5c46001643af2c47d9b90c37020'
-VERSION='0.4.22'
+RELEASE_URL='https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/download/v0.4.23/dsh-tavern-sqlite-v2-0.4.23.tgz'
+RELEASE_SHA256='76bfe218b507adcd26d2cfe79ba0a072e8790bb533bc52a371b07f97009a3e20'
+VERSION='0.4.23'
 SCRIPT_DIR=''
 case "$0" in
   *install.sh) SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) ;;
