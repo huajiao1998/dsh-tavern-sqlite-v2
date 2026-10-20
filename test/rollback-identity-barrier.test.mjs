@@ -61,6 +61,35 @@ async function fixture(){
  const args={chat,requestedTurn:38,availability:()=>{throw Error('既有意图不得重新选择回退轮')},readChat:async()=>structuredClone(chat),updateChat:async(_id,fn,metadata)=>{assert.equal(metadata.source,'rollback.complete');await fn(chat);archive.prepare("DELETE FROM archive_head_fields WHERE key='rollbackPending'").run()},chats:{rollbackArchivePath:()=>archiveFile,readSlice:async()=>({chat:{}}),update:async()=>{}},sessions:{get:id=>agents.get(id),flush:async s=>{await persistence.drainOpenHandles(s.id)}},persistence,services:{projections,projectionCache:{write:async()=>{}},tokenMeterProvider:()=>({states:new WeakMap()}),rollbackSyncProvider:()=>rollbackSync},quiesce:async()=>{},sideCleanup:async()=>{if(fail)throw Error('原创收尾故障')},view:async c=>({turn:c.messages.at(-1).turn}),readCard:async()=>({})}
  return {root,Session,main,child,mainKeep,childKeep,archive,dbs,handles,persistence,args,agents,writes:()=>writes,setFault:v=>{fail=v},async close(){for(const h of handles){if(h.batchTimer!==undefined)clearTimeout(h.batchTimer);await h.close()}for(const id of dbs.keys()){rollbackBarrier.delete(id);rollbackSchedulingBarrier.delete(id)}archive.close();for(const db of dbs.values())db.close();rmSync(root,{recursive:true,force:true})}}
 }
+test('分叉继承前缀回退：SQL内存真实句柄同步计数，关闭重开可恢复且父会话不变',async()=>{
+ const f=await fixture()
+ try {
+  const parentEvents=structuredClone(f.main.snapshotEvents()),inherited=parentEvents.length
+  for(const keep of [inherited+1,f.mainKeep]) {
+   const id='seeded-'+keep,session=f.Session.create(id,parentEvents,{version:3,id,createdAt:Date.now(),parentSession:f.main.id,isSeeded:true},inherited)
+   session.append('turn/start',{turn:39});session.append('turn/end',{turn:39,reason:{kind:'completed'}})
+   const original=session.snapshotEvents(),header=structuredClone(session.header),file=path.join(f.root,id+'.db')
+   const db=new SqliteSessionDb(file);db.materialize(header,inherited,original);f.dbs.set(id,db)
+   const handle=new Handle(f.persistence,id,session.header,'write',{cursor:session.seq,materialized:true,inheritedEventCount:inherited},{release:async()=>{}})
+   f.handles.add(handle)
+   const meta=await f.persistence.truncateEvents(session.header,keep-1)
+   rewindSessionMemory(session,keep)
+   assert.equal(meta.inheritedEventCount,Math.min(inherited,keep))
+   assert.equal(session.inheritedEventCount,meta.inheritedEventCount)
+   assert.equal(handle.inheritedEventCount,meta.inheritedEventCount)
+   assert.deepEqual(session.snapshotEvents(),original.slice(0,keep))
+   await handle.close();f.handles.delete(handle);db.close();f.dbs.delete(id)
+   const reopened=new SqliteSessionDb(file)
+   try {
+    const stored=reopened.readAll()
+    const restored=f.Session.fromRestore(id,stored.events,stored.header,stored.inheritedEventCount,'detached')
+    assert.deepEqual(stored.header,header);assert.deepEqual(stored.events,original.slice(0,keep))
+    assert.equal(restored.inheritedEventCount,Math.min(inherited,keep))
+   }finally{reopened.close()}
+  }
+  assert.deepEqual(f.main.snapshotEvents(),parentEvents)
+ }finally{await f.close()}
+})
 test('审查修复排空回执：真实后端完成drain后才返回drained，排空失败不删库',async()=>{
  const f=await fixture()
  try{

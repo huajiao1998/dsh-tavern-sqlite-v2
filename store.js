@@ -277,7 +277,7 @@ export class SqliteSessionDb {
 				this.stmts.insertEvent.run(...rowToInsertArgs(rollbackIdentity))
 			}
 			if(retained)for(const event of retained)this.stmts.insertEvent.run(...rowToInsertArgs(event))
-			this.db.prepare("UPDATE sessions SET event_count = ?").run(this.cursor())
+			this.db.prepare("UPDATE sessions SET event_count = ?, inherited_event_count = MIN(inherited_event_count, ?)").run(this.cursor(), boundarySeq + 1)
 			const meta = this.readMeta()
 			this.db.exec("COMMIT")
 			return {...meta,...(rollbackIdentity?{rollbackIdentity}:{}),...(retained?{retainedEvents:retained}:{})}

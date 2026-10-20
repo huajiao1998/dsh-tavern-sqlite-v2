@@ -1064,6 +1064,67 @@ test('前台队列切点：真实SDK入队start领取消息经SQLite撤销后重
   }finally{await f.cleanup()}
  }
 })
+test('旧轮部分恢复：输入按轮裁尾及过期世界书清理，提示只移除实际处理项',async()=>{
+ for(const preparedTurn of [52,53]) {
+  const f=await fixture()
+  try {
+   await f.update(f.base.id,chat=>{
+    delete chat.timeline.operations.body.businessBefore;chat.timeline.checkpoints=[]
+    chat.runtimeInputs={'52':{source:'user',text:'保留52'},'53':{source:'user',text:'撤销53'},'54':{source:'user',text:'旧残留54'}}
+    chat.preparedWorldBook={turn:preparedTurn,diagnostics:[],contextChars:0}
+    chat.worldBookRandomState={turn:53};chat.posture='缺历史版本的当前姿态'
+    return chat
+   })
+   const chat=await f.read(),result=await cleanRollback({...f.args,chat,requestedTurn:53}),after=await f.read()
+   assert.equal(f.mainDb.cursor(),f.keep)
+   assert.deepEqual(after.runtimeInputs,{'52':{source:'user',text:'保留52'}})
+   assert.deepEqual(after.preparedWorldBook,preparedTurn===52?{turn:52,diagnostics:[],contextChars:0}:undefined)
+   assert.equal(after.lastWorldBookRecall,undefined);assert.equal(after.worldBookRandomState,undefined)
+   assert.equal(after.posture,'缺历史版本的当前姿态')
+   const unavailable=result.rolledBack.recovery.unavailableFields
+   for(const key of ['runtimeInputs','lastWorldBookRecall','worldBookRandomState'])assert.equal(unavailable.includes(key),false,key+'已处理不能继续报缺历史值')
+   assert.equal(unavailable.includes('preparedWorldBook'),preparedTurn===52,'未处理的更早快照不能冒称已恢复')
+   assert.ok(unavailable.includes('posture'),'确实无旧版的业务状态仍保留提示')
+  }finally{await f.cleanup()}
+ }
+})
+test('前台取消输入：真实SDK取消后继不阻挡纯尾，替换后仍待处理则保留',async()=>{
+ const {ReactLoopInbox,inboxProjectionDefinition}=await nativeInboxSdk()
+ for(const replaced of [false,true]) {
+  let inbox
+  const f=await fixture(false,false,{nativeSend:async(session,projections)=>{
+   projections.register(inboxProjectionDefinition);inbox=new ReactLoopInbox(projections,session,{emit(){}})
+   const message={id:'owned53',role:'user',content:[{type:'text',text:'本轮输入'}],source:{kind:'user'}}
+   inbox.append('next-turn',message)
+   session.append('turn/start',{turn:53})
+   for(const input of inbox.claim('next-turn',53))session.append('user/message',input,{surfaceOp:'append'})
+   session.append('turn/end',{turn:53,reason:{kind:'completed'}})
+   inbox.append('next-turn',{...message,id:'later-input'})
+   session.append('session/end-seed',{})
+   if(replaced)inbox.replace('later-input',{...message,id:'later-replaced'})
+   else inbox.remove('later-input')
+  }})
+  try {
+   f.agents.get(f.session.id).inbox=inbox
+   const chat=await f.read(),events=f.mainDb.readAll().events,{latestSendTarget}=await import('../lib/latest-send.js')
+   const run=()=>cleanRollback({...f.args,chat,requestedTurn:latestSendTarget(chat,{events:f.session.snapshotEvents()})})
+   if(replaced) {
+    await assert.rejects(run(),/独立输入/)
+    assert.deepEqual(f.mainDb.readAll().events,events)
+    assert.deepEqual(inbox.nextTurn.map(message=>message.id),['later-replaced'])
+   } else {
+    const receipt=await run()
+    assert.equal(receipt.rolledBack.hiddenTurn,53)
+    assert.equal(f.mainDb.cursor(),f.keep)
+    assert.deepEqual(f.session.snapshotEvents(),events.slice(0,f.keep))
+    assert.deepEqual(inbox.current(),{'next-turn':[],'next-step':[]})
+    const reopened=new SqliteSessionDb(path.join(f.root,'session.db'))
+    try {assert.deepEqual(reopened.readAll().events.reduce((state,event)=>inboxProjectionDefinition.apply(state,event),inboxProjectionDefinition.init()),inboxProjectionDefinition.init())}finally{reopened.close()}
+    assert.deepEqual((await f.read()).messages,f.base.messages)
+   }
+  }finally{await f.cleanup()}
+ }
+})
 test('前台队列切点：独立后继输入与跨旧轮入队均零删库拒绝',async()=>{
  const {ReactLoopInbox,inboxProjectionDefinition}=await nativeInboxSdk()
  for(const overlap of [false,true]) {

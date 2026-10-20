@@ -383,7 +383,7 @@ export default class TavernSessionPersistence extends JsonlSessionPersistence {
 		const session = this.store.openExisting(header.id)
 		if (session === undefined) throw new SessionPersistenceNotFoundError(header.id)
 		const meta = session.truncateFrom(boundarySeq, identity,retainedEvents)
-		this.rewindOpenHandles(header.id, meta?.eventCount ?? 0)
+		this.rewindOpenHandles(header.id, meta?.eventCount ?? 0, meta?.inheritedEventCount)
 		return {...meta,drained:true}
 	}
 
@@ -564,8 +564,8 @@ export default class TavernSessionPersistence extends JsonlSessionPersistence {
 	}
 
 	/** 把该会话所有活动写句柄的游标/观测长度回卷到截断后的长度。 */
-	rewindOpenHandles(id, eventCount) {
-		rewindRollbackHandles(this.tracker?.openHandles, id, eventCount)
+	rewindOpenHandles(id, eventCount, inheritedEventCount) {
+		rewindRollbackHandles(this.tracker?.openHandles, id, eventCount, inheritedEventCount)
 	}
 }
 
