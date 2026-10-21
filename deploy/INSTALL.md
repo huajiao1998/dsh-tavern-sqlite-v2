@@ -19,7 +19,7 @@ Linux 安装只需定位目标、命中必需接缝、停止原运行实例后�
 
 ## 支持范围
 
-- **适配酒馆版本以对应 [Release 下载页面](https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases)更新说明为准。** 本地交付版本 **0.4.15：适配上游 main `a390af170cfe5ed3e9213a2801cbcce321e2008b`（简称 `a390af17`，Tavern **2.7.0**；尚未公开发布）**。
+- **适配酒馆版本以对应交付说明为准；公开版本见 [Release 下载页面](https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases)。** 本地交付版本 **0.4.24：延续Tavern stable 2.7.0 / `9603eca4f854b55980b632a691a0d8aec900a49a`、DSH0.1.5-rc.2代/peer <0.2.0适配；正文接缝另在既有 `a390af17` 程序副本精确验证。本轮仅部署188试用，未发布GitHub**。
 - **其他未适配版本使用过程中可能出现运行错误。** 安装接入检查通过不代表运行期功能兼容；请更新到对应 Release 标注的适配酒馆版本，或自行适配本插件后使用。版本标注是兼容说明，不新增作者SHA、签名或纯净源码准入。
 
 - 支持 macOS、Linux、WSL2 CLI 与 Windows（桌面版 Electron、原生 Windows CLI）。运行能力和适配范围以 Release 说明为准；Linux 装卸不检查 DSH / boot 版本、Node VM 旗标或 SQLite / zstd 能力。

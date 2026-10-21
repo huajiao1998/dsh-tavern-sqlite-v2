@@ -18,7 +18,11 @@ const METHOD=`waitForTavernRollbackSync(receipt) {
                     let settled = false;
                     const complete = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); waiters.delete(finish); if (error) reject(error); else resolve(value); };
                     const finish = () => { const task = check(); if (!task) return; waiters.delete(finish); task.then(value => complete(null, value), error => complete(error)); };
-                    const timer = setTimeout(() => complete(new Error("回退已落盘，但同连接同步未到达或未完成；请重开页面")), 8000);
+                    const timer = setTimeout(() => {
+                        const known = this.tavernRollbackReceipts?.get(receipt.chatId);
+                        if (known?.id === receipt.id && known.revision === receipt.revision && !known.done) known.done = false;
+                        complete(new Error("回退已落盘，但同连接同步未到达或未完成；请重开页面"));
+                    }, 8000);
                     waiters.add(finish); finish();
                 });
             }
@@ -29,6 +33,14 @@ const METHOD=`waitForTavernRollbackSync(receipt) {
                 if (known && receipt.revision < known.revision) return Promise.resolve(false);
                 if (known && receipt.revision === known.revision) {
                     if (known.id !== receipt.id) throw new Error("回退同步版本身份冲突");
+                    if (known.done !== false) return known.task;
+                    // 基线已安装；同回执重试只重读消息，不把旧控制值盖回后来状态。
+                    let task = Promise.all(receipt.sessions.map(row => this.sessions.get(row.sessionId)?.resync())).then(() => seen.get(receipt.chatId) === known);
+                    try { this.tavernRollbackNotify?.(receipt); } catch (error) { task = task.then(() => { throw error; }); }
+                    known.done = undefined;
+                    const complete = task.then(value => { if (known.task === complete) known.done = true; return value; }, error => { if (known.task === complete) known.done = false; throw error; });
+                    known.task = complete;
+                    for (const notify of this.tavernRollbackWaiters ?? []) notify();
                     return known.task;
                 }
                 const ids = new Set();
@@ -68,6 +80,8 @@ const METHOD=`waitForTavernRollbackSync(receipt) {
                 this.notifier.markDirty();
                 record.task = Promise.all(tasks).then(() => seen.get(receipt.chatId) === record);
                 try { this.tavernRollbackNotify?.(receipt); } catch (error) { record.task = record.task.then(() => { throw error; }); }
+                const complete = record.task.then(value => { if (record.task === complete) record.done = true; return value; }, error => { if (record.task === complete) record.done = false; throw error; });
+                record.task = complete;
                 for (const notify of this.tavernRollbackWaiters ?? []) notify();
                 return record.task;
             }

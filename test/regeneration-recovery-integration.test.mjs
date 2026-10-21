@@ -1,11 +1,11 @@
-// 正文物理采用的恢复路径：complete 先落 compact completion 再 publish；广播故障只影响 publish，
-// 恢复按 revision/branch/eventCount 相符补发，零 Chat 写、零 SQL 重写、不重新生成。
+// 正文物理采用的恢复路径：先完成采用与结算，再发布当前状态；广播故障保留已采用正文。
+// 恢复仅待结算时接续原周期，已完成则只补当前同步，不重写SQL或重新生成。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { fixture } from './regeneration-rollback-integration.test.mjs'
 
 const CHAT_ID = 'chat-regen-rollback-fixture'
-const COMPLETION_KEYS = ['version', 'id', 'turn', 'sessionId', 'revision', 'branchId', 'eventCount']
+const COMPLETION_KEYS = ['version', 'id', 'turn', 'sessionId', 'revision', 'branchId', 'eventCount', 'attemptRange']
 const texts = value => { const out = []; const walk = v => { if (typeof v === 'string') out.push(v); else if (Array.isArray(v)) v.forEach(walk); else if (v && typeof v === 'object') Object.values(v).forEach(walk) }; walk(value); return out }
 const rowsOf = db => db.stmts.selectEvents.all().map(row => ({ seq: Number(row.seq), type: row.type, data: JSON.parse(row.data_json) }))
 
@@ -22,7 +22,10 @@ test('正文采用恢复：广播故障保留新正文且恢复不再生成、�
     assert.equal(adopted.regenRecovery, undefined, 'complete 已在广播前删除重生成记录')
     assert.equal(adopted.regenInProgress, undefined, 'complete 已在广播前清掉进行中标记')
     const completion = adopted.regenerationCompletion
-    assert.deepEqual(Object.keys(completion ?? {}).sort(), [...COMPLETION_KEYS].sort(), 'completion 只能有 version/id/turn/sessionId/revision/branchId/eventCount')
+    assert.deepEqual(Object.keys(completion ?? {}).sort(), [...COMPLETION_KEYS].sort(), 'completion 只含小型完成坐标与连续重生成所用attemptRange')
+    assert.deepEqual(Object.keys(completion.attemptRange).sort(), ['end', 'start'])
+    assert.ok(Number.isSafeInteger(completion.attemptRange.start) && completion.attemptRange.start < completion.attemptRange.end)
+    assert.equal(completion.attemptRange.end, f.session.seq, '范围消费真实SQL采用后的坐标，不携带旧正文副本')
     assert.equal(completion.version, 1)
     assert.equal(completion.turn, 53)
     assert.equal(texts(completion).includes('原53'), false, 'completion 不得携带正文')

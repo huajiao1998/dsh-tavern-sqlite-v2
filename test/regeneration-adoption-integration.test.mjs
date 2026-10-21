@@ -23,7 +23,7 @@ test('正文物理采用：原用户保位、连续重生成、真实Session SQL
   assert.deepEqual(f.mainDb.readAll().events,events);assert.equal(f.mainDb.cursor(),events.length)
   assert.equal(f.agent.phase.lastTurn,53)
   for(const h of f.handles)if(h.id===f.session.id)assert.equal(h.state.cursor,events.length)
-  assert.equal(f.syncFrames.length,3)
+  assert.equal(f.syncFrames.length,2)
   // physical 采用：新 assistant 必须保留同 mvuBaseline、mvu.pending 为真，且不继承旧 receipt/delivery。
    const lastMessages = after.messages.filter(message => message.role === 'assistant')
   const lastAssistant = lastMessages.at(-1)

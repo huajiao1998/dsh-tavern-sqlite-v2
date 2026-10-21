@@ -9,6 +9,7 @@ import path from 'node:path'
 import {applyRollbackSyncHandshakeTransform} from '../deploy/rollback-sync-install-transform.mjs'
 import {applyRollbackSyncClientTransform} from '../deploy/rollback-sync-client-transform.mjs'
 import {installRollbackSync,ROLLBACK_SYNC_KEY} from '../lib/rollback-sync.js'
+import {applyRegenerationSyncClientTransform} from '../deploy/regeneration-sync-client-transform.mjs'
 const raw=readFileSync(new URL('../../../tmp/diag-original-open-20261002/api-session-client.js',import.meta.url),'utf8')
 const gatewayRaw=readFileSync(new URL('../../../tmp/restore-original-20261002/current-api-gateway-client.js',import.meta.url),'utf8')
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b});return {promise,resolve,reject}}
@@ -101,12 +102,12 @@ test('实码resync和网关mux：只cancel/open逻辑流、物理close=0，旧fo
  await session.events.dispose()
 })
 
-function nativeHarness({hold=new Set(),hasMore=false}={}){
+function nativeHarness({hold=new Set(),hasMore=false,onOpen=()=>{}}={}){
  const mux=new gateway.Mux(),sent=[],pending=[];let physicalClose=0,seq=8,opens=0,pageGate
  const socket={readyState:1,send:payload=>sent.push(JSON.parse(payload)),close:()=>physicalClose++};mux.socket=socket;mux.running=true
  const remote={$stream:options=>new gateway.RemoteStream(connection,options),session:{page:()=>pageGate.promise,follow(request,signal){
   const inner=mux.open('session.follow',request,signal)
-  return {async *[Symbol.asyncIterator](){const first=inner.next();await settle();const open=sent.filter(frame=>frame.type==='open').at(-1),index=++opens
+  return {async *[Symbol.asyncIterator](){const first=inner.next();await settle();const open=sent.filter(frame=>frame.type==='open').at(-1),index=++opens;onOpen(index)
    const publish=()=>mux.streams.get(open.streamId)?.push({type:'item',value:{type:'snapshot',cursor:seq,records:[{event:{seq,type:'session/end-seed',time:1,data:{}}}],hasMore,projections:{asOfSeq:seq,values:{same:'current'}},assistantStream:{revision:0}}})
    if(hold.has(index))pending.push(publish);else publish()
    yield (await first).value;for await(const frame of inner)yield frame
@@ -146,6 +147,49 @@ test('同步失败/8秒超时硬拒，通知错误不吞waiter；更晚回退不
  const stuck=new timed.Manager({});stuck.sessions.set('main-fixture',{replaceControl:()=>{},handleRunning:()=>{},handleBlank:()=>{},resync:()=>new Promise(()=>{})});stuck.applyTavernRollbackSync(r);const historyTimeout=stuck.waitForTavernRollbackSync(r);timer();await assert.rejects(historyTimeout,/未完成/)
  const fresh=new api.Manager({});await fresh.applyTavernRollbackSync(receipt(8,'rollback-8'));assert.equal(await fresh.waitForTavernRollbackSync(r),false)
 })
+test('重生成同步修复：同一回执失败后可重试，成功后不再重复resync',async()=>{
+ const page=new api.Manager({}),r=receipt();let attempts=0
+ page.sessions.set('main-fixture',{replaceControl:()=>{},handleRunning:()=>{},handleBlank:()=>{},resync:async()=>{if(++attempts===1)throw Error('history failed')}})
+ await assert.rejects(page.applyTavernRollbackSync(r),/history failed/)
+ await page.applyTavernRollbackSync(r)
+ assert.equal(await page.waitForTavernRollbackSync(r),true)
+ await page.applyTavernRollbackSync(r);assert.equal(attempts,2)
+})
+
+test('重生成重试：失败旧回执只重读消息，不覆盖后来投影队列任务运行态',async()=>{
+ const page=new api.Manager({}),r=receipt();let attempts=0,controls=0,running=true
+ page.sessions.set('main-fixture',{replaceControl:()=>{controls++},handleRunning:value=>{running=value},handleBlank:()=>{},resync:async()=>{if(++attempts===1)throw Error('history failed')}})
+ await assert.rejects(page.applyTavernRollbackSync(r),/history failed/)
+ const queues=[{id:'new-queue'}],jobs=[{id:'new-job'}]
+ page.queues.set('main-fixture',queues);page.jobsBySession.set('main-fixture',jobs);running=true
+ page.projectionStore('main-fixture').apply('same','后来的值',8)
+ const generation=page.projectionStore('main-fixture').tavernRollbackGeneration
+ await page.applyTavernRollbackSync(r)
+ assert.equal(attempts,2);assert.equal(controls,1);assert.equal(running,true)
+ assert.equal(page.queues.get('main-fixture'),queues);assert.equal(page.jobsBySession.get('main-fixture'),jobs)
+ assert.equal(page.projectionStore('main-fixture').get('same'),'后来的值')
+ assert.equal(page.projectionStore('main-fixture').tavernRollbackGeneration,generation)
+})
+
+test('重生成重试：实际按钮等待8秒超时，挂起重读后重试能重新打开同连接',async()=>{
+ const opened=deferred(),h=nativeHarness({hold:new Set([2]),onOpen:index=>{if(index===2)opened.resolve()}});await h.session.open()
+ let timer,cleared=0
+ const timed=load(source,{'@deepseek-ai/cordis':{Context:{filter:Symbol('filter')}},'@deepseek-ai/dsh-api-gateway/client':gateway,'@deepseek-ai/dsh-client-store':store},'exports.Manager=SessionManager;', {setTimeout:(fn,delay)=>{assert.equal(delay,8000);timer=fn;return 1},clearTimeout:()=>cleared++})
+ const page=new timed.Manager({});page.sessions.set('main-fixture',h.session)
+ const author=readFileSync(new URL('../../../tmp/upstream-a390af17-adapt-20261016/author-fixture/src/dsh-tavern-a390af170cfe5ed3e9213a2801cbcce321e2008b/tavern-plugin/src/client/features/play-controls.js',import.meta.url),'utf8')
+ const client=applyRegenerationSyncClientTransform(author),start=client.indexOf('async function submitBodyRegeneration('),end=client.indexOf('// A failed turn',start)
+ const flags=[],tasks=[],panel={},r=receipt();let clear=0
+ const submit=new Function('rpc','setCandidatePanel',client.slice(start,end)+';return submitBodyRegeneration;')(async(_method,args)=>{flags.push(args.syncOnly);const task=page.applyTavernRollbackSync(r);tasks.push(task);void task.catch(()=>{});return {view:{adopted:{sync:r}}}},()=>clear++)
+ const sessions={waitForTavernRollbackSync:value=>page.waitForTavernRollbackSync(value)}
+ try{
+  const first=submit('main-fixture',panel,'',sessions),failed=assert.rejects(first,/页面同步失败/)
+  await opened.promise;assert.equal(h.opens(),2);assert.equal(typeof timer,'function');timer();await failed
+  await submit('main-fixture',panel,'',sessions)
+  await Promise.all(tasks)
+  assert.deepEqual(flags,[false,true]);assert.equal(clear,1);assert.equal(h.opens(),3);assert.equal(h.closes(),0);assert.equal(cleared,2)
+ }finally{await h.session.events?.dispose()}
+})
+
 test('旧后台catalog RPC晚到不复活高代目录，自动再读最新身份和状态',async()=>{
  const gate=deferred();let reads=0
  const fresh={entries:[{kind:'child',id:'background-fixture',activity:'inactive'}],parentAvailable:true}

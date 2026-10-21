@@ -45,8 +45,8 @@ const {rollbackAvailability}=await import(new URL('rollback-surface.js',AUTHOR).
 const {sessionEvents}=await import(new URL('session-events.js',AUTHOR).href)
 configureRollbackCleanup({sessionEvents})
 
-async function loadRealModules(root,physical=false){
- const AUTHOR=physical?new URL('../../../tmp/regeneration-physical-fixture-20261011/',import.meta.url):new URL('../../../tmp/upstream-a2008-review-20261010/author-tree/dsh-tavern-a2008bf932031616fd80ec265cbdba5d0b559312/tavern-plugin/lib/domain/',import.meta.url)
+async function loadRealModules(root,physical=false,currentAuthor=false){
+ const AUTHOR=currentAuthor?new URL('../../../tmp/upstream-a390af17-adapt-20261016/author-fixture/src/dsh-tavern-a390af170cfe5ed3e9213a2801cbcce321e2008b/tavern-plugin/lib/domain/',import.meta.url):physical?new URL('../../../tmp/regeneration-physical-fixture-20261011/',import.meta.url):new URL('../../../tmp/upstream-a2008-review-20261010/author-tree/dsh-tavern-a2008bf932031616fd80ec265cbdba5d0b559312/tavern-plugin/lib/domain/',import.meta.url)
  const rewrite=source=>source.replace(/from '(.+?)'/g,(all,spec)=>spec.startsWith('./')?'from '+JSON.stringify(new URL(spec,AUTHOR).href):all)
  const business=new URL('../lib/rollback-business-state.js',import.meta.url).href
  const clean=new URL('../lib/clean-rollback.js',import.meta.url).href
@@ -69,9 +69,9 @@ async function loadRealModules(root,physical=false){
  return {timeline,history,persistence,Session:sessionModule.Session}
 }
 const book=turn=>({version:1,document:{entries:[{uid:0,content:'原创世界书'+turn}]}})
-export async function fixture({withContext=false,physical=false}={}){
+export async function fixture({withContext=false,physical=false,settle,contextMessages=[],retireCurrentFrame=true,currentAuthor=false,originalFrame=false}={}){
  const root=mkdtempSync(path.join(os.tmpdir(),'tavern-regen-rollback-'))
- const {timeline,history,persistence,Session}=await loadRealModules(root,physical)
+ const {timeline,history,persistence,Session}=await loadRealModules(root,physical,currentAuthor)
  const store=createChatSqliteStore({dataRoot:root,helpers})
  const chatPersistence=persistence.createChatPersistence({store})
  const storyTimeline=timeline.createStoryTimeline({readRollbackWorldbook:store.readRollbackWorldbook,readRollbackWorldbookRef:store.readCurrentRollbackWorldbookRef,readRollbackOperationSnapshot:store.readRollbackOperationSnapshot})
@@ -82,18 +82,22 @@ export async function fixture({withContext=false,physical=false}={}){
  const frameAdapter=createForegroundFrameSessionAdapter()
  const appendTurn=(subject,turn,text,source={kind:'user'})=>{
   subject.append('turn/start',{turn})
+   subject.append('step/start',{turn,step:1})
   if (withContext && subject===session && source.plugin==='dsh-tavern-regen') {
    const frame={kind:'foreground',frameId:'frame-'+turn,chatId:CHAT_ID,turn,operationId:'body-fixture-'+turn,branchId:'branch-regen',basedOnRevision:turn-1,source:{},contributions:[{slot:'playerInput',text:'自有请求上下文'+turn,source:{kind:'fixture'}}]}
    const adapted=frameAdapter.append({session:subject,messages:[],historyMessages:[],step:1,frame})
    assert.equal(adapted.receipt.appended,true)
    for (const message of adapted.messages)subject.append('user/message',message,{surfaceOp:'append'})
-   // 按真作者pre-step退役上一请求frame；当前新frame由本次请求消费后也沿同函数退役。
+   // 原作者pre-step只退役旧turn；注入累计回归保留当前frame，旧用例默认输入不变。
    retireForegroundFrames(subject,{keepTurn:turn})
-   retireForegroundFrames(subject)
+   if(retireCurrentFrame)retireForegroundFrames(subject)
   }
   subject.append('user/message',{id:subject.id+'-u'+turn,role:'user',content:[{type:'text',text}],source},{surfaceOp:'append'})
+  if(originalFrame&&subject===session&&turn===53)subject.append('user/message',{id:'original-frame',role:'user',content:[{type:'text',text:'原轮自有请求上下文'}],source:{kind:'plugin',plugin:'dsh-tavern',form:'foreground-frame',trace:{chatId:CHAT_ID,turn:53,frameId:'original-frame'}}},{surfaceOp:'append'})
+   if(subject===session)for(const [index,context] of contextMessages.entries())subject.append('user/message',{...structuredClone(context),id:'context-'+turn+'-'+index},{surfaceOp:'append'})
   subject.append('assistant/message',{turn,step:1,message:{id:subject.id+'-a'+turn,role:'assistant',content:[{type:'text',text}],source:modelSource},stream:[]},{surfaceOp:'append'})
-  subject.append('turn/end',{turn,reason:{kind:'completed'}})
+  subject.append('step/end',{turn,step:1})
+   subject.append('turn/end',{turn,reason:{kind:'completed'}})
  }
  appendTurn(session,52,'原52')
  const prefix=structuredClone(session.snapshotEvents()),workerPrefix=structuredClone(background.snapshotEvents())
@@ -155,7 +159,7 @@ export async function fixture({withContext=false,physical=false}={}){
  agent.whenIdle=async()=>{await followupTask}
  const sessions={get:id=>agents.get(id),getSession:id=>agents.get(id)?.session,flush}
  const chats={read,readState:read,forSession:read,readCard:async()=>({name:'原创卡'}),readRevision:store.readRevision,write:chatPersistence.write,update,readSlice:store.readSlice,rollbackArchivePath:store.rollbackArchivePath,readRollbackWorldbook:store.readRollbackWorldbook,readRollbackOperationSnapshot:store.readRollbackOperationSnapshot}
- const roundHistory=history.createRoundHistory({chats,sessions,scripts:{read:async()=>undefined,continuity:{}},timeline:storyTimeline,queueSettlement:async()=>{},cancelSettlement:async()=>{},present:async value=>value,
+ const roundHistory=history.createRoundHistory({chats,sessions,scripts:{read:async()=>undefined,continuity:{}},timeline:storyTimeline,queueSettlement:async()=>settle?.({read,update,session}),cancelSettlement:async()=>{},present:async value=>value,
   ...(physical?{persistenceProvider:()=>persistencePort,projectionsProvider:()=>projections,projectionCacheProvider:()=>({write:async()=>{}}),tokenMeterProvider:()=>({states:new WeakMap()}),rollbackSyncProvider:()=>rollbackSync,quiesceRollback:async()=>{},cleanupRollbackSides:async()=>{}}:{}),
   sessionPatch:{status:'ready',serverReady:true,replacementAllowed:()=>true,blockReason:()=>'',restoreStoredSession:stored=>Session.fromRestore(stored.header.id,structuredClone(stored.events),structuredClone(stored.header),stored.inheritedEventCount,'detached')}})
  const args=()=>({chat:undefined,readChat:read,updateChat:update,chats,sessions,persistence:persistencePort,availability:rollbackAvailability,services:{projections,projectionCache:{write:async()=>{}},tokenMeterProvider:()=>({states:new WeakMap()}),rollbackSyncProvider:()=>rollbackSync},quiesce:async()=>{},sideCleanup:async()=>{},view:async value=>({turn:value.messages.at(-1)?.turn??0}),readCard:async()=>({})})
@@ -170,7 +174,7 @@ export async function fixture({withContext=false,physical=false}={}){
   const db=new DatabaseSync(store.rollbackArchivePath(CHAT_ID))
   try{assert.equal(db.prepare("SELECT count(*) n FROM archive_messages WHERE json_extract(message_json,'$.turn')>=53").get().n,0)}finally{db.close()}
   assert.equal(rollbackBarrier.has(SESSION_ID),false);assert.equal(rollbackSchedulingBarrier.has(SESSION_ID),false)
-  assert.equal(syncFrames.length,physical?4:1);assert.equal(syncFrames.at(-1).value.sessions.length,2)
+  assert.equal(syncFrames.length,physical?3:1);assert.equal(syncFrames.at(-1).value.sessions.length,2)
  }
  return {root,read,update,session,background,mainDb,workerDb,roundHistory,args,commitTurn,assertRolled,agent,handles,syncFrames,prefix,workerPrefix,faults,
   persistencePort,chats,sessions,projections,storyTimeline,Session,createHistory:history.createRoundHistory,persistence,rollbackSync:()=>rollbackSync,

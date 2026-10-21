@@ -8,6 +8,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createRegenerationAdoption } from '../lib/regeneration-adoption.js'
+import { planRegenerationEvents } from '../lib/regeneration-events.js'
 import { latestSendTarget } from '../lib/latest-send.js'
 import { buildCore } from '../deploy/standard-seam-transforms.mjs'
 import path from 'node:path'
@@ -74,15 +75,22 @@ test('重生成采用：synthetic body 物理删除、运行条目归原turn且 
   // ③ 非 body 运行条目归原 turn；synthetic 轮 checkpoint 删除。
   assert.equal(next.timeline.operations.agentOp.turn, 55, '非 body 运行条目必须归原 turn')
   assert.deepEqual(next.timeline.checkpoints.filter(cp => Number(cp.turn) === 58), [], 'synthetic 轮 checkpoint 必须删除')
-  // ④ 采用后的正文锚点必须是 plan 实际映射坐标；映射不指向原轮时必须删掉（不留假锚点）。
+  // ④ 锚点由真实SQL计划映射，采用直接承接；不再用手造错轮计划要求下游重复审查。
   assert.deepEqual(next.messages.at(-1).nativeAnchor, { turn: 55, input: 33, reply: 44 }, 'nativeAnchor 必须用 plan 实际映射字段')
   assert.equal(next.messages.at(-1).turn, 55, '采用正文必须归原轮')
-  const mismatched = adoptionTool.adopted(regenerationChat(), {
-    oldTurn: 55, syntheticTurn: 58,
-    generatedAssistant: regenerationChat().messages.at(-1), originalAssistant: regenerationChat().messages[1],
-    adoption: { ...adoption, anchor: { turn: 58, input: 1, reply: 2 } },
-  })
-  assert.equal(mismatched.messages.at(-1).nativeAnchor, undefined, 'plan 锚点不指向原轮时必须删除（不留指向别代的假锚点）')
+  const planned = planRegenerationEvents({ oldTurn: 55, syntheticTurn: 58, eventStart: 3, oldAssistantSeq: 2, events: [
+    { seq: 0, type: 'turn/start', data: { turn: 55 } },
+    { seq: 1, type: 'user/message', data: { id: 'u55', role: 'user', content: [], source: { kind: 'user' } } },
+    { seq: 2, type: 'assistant/message', data: { turn: 55, step: 1, message: { id: 'a55' } } },
+    { seq: 3, type: 'turn/start', data: { turn: 58 } },
+    { seq: 4, type: 'assistant/message', data: { turn: 58, step: 1, message: { id: 'a58' } } }
+  ] })
+  const mapped = adoptionTool.adopted(regenerationChat(), { oldTurn: 55, syntheticTurn: 58,
+    generatedAssistant: regenerationChat().messages.at(-1), originalAssistant: regenerationChat().messages[1], adoption: planned })
+  assert.deepEqual(mapped.messages.at(-1).nativeAnchor, { turn: 55, input: 1, reply: 2 }, '真实计划与采用不能留下临时轮锚点')
+  const noAnchor = adoptionTool.adopted(regenerationChat(), { oldTurn: 55, syntheticTurn: 58,
+    generatedAssistant: regenerationChat().messages.at(-1), originalAssistant: regenerationChat().messages[1], adoption: { ...adoption, anchor: null } })
+  assert.equal(noAnchor.messages.at(-1).nativeAnchor, undefined, '计划无正文锚点时不得继承临时轮旧锚点')
   // ⑤ 顺序执行同链上的真实 retainRegenerationRollbackState：只重建 checkpoints/sessionCuts，绝不回填 synthetic body。
   // 从**完整 buildCore 产物**取该文件的施缝文本（单独对该函数所在文件重施前置接缝会因前置变换已改建而失配）。
   const seamedSources = new Map()
